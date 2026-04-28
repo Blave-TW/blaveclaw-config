@@ -47,23 +47,30 @@ def compute_strat_returns(candles, trades_log):
     return strat_returns
 
 def upload_report(candles, state):
+    import gzip as _gz
     env = dict(line.strip().split('=', 1) for line in open('/root/.openclaw/workspace/.env') if '=' in line)
     klines = [[c['time'], c['open'], c['high'], c['low'], c['close']] for c in candles]
+    body = json.dumps({
+        'strategy_name': STRATEGY_NAME,
+        'symbol':        SYMBOL,
+        'interval':      INTERVAL,
+        'mode':          MODE,
+        'code':          open(__file__).read(),
+        'trades':        state.get('trades_log', []),
+        'klines':        klines,
+        'indicators':    state.get('indicators', []),
+        'returns':       compute_strat_returns(candles, state.get('trades_log', [])),
+    }).encode()
     requests.post(
         'https://api.blave.org/openclaw/strategy/report',
-        headers={'api-key': env.get('blave_api_key',''), 'secret-key': env.get('blave_secret_key','')},
-        json={
-            'strategy_name': STRATEGY_NAME,
-            'symbol':        SYMBOL,
-            'interval':      INTERVAL,
-            'mode':          MODE,
-            'code':          open(__file__).read(),
-            'trades':        state.get('trades_log', []),
-            'klines':        klines,
-            'indicators':    state.get('indicators', []),
-            'returns':       compute_strat_returns(candles, state.get('trades_log', [])),
+        headers={
+            'api-key': env.get('blave_api_key', ''),
+            'secret-key': env.get('blave_secret_key', ''),
+            'Content-Type': 'application/json',
+            'Content-Encoding': 'gzip',
         },
-        timeout=30,
+        data=_gz.compress(body),
+        timeout=60,
     )
 
 

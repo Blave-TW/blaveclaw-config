@@ -6,6 +6,8 @@ After every backtest AND every cron run (live/paper), upload the report so the u
 
 Endpoint: POST https://api.blave.org/openclaw/strategy/report
 Headers: api-key: KEY, secret-key: SECRET  (read blave_api_key / blave_secret_key from .env)
+         Content-Type: application/json
+         Content-Encoding: gzip  (required when payload is large — always use gzip for safety)
 
 Body (JSON):
 {
