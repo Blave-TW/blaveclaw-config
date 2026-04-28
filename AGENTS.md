@@ -20,6 +20,7 @@ Before writing any strategy code, classify the strategy:
 - Entry/exit driven by indicators or price signals (e.g. MA cross, RSI)
 - Backtest is meaningful — REQUIRED before going live
 - Read `references/strategy-code.md` and use `strategies/TEMPLATE.py`
+- blave-quant-skill examples are for reference only — always rewrite as TEMPLATE.py for Type A deployment
 
 **Type B — Everything else** (screener, grid, arbitrage, portfolio, etc.)
 - Write code from scratch based on the user's requirements — no template

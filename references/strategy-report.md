@@ -14,7 +14,7 @@ Body (JSON):
   "strategy_name": "MA Cross",
   "symbol": "BTCUSDT",
   "interval": "1h",
-  "mode": "paper" or "live",
+  "mode": "backtest" or "paper" or "live",
   "code": "...full source code...",
   "trades": [
     {"time": 1700000000, "action": "BUY",  "price": 50000},

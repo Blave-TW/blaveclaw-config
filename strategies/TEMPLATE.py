@@ -8,7 +8,7 @@ Logic: [entry/exit rules]
 import logging, os, json, requests
 
 # --- Config ---
-MODE            = "backtest"       # "backtest" | "live"
+MODE            = "backtest"       # "backtest" | "paper" | "live"
 STRATEGY_NAME   = "[strategy_name]"
 SYMBOL          = "BTCUSDT"
 INTERVAL        = "1h"
@@ -26,7 +26,18 @@ logging.basicConfig(
 def load_state(): ...
 def save_state(state): ...
 def send_telegram(msg): ...
-def place_order(side): ...   # implement using exchange API — read skills/blave-quant/references/[exchange].md
+def place_order(side): ...   # implement using exchange API — read skills/blave-quant/references/<exchange>-skill.md
+
+def fetch_historical(symbol, start, end):
+    env = dict(line.strip().split('=', 1) for line in open('/root/.openclaw/workspace/.env') if '=' in line)
+    resp = requests.get(
+        'https://api.blave.org/kline',
+        headers={'api-key': env.get('blave_api_key', ''), 'secret-key': env.get('blave_secret_key', '')},
+        params={'symbol': symbol, 'period': INTERVAL, 'start_date': start, 'end_date': end},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 def compute_signal(candle, state) -> str:
     # Return desired position state — "LONG" or "FLAT"
@@ -82,6 +93,7 @@ def execute(candle, signal, state):
         state["trades_log"].append({"time": candle["time"], "action": "BUY", "price": candle["close"]})
         if MODE == "live":
             place_order("BUY")
+        if MODE in ("live", "paper"):
             send_telegram(f"BUY @ {candle['close']}")
         else:
             logging.info(f"[BACKTEST] BUY @ {candle['close']}")
@@ -93,6 +105,7 @@ def execute(candle, signal, state):
         state["trades_log"].append({"time": candle["time"], "action": "SELL", "price": candle["close"]})
         if MODE == "live":
             place_order("SELL")
+        if MODE in ("live", "paper"):
             send_telegram(f"SELL @ {candle['close']}  PnL={pnl:+.2f}%")
         else:
             logging.info(f"[BACKTEST] SELL @ {candle['close']}  PnL={pnl:+.2f}%")
