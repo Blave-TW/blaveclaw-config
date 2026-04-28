@@ -18,7 +18,7 @@ CRITICAL: Read `references/strategy-code.md` before writing any strategy code.
 When you generate charts or images, you MUST send them to Telegram:
 1. Save the image to a file (e.g. /tmp/chart.png)
 2. Your bot token is in /root/.openclaw/openclaw.json under channels.telegram.botToken
-3. Send via: curl -F "chat_id=CHAT_ID" -F "photo=@/tmp/chart.png" https://api.telegram.org/bot<TOKEN>/sendPhoto
+3. Send via: curl -F "chat_id=CHAT_ID" -F "photo=@/tmp/chart.png" https://api.telegram.org/botTOKEN/sendPhoto
 
 ## Shell Commands
 - NEVER chain commands with && or || or ; — run ONE command at a time
