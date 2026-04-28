@@ -46,6 +46,9 @@ When you generate charts or images, you MUST send them to Telegram:
 After every backtest AND every cron run (live/paper), upload the report so the user can track it on the website.
 Full API spec: read `references/strategy-report.md`
 
+When deleting a strategy file or cron job, also DELETE the report from the website (DELETE /openclaw/strategy/report).
+When renaming or rewriting a strategy, DELETE the old report first, then upload a new one under the new name.
+
 ## Response Style
 - Keep responses concise and Telegram-friendly
 - Use markdown formatting supported by Telegram
