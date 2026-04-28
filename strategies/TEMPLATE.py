@@ -13,7 +13,7 @@ STRATEGY_NAME   = "[strategy_name]"
 SYMBOL          = "BTCUSDT"
 INTERVAL        = "1h"
 START           = "2024-01-01"     # backtest start; also used as live history start
-END             = "2024-12-31"     # backtest only — live/paper ignores this and always fetches to today
+END             = None             # backtest end date; None = latest data; live/paper always fetches to today
 
 # --- Logging ---
 os.makedirs('/root/.openclaw/workspace/logs', exist_ok=True)
