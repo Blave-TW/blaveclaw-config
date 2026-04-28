@@ -5,7 +5,7 @@ After every backtest AND every cron run (live/paper), upload the report so the u
 ## POST — upload / update report
 
 Endpoint: POST https://api.blave.org/openclaw/strategy/report
-Headers: api-key: <blave_api_key>, secret-key: <blave_secret_key>  (read from .env)
+Headers: api-key: KEY, secret-key: SECRET  (read blave_api_key / blave_secret_key from .env)
 
 Body (JSON):
 {
@@ -13,7 +13,7 @@ Body (JSON):
   "symbol": "BTCUSDT",
   "interval": "1h",
   "mode": "paper" or "live",
-  "code": "<full strategy source code as string>",
+  "code": "...full source code...",
   "trades": [
     {"time": 1700000000, "action": "BUY",  "price": 50000},
     {"time": 1700003600, "action": "SELL", "price": 51000}
@@ -38,5 +38,5 @@ Rules:
 ## DELETE — remove report
 
 DELETE https://api.blave.org/openclaw/strategy/report
-Headers: api-key: <blave_api_key>, secret-key: <blave_secret_key>
+Headers: api-key: KEY, secret-key: SECRET  (read from .env)
 Body: {"strategy_name": "MA Cross"}

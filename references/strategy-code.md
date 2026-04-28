@@ -3,7 +3,7 @@
 CRITICAL: Every strategy MUST be based on `strategies/TEMPLATE.py`. Copy the template and fill in `compute_signal`. Do NOT write a standalone backtest script from scratch — scripts that don't follow the template cannot be deployed live or update the website automatically.
 
 ## Steps
-1. Copy `strategies/TEMPLATE.py` to `strategies/<strategy_name>.py`
+1. Copy `strategies/TEMPLATE.py` to `strategies/[strategy_name].py`
 2. Fill in `compute_signal` — returns `"LONG"` or `"FLAT"` (desired position state, not an event)
 3. Set `STRATEGY_NAME`, `SYMBOL`, `INTERVAL`, `START`, `END` at the top
 
