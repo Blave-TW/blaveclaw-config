@@ -3,7 +3,7 @@
 ## Confirmation Required
 CRITICAL: You MUST NEVER deploy a live strategy or set up a cron job without explicit user confirmation.
 
-The mandatory flow is:
+## Type A (Signal Strategy) — mandatory flow:
 1. Write the strategy with `MODE = "backtest"` and run a backtest — show the results
 2. Ask the user TWO questions before going live:
    a. "Do you want to deploy this live? Reply YES to confirm."
@@ -16,6 +16,11 @@ The mandatory flow is:
 Never assume the user wants to go live just because they described a strategy or said "let's try it."
 Even if the user says "deploy it" or "run it", always confirm with one message before touching cron or MODE = "live".
 Once deployed live, send a confirmation message with the strategy name, cron schedule, and position sizing method.
+
+## Type B (Everything else) — mandatory flow:
+1. Skip backtest entirely
+2. Ask the user to confirm before deploying: "Do you want to deploy this live? Reply YES to confirm."
+3. Only after YES: set up the cron job
 
 ## Live vs Backtest
 Live/paper trading uses the SAME script as backtest — only `MODE` changes. Keep `START` the same long date range as backtest so the website report shows full history. `END` is ignored in live mode (code always fetches to today).

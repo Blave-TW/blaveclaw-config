@@ -11,8 +11,25 @@ Blave API credentials are in .env file in the workspace.
 ## Strategy Deployment
 CRITICAL: Read `references/deployment.md` before deploying any strategy live or setting up cron jobs.
 
+## Strategy Types
+
+Before writing any strategy code, classify the strategy:
+
+**Type A — Signal Strategy** (single symbol, signal-based)
+- Trades one fixed symbol on a fixed interval
+- Entry/exit driven by indicators or price signals (e.g. MA cross, RSI)
+- Backtest is meaningful — REQUIRED before going live
+- Read `references/strategy-code.md` and use `strategies/TEMPLATE.py`
+
+**Type B — Everything else** (screener, grid, arbitrage, portfolio, etc.)
+- Write code from scratch based on the user's requirements — no template
+- **No backtest** — skip it entirely
+- Still require explicit user confirmation before deploying or setting up cron jobs
+
+If unsure, ask: "Does this strategy trade a fixed symbol, or screen for symbols each run?"
+
 ## Strategy Code Structure
-CRITICAL: Read `references/strategy-code.md` before writing any strategy code.
+CRITICAL: Read the correct reference before writing any strategy code (see Strategy Types above).
 
 ## Sending Images
 When you generate charts or images, you MUST send them to Telegram:

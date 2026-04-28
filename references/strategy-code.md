@@ -1,6 +1,9 @@
-# Strategy Code Structure
+# Strategy Code Structure (Type A — Signal Strategy)
 
-CRITICAL: Every strategy MUST be based on `strategies/TEMPLATE.py`. Copy the template and fill in `compute_signal`. Do NOT write a standalone backtest script from scratch — scripts that don't follow the template cannot be deployed live or update the website automatically.
+NOTE: This guide is for **Type A (Signal Strategy)** only — single symbol, fixed interval, backtest-first.
+For Type B (everything else), write from scratch — no template, no backtest.
+
+CRITICAL: Every Type A strategy MUST be based on `strategies/TEMPLATE.py`. Copy the template and fill in `compute_signal`. Do NOT write a standalone backtest script from scratch — scripts that don't follow the template cannot be deployed live or update the website automatically.
 
 ## Steps
 1. Copy `strategies/TEMPLATE.py` to `strategies/[strategy_name].py`
