@@ -64,17 +64,19 @@ def compute_signal(candle, state) -> str:
 
 def compute_strat_returns(candles, trades_log):
     trades_sorted = sorted(trades_log, key=lambda t: t['time'])
-    trade_times   = {t['time'] for t in trades_sorted}
     trade_idx = 0
     in_pos = False
     strat_returns = []
     for i, candle in enumerate(candles):
         bar_ret = (candle['close'] - candles[i-1]['close']) / candles[i-1]['close'] if i > 0 else 0.0
-        fee = FEE if candle['time'] in trade_times else 0.0
-        strat_returns.append((1 if in_pos else 0) * bar_ret - fee)
+        pos = 1 if in_pos else 0
+        new_pos = pos
         while trade_idx < len(trades_sorted) and trades_sorted[trade_idx]['time'] == candle['time']:
             in_pos = trades_sorted[trade_idx]['action'] == 'BUY'
             trade_idx += 1
+        new_pos = 1 if in_pos else 0
+        fee = abs(new_pos - pos) * FEE
+        strat_returns.append(pos * bar_ret - fee)
     return strat_returns
 
 def plot_pnl(candles, state, symbol):
