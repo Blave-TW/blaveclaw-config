@@ -29,15 +29,27 @@ def send_telegram(msg): ...
 def place_order(side): ...   # implement using exchange API — read skills/blave-quant/references/<exchange>-skill.md
 
 def fetch_historical(symbol, start, end):
+    from datetime import datetime, timedelta
     env = dict(line.strip().split('=', 1) for line in open('/root/.openclaw/workspace/.env') if '=' in line)
-    resp = requests.get(
-        'https://api.blave.org/kline',
-        headers={'api-key': env.get('blave_api_key', ''), 'secret-key': env.get('blave_secret_key', '')},
-        params={'symbol': symbol, 'period': INTERVAL, 'start_date': start, 'end_date': end},
-        timeout=60,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    headers = {'api-key': env.get('blave_api_key', ''), 'secret-key': env.get('blave_secret_key', '')}
+    s = datetime.strptime(start, '%Y-%m-%d')
+    e = datetime.strptime(end, '%Y-%m-%d') if end else datetime.utcnow()
+    rows = []
+    cursor = s
+    while cursor < e:
+        chunk_end = min(cursor + timedelta(days=365), e)
+        resp = requests.get(
+            'https://api.blave.org/kline',
+            headers=headers,
+            params={'symbol': symbol, 'period': INTERVAL,
+                    'start_date': cursor.strftime('%Y-%m-%d'),
+                    'end_date': chunk_end.strftime('%Y-%m-%d')},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        rows.extend(resp.json())
+        cursor = chunk_end
+    return rows
 
 def compute_signal(candle, state) -> str:
     # Return desired position state — "LONG" or "FLAT"
