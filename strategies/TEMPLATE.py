@@ -39,7 +39,7 @@ def fetch_historical(symbol, start, end):
     from datetime import datetime, timedelta
     headers = {'api-key': _env.get('blave_api_key', ''), 'secret-key': _env.get('blave_secret_key', '')}
     s = datetime.strptime(start, '%Y-%m-%d')
-    e = datetime.strptime(end, '%Y-%m-%d') if end else datetime.utcnow()
+    e = datetime.strptime(end, '%Y-%m-%d') if end else datetime.now()
     rows = []
     cursor = s
     while cursor < e:
@@ -70,7 +70,6 @@ def compute_strat_returns(candles, trades_log):
     for i, candle in enumerate(candles):
         bar_ret = (candle['close'] - candles[i-1]['close']) / candles[i-1]['close'] if i > 0 else 0.0
         pos = 1 if in_pos else 0
-        new_pos = pos
         while trade_idx < len(trades_sorted) and trades_sorted[trade_idx]['time'] == candle['time']:
             in_pos = trades_sorted[trade_idx]['action'] == 'BUY'
             trade_idx += 1
@@ -198,8 +197,8 @@ def execute(candle, signal, state):
 
 
 def main():
-    from datetime import datetime, timezone
-    today   = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    from datetime import datetime
+    today   = datetime.now().strftime('%Y-%m-%d')
     end     = END if MODE == "backtest" else today
     candles = fetch_historical(SYMBOL, START, end)
 
