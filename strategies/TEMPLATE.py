@@ -94,7 +94,7 @@ def upload_report(candles, state):
         },
         data=_gz.compress(body),
         timeout=60,
-    )
+    ).raise_for_status()
 
 
 def execute(candle, signal, state):
