@@ -14,6 +14,7 @@ SYMBOL          = "BTCUSDT"
 INTERVAL        = "1h"
 START           = "2024-01-01"     # backtest start; also used as live history start
 END             = None             # backtest end date; None = latest data; live/paper always fetches to today
+FEE             = 0.0005           # 0.05% per side (taker fee) — deducted on every BUY and SELL
 
 # --- Logging ---
 os.makedirs('/root/.openclaw/workspace/logs', exist_ok=True)
@@ -58,12 +59,14 @@ def compute_signal(candle, state) -> str:
 
 def compute_strat_returns(candles, trades_log):
     trades_sorted = sorted(trades_log, key=lambda t: t['time'])
+    trade_times   = {t['time'] for t in trades_sorted}
     trade_idx = 0
     in_pos = False
     strat_returns = []
     for i, candle in enumerate(candles):
         bar_ret = (candle['close'] - candles[i-1]['close']) / candles[i-1]['close'] if i > 0 else 0.0
-        strat_returns.append((1 if in_pos else 0) * bar_ret)
+        fee = FEE if candle['time'] in trade_times else 0.0
+        strat_returns.append((1 if in_pos else 0) * bar_ret - fee)
         while trade_idx < len(trades_sorted) and trades_sorted[trade_idx]['time'] == candle['time']:
             in_pos = trades_sorted[trade_idx]['action'] == 'BUY'
             trade_idx += 1
