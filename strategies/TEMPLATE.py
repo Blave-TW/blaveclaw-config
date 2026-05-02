@@ -5,22 +5,26 @@ Interval: 1h
 Logic: [entry/exit rules]
 '''
 
-import gzip, json, logging, os, requests
+import gzip, json, logging, os, sys, requests
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from backtesting import Backtest, Strategy
 from dotenv import dotenv_values
 
 # --- Config ---
-MODE            = "backtest"       # "backtest" | "paper" | "live"
-STRATEGY_NAME   = "[strategy_name]"
-SYMBOL          = "BTCUSDT"
-INTERVAL        = "1h"
-START           = "2024-01-01"     # backtest start; also used as live history start
-END             = None             # backtest end date; None = latest data; live/paper always fetches to today
-FEE             = 0.0005           # 0.05% per side (taker fee) — deducted on every BUY and SELL
+MODE          = "backtest"   # "backtest" | "paper" | "live"
+STRATEGY_NAME = "[strategy_name]"
+SYMBOL        = "BTCUSDT"
+INTERVAL      = "1h"
+START         = "2024-01-01"
+END           = None         # backtest end; None = today; live always fetches to today
+FEE           = 0.0005       # 0.05% per side (taker fee)
+BUDGET_USDT   = 1_000        # trading capital — backtest uses this as starting cash so P&L reflects real dollar amounts
 
 _env = dotenv_values()
+_HDRS = {'api-key': _env.get('blave_api_key', ''), 'secret-key': _env.get('blave_secret_key', '')}
 
 # --- Logging ---
 os.makedirs('/root/.openclaw/workspace/logs', exist_ok=True)
@@ -29,214 +33,242 @@ logging.basicConfig(
     level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s'
 )
 
-# --- Helpers ---
-def load_state(): ...
-def save_state(state): ...
-def send_telegram(msg): ...
-def place_order(side): ...   # implement using exchange API — read skills/blave-quant/references/<exchange>-skill.md
+# --- State (live/paper only) ---
+_STATE_FILE = f'{STRATEGY_NAME}_state.json'
 
+def load_state():
+    return json.load(open(_STATE_FILE)) if os.path.exists(_STATE_FILE) else None
+
+def save_state(state):
+    json.dump(state, open(_STATE_FILE, 'w'), indent=2)
+
+def send_telegram(msg):
+    pass  # wire up if needed
+
+def place_order(side):
+    pass  # implement using exchange API — read skills/blave-quant/references/<exchange>-skill.md
+
+# --- Data ---
 def fetch_historical(symbol, start, end):
     from datetime import datetime, timedelta
-    headers = {'api-key': _env.get('blave_api_key', ''), 'secret-key': _env.get('blave_secret_key', '')}
     s = datetime.strptime(start, '%Y-%m-%d')
-    e = datetime.strptime(end, '%Y-%m-%d') if end else datetime.now()
-    rows = []
-    cursor = s
+    e = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d')
+    rows, cursor = [], s
     while cursor < e:
         chunk_end = min(cursor + timedelta(days=365), e)
-        resp = requests.get(
-            'https://api.blave.org/kline',
-            headers=headers,
-            params={'symbol': symbol, 'period': INTERVAL,
-                    'start_date': cursor.strftime('%Y-%m-%d'),
-                    'end_date': chunk_end.strftime('%Y-%m-%d')},
-            timeout=60,
-        )
-        resp.raise_for_status()
-        rows.extend(resp.json())
+        r = requests.get('https://api.blave.org/kline', headers=_HDRS, params={
+            'symbol': symbol, 'period': INTERVAL,
+            'start_date': cursor.strftime('%Y-%m-%d'),
+            'end_date':   chunk_end.strftime('%Y-%m-%d'),
+        }, timeout=60)
+        r.raise_for_status()
+        rows.extend(r.json())
         cursor = chunk_end
-    return rows
+    df = pd.DataFrame(rows)
+    df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
+    df = df.set_index('time').sort_index()
+    df = df[~df.index.duplicated(keep='first')]
+    df = df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'})
+    df['Volume'] = 0
+    return df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float)
 
-def compute_signal(candle, state) -> str:
-    # Return desired position state — "LONG" or "FLAT"
-    # Pure function: no API calls, no I/O, identical in backtest and live
+
+# ─────────────────────────────────────────────────────────────
+# FILL IN: Signal logic
+# Pure function — no API calls, no I/O. Called identically in
+# backtest (via BlaveStrategy.next) and live (via main loop).
+# Signature: add whatever indicator values you need as params.
+# Returns desired position state (not an event):
+#   "LONG"  — hold long
+#   "SHORT" — hold short
+#   "FLAT"  — no position
+# ─────────────────────────────────────────────────────────────
+def compute_signal(close, ...) -> str:
     ...
 
-def compute_strat_returns(candles, trades_log):
-    trades_sorted = sorted(trades_log, key=lambda t: t['time'])
-    trade_idx = 0
-    in_pos = False
-    strat_returns = []
-    for i, candle in enumerate(candles):
-        bar_ret = (candle['close'] - candles[i-1]['close']) / candles[i-1]['close'] if i > 0 else 0.0
-        pos = 1 if in_pos else 0
-        while trade_idx < len(trades_sorted) and trades_sorted[trade_idx]['time'] == candle['time']:
-            in_pos = trades_sorted[trade_idx]['action'] == 'BUY'
-            trade_idx += 1
-        new_pos = 1 if in_pos else 0
-        fee = abs(new_pos - pos) * FEE
-        strat_returns.append(pos * bar_ret - fee)
-    return strat_returns
 
-def plot_pnl(candles, state, symbol):
-    closes = [c['close'] for c in candles]
-    times  = [c['time']  for c in candles]
+# ─────────────────────────────────────────────────────────────
+# FILL IN: Backtest wrapper (backtesting.py Strategy subclass)
+# init()  — precompute indicators with self.I() to avoid look-ahead bias
+# next()  — call compute_signal() with the current bar's values
+# ─────────────────────────────────────────────────────────────
+class BlaveStrategy(Strategy):
+    # Define optimizable parameters here, e.g.:
+    # param1 = 20
 
-    strat_ret = np.array(compute_strat_returns(candles, state.get('trades_log', [])))
-    cum  = np.cumprod(1 + strat_ret)
-    peak = np.maximum.accumulate(cum)
-    dd   = (cum - peak) / peak
+    def init(self):
+        # self.sma = self.I(lambda x: pd.Series(x).rolling(20).mean().values, self.data.Close)
+        pass
 
-    action_map = {t['time']: t['action'] for t in sorted(state.get('trades_log', []), key=lambda t: t['time'])}
-    in_pos = False
-    pos = []
-    for c in candles:
-        if c['time'] in action_map:
-            in_pos = action_map[c['time']] == 'BUY'
-        pos.append(1 if in_pos else 0)
-    pos = np.array(pos)
+    def next(self):
+        signal = compute_signal(self.data.Close[-1], ...)
+        if signal == 'LONG':
+            if self.position.is_short:
+                self.position.close()
+            if not self.position.is_long:
+                self.buy()
+        elif signal == 'SHORT':
+            if self.position.is_long:
+                self.position.close()
+            if not self.position.is_short:
+                self.sell()
+        elif signal == 'FLAT' and self.position:
+            self.position.close()
 
-    dates      = pd.to_datetime(times, unit='s', utc=True)
-    indicators = state.get('indicators', [])
-    n_panels   = 2 + (1 if indicators else 0)
-    fig, axes  = plt.subplots(n_panels, 1, figsize=(14, 4 * n_panels), sharex=True,
-                               gridspec_kw={'height_ratios': [3, 1] + [1] * (n_panels - 2)})
 
-    # Panel 1: Price + cumulative PnL
-    ax1 = axes[0]; ax2 = ax1.twinx()
-    ax1.plot(dates, closes, color="#3498db", lw=1, alpha=0.7, label="Price")
-    ax1.set_ylabel("Price (USD)", fontsize=11, color="#3498db")
-    ax1.tick_params(axis='y', labelcolor="#3498db")
-    ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"${x:,.0f}"))
-    ax2.plot(dates, (cum - 1) * 100, color="#2ecc71", lw=1.5, label=f"{STRATEGY_NAME} (+fees)")
-    ax2.axhline(0, color="#888", lw=0.5, ls="--")
-    ax2.set_ylabel("Strategy Return (%)", fontsize=11, color="#2ecc71")
-    ax2.tick_params(axis='y', labelcolor="#2ecc71")
-    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.0f}%"))
-    prev = False
-    for date, inp in zip(dates, pos > 0):
-        if inp and not prev: entry_date = date
-        if not inp and prev: ax1.axvspan(entry_date, date, alpha=0.08, color="#2ecc71")
-        prev = inp
-    if prev: ax1.axvspan(entry_date, dates[-1], alpha=0.08, color="#2ecc71")
-    l1, lb1 = ax1.get_legend_handles_labels()
-    l2, lb2 = ax2.get_legend_handles_labels()
-    ax1.legend(l1 + l2, lb1 + lb2, fontsize=10, loc="upper left")
-    ax1.set_title(f"{symbol} — {STRATEGY_NAME}", fontsize=13)
+# --- Report ---
+def upload_report(df, stats=None, state=None):
+    ts_arr = (df.index.astype(np.int64) // 10**9).tolist()
+    klines = [[int(ts), float(o), float(h), float(l), float(c)]
+               for ts, o, h, l, c in zip(ts_arr, df['Open'], df['High'], df['Low'], df['Close'])]
 
-    # Panel 2: Drawdown
-    axes[1].fill_between(dates, dd * 100, 0, color="#e74c3c", alpha=0.6)
-    axes[1].set_ylabel("Drawdown (%)", fontsize=11)
-    axes[1].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.0f}%"))
-    axes[1].axhline(0, color="#888", lw=0.5)
+    if stats is not None:
+        # Backtest mode: extract trades and returns from backtesting.py stats
+        trades = []
+        for _, row in stats['_trades'].iterrows():
+            trades.append({'time': int(row['EntryTime'].timestamp()), 'action': 'BUY',  'price': float(row['EntryPrice'])})
+            trades.append({'time': int(row['ExitTime'].timestamp()),  'action': 'SELL', 'price': float(row['ExitPrice'])})
+        trades.sort(key=lambda t: t['time'])
+        equity  = stats['_equity_curve']['Equity'].reindex(df.index, method='ffill').values
+        log_ret = np.diff(np.log(np.where(equity > 0, equity, 1)))
+        returns = [0.0] + [0.0 if r != r else float(r) for r in log_ret]
+    else:
+        # Live/paper mode: reconstruct returns from trades_log
+        trades    = state.get('trades_log', [])
+        closes    = df['Close'].values
+        side      = None   # 'long' | 'short' | None
+        returns   = []
+        trade_map = {t['time']: t['action'] for t in trades}
+        for i, (ts, _) in enumerate(zip(ts_arr, closes)):
+            bar_ret = (closes[i] - closes[i-1]) / closes[i-1] if i > 0 else 0.0
+            action  = trade_map.get(ts)
+            if action == 'BUY':    side = 'long'
+            elif action == 'SHORT': side = 'short'
+            elif action in ('SELL', 'COVER'): side = None
+            fee = FEE if action else 0.0
+            if side == 'long':    returns.append(float(bar_ret) - fee)
+            elif side == 'short': returns.append(float(-bar_ret) - fee)
+            else:                 returns.append(-fee)
 
-    # Panel 3: first indicator series (if any)
-    if indicators:
-        ind       = indicators[0]
-        ind_dates = pd.to_datetime([d[0] for d in ind['data']], unit='s', utc=True)
-        axes[2].plot(ind_dates, [d[1] for d in ind['data']], lw=0.8)
-        axes[2].set_ylabel(ind['name'], fontsize=11)
-
-    plt.tight_layout()
-    fname = f"{symbol}_{STRATEGY_NAME.replace(' ', '_')}_pnl.png"
-    plt.savefig(fname, dpi=150)
-    plt.show()
-    print(f"Saved: {fname}")
-
-def upload_report(candles, state):
-    klines    = [[c['time'], c['open'], c['high'], c['low'], c['close']] for c in candles]
-    strat_ret = compute_strat_returns(candles, state.get('trades_log', []))
     body = json.dumps({
-        'strategy_name': STRATEGY_NAME,
-        'symbol':        SYMBOL,
-        'interval':      INTERVAL,
+        'strategy_name': STRATEGY_NAME, 'symbol': SYMBOL, 'interval': INTERVAL,
         'mode':          MODE,
         'code':          open(__file__).read(),
-        'trades':        state.get('trades_log', []),
+        'trades':        trades,
         'klines':        klines,
-        'indicators':    state.get('indicators', []),
-        'returns':       [0.0 if r != r else r for r in strat_ret],
+        'indicators':    state.get('indicators', []) if state else [],
+        'returns':       returns,
     }).encode()
-    requests.post(
-        'https://api.blave.org/openclaw/strategy/report',
-        headers={
-            'api-key':          _env.get('blave_api_key', ''),
-            'secret-key':       _env.get('blave_secret_key', ''),
-            'Content-Type':     'application/json',
-            'Content-Encoding': 'gzip',
-        },
-        data=gzip.compress(body),
-        timeout=60,
-    ).raise_for_status()
+    requests.post('https://api.blave.org/openclaw/strategy/report', headers={
+        'api-key':          _env.get('blave_api_key', ''),
+        'secret-key':       _env.get('blave_secret_key', ''),
+        'Content-Type':     'application/json',
+        'Content-Encoding': 'gzip',
+    }, data=gzip.compress(body), timeout=60).raise_for_status()
 
 
+# --- Live execute ---
 def execute(candle, signal, state):
-    # Compare desired signal state with current position, act on mismatch.
-    want_long = signal == "LONG"
-    if want_long and not state["in_position"]:
-        state.update({"in_position": True, "entry": candle["close"]})
-        state["trades_log"].append({"time": candle["time"], "action": "BUY", "price": candle["close"]})
-        if MODE == "live":
-            place_order("BUY")
-        if MODE in ("live", "paper"):
-            send_telegram(f"BUY @ {candle['close']}")
-        else:
-            logging.info(f"[BACKTEST] BUY @ {candle['close']}")
+    price = candle['close']
 
-    elif not want_long and state["in_position"]:
-        pnl = (candle["close"] - state["entry"]) / state["entry"] * 100
-        state.update({"in_position": False, "entry": None,
-                       "pnl": state["pnl"] + pnl, "trades": state["trades"] + 1})
-        state["trades_log"].append({"time": candle["time"], "action": "SELL", "price": candle["close"]})
-        if MODE == "live":
-            place_order("SELL")
-        if MODE in ("live", "paper"):
-            send_telegram(f"SELL @ {candle['close']}  PnL={pnl:+.2f}%")
-        else:
-            logging.info(f"[BACKTEST] SELL @ {candle['close']}  PnL={pnl:+.2f}%")
+    # --- Close opposite position first ---
+    if signal == 'LONG' and state['side'] == 'short':
+        pnl = (state['entry'] - price) / state['entry'] * 100
+        state.update({'side': None, 'entry': None, 'pnl': state['pnl'] + pnl, 'trades': state['trades'] + 1})
+        state['trades_log'].append({'time': candle['time'], 'action': 'COVER', 'price': price})
+        if MODE == 'live':            place_order('COVER')
+        if MODE in ('live', 'paper'): send_telegram(f"COVER @ {price}  PnL={pnl:+.2f}%")
+        logging.info(f"COVER @ {price}  PnL={pnl:+.2f}%")
+
+    elif signal == 'SHORT' and state['side'] == 'long':
+        pnl = (price - state['entry']) / state['entry'] * 100
+        state.update({'side': None, 'entry': None, 'pnl': state['pnl'] + pnl, 'trades': state['trades'] + 1})
+        state['trades_log'].append({'time': candle['time'], 'action': 'SELL', 'price': price})
+        if MODE == 'live':            place_order('SELL')
+        if MODE in ('live', 'paper'): send_telegram(f"SELL @ {price}  PnL={pnl:+.2f}%")
+        logging.info(f"SELL @ {price}  PnL={pnl:+.2f}%")
+
+    elif signal == 'FLAT' and state['side']:
+        action = 'SELL' if state['side'] == 'long' else 'COVER'
+        pnl = (price - state['entry']) / state['entry'] * 100 * (1 if state['side'] == 'long' else -1)
+        state.update({'side': None, 'entry': None, 'pnl': state['pnl'] + pnl, 'trades': state['trades'] + 1})
+        state['trades_log'].append({'time': candle['time'], 'action': action, 'price': price})
+        if MODE == 'live':            place_order(action)
+        if MODE in ('live', 'paper'): send_telegram(f"{action} @ {price}  PnL={pnl:+.2f}%")
+        logging.info(f"{action} @ {price}  PnL={pnl:+.2f}%")
+
+    # --- Open new position ---
+    if signal == 'LONG' and not state['side']:
+        state.update({'side': 'long', 'entry': price})
+        state['trades_log'].append({'time': candle['time'], 'action': 'BUY', 'price': price})
+        if MODE == 'live':            place_order('BUY')
+        if MODE in ('live', 'paper'): send_telegram(f"BUY @ {price}")
+        logging.info(f"BUY @ {price}")
+
+    elif signal == 'SHORT' and not state['side']:
+        state.update({'side': 'short', 'entry': price})
+        state['trades_log'].append({'time': candle['time'], 'action': 'SHORT', 'price': price})
+        if MODE == 'live':            place_order('SHORT')
+        if MODE in ('live', 'paper'): send_telegram(f"SHORT @ {price}")
+        logging.info(f"SHORT @ {price}")
 
 
 def main():
     from datetime import datetime
-    today   = datetime.now().strftime('%Y-%m-%d')
-    end     = END if MODE == "backtest" else today
-    candles = fetch_historical(SYMBOL, START, end)
+    today = datetime.utcnow().strftime('%Y-%m-%d')
+    end   = END if MODE == 'backtest' else today
+    df    = fetch_historical(SYMBOL, START, end)
 
-    if MODE == "backtest":
-        state = {"in_position": False, "entry": None, "pnl": 0.0, "trades": 0, "trades_log": [], "indicators": []}
-    else:
-        state = load_state()
-        if state is None:
-            # First live run — bootstrap state from history (no orders placed)
-            state = {"in_position": False, "entry": None, "pnl": 0.0, "trades": 0, "trades_log": [], "indicators": []}
-            for candle in candles[:-1]:
-                sig = compute_signal(candle, state)
-                if sig == "LONG" and not state["in_position"]:
-                    state.update({"in_position": True, "entry": candle["close"]})
-                    state["trades_log"].append({"time": candle["time"], "action": "BUY", "price": candle["close"]})
-                elif sig == "FLAT" and state["in_position"]:
-                    pnl = (candle["close"] - state["entry"]) / state["entry"] * 100
-                    state.update({"in_position": False, "entry": None, "pnl": state["pnl"] + pnl, "trades": state["trades"] + 1})
-                    state["trades_log"].append({"time": candle["time"], "action": "SELL", "price": candle["close"]})
-            save_state(state)
-            logging.info(f"Bootstrapped state: in_position={state['in_position']} entry={state['entry']}")
+    if MODE == 'backtest':
+        bt    = Backtest(df, BlaveStrategy, cash=BUDGET_USDT, commission=FEE, trade_on_close=True)
+        stats = bt.run()
+        print(stats[['Return [%]', 'Sharpe Ratio', 'Max. Drawdown [%]', 'Win Rate [%]', '# Trades']])
+        bt.plot(filename=f'{SYMBOL}_{STRATEGY_NAME}_pnl.html', open_browser=False)
+        upload_report(df, stats=stats)
+        return
 
-    bars = candles if MODE == "backtest" else [candles[-1]]
+    # paper / live
+    candles = [{'time': int(t.timestamp()), 'close': float(r['Close']),
+                 'open': float(r['Open']), 'high': float(r['High']), 'low': float(r['Low'])}
+                for t, r in df.iterrows()]
 
-    for candle in bars:
-        signal = compute_signal(candle, state)
-        logging.info(f"signal={signal} close={candle['close']}")
-        execute(candle, signal, state)
-
-    if MODE == "backtest":
-        print(f"Total PnL: {state['pnl']:+.2f}%  Trades: {state['trades']}")
-        plot_pnl(candles, state, SYMBOL)
-
-    upload_report(candles, state)
-
-    if MODE != "backtest":
+    state = load_state()
+    if state is None:
+        # First run — replay history to find correct position (no orders placed)
+        state = {'side': None, 'entry': None, 'pnl': 0.0, 'trades': 0,
+                 'trades_log': [], 'indicators': []}
+        for candle in candles[:-1]:
+            sig = compute_signal(candle['close'], ...)  # match compute_signal signature
+            p   = candle['close']
+            if sig == 'LONG' and state['side'] != 'long':
+                if state['side'] == 'short':
+                    pnl = (state['entry'] - p) / state['entry'] * 100
+                    state.update({'side': None, 'entry': None, 'pnl': state['pnl'] + pnl, 'trades': state['trades'] + 1})
+                    state['trades_log'].append({'time': candle['time'], 'action': 'COVER', 'price': p})
+                state.update({'side': 'long', 'entry': p})
+                state['trades_log'].append({'time': candle['time'], 'action': 'BUY', 'price': p})
+            elif sig == 'SHORT' and state['side'] != 'short':
+                if state['side'] == 'long':
+                    pnl = (p - state['entry']) / state['entry'] * 100
+                    state.update({'side': None, 'entry': None, 'pnl': state['pnl'] + pnl, 'trades': state['trades'] + 1})
+                    state['trades_log'].append({'time': candle['time'], 'action': 'SELL', 'price': p})
+                state.update({'side': 'short', 'entry': p})
+                state['trades_log'].append({'time': candle['time'], 'action': 'SHORT', 'price': p})
+            elif sig == 'FLAT' and state['side']:
+                action = 'SELL' if state['side'] == 'long' else 'COVER'
+                pnl = (p - state['entry']) / state['entry'] * 100 * (1 if state['side'] == 'long' else -1)
+                state.update({'side': None, 'entry': None, 'pnl': state['pnl'] + pnl, 'trades': state['trades'] + 1})
+                state['trades_log'].append({'time': candle['time'], 'action': action, 'price': p})
         save_state(state)
+        logging.info(f"Bootstrapped: side={state['side']} entry={state['entry']}")
+
+    candle = candles[-1]
+    signal = compute_signal(candle['close'], ...)  # match compute_signal signature
+    logging.info(f"signal={signal} close={candle['close']}")
+    execute(candle, signal, state)
+    upload_report(df, state=state)
+    save_state(state)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

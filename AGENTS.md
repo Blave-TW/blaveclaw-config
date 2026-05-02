@@ -22,6 +22,7 @@ Before writing any strategy code, classify the strategy:
 - Read `references/strategy-code.md` and use `strategies/TEMPLATE.py`
 - blave-quant-skill examples are for reference only — always rewrite as TEMPLATE.py for Type A deployment
 - `END` defaults to `None` (latest data) unless the user explicitly specifies an end date
+- **Before running backtest**: ask "你預計投入多少資金？(How much capital are you planning to trade with?)" — set `BUDGET_USDT` to that amount so backtest P&L reflects real dollar figures, not arbitrary starting cash
 
 **Type B — Everything else** (screener, grid, arbitrage, portfolio, etc.)
 - Write code from scratch based on the user's requirements — no template
