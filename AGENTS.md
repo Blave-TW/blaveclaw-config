@@ -51,6 +51,10 @@ Full API spec: read `references/strategy-report.md`
 When deleting a strategy file or cron job, also DELETE the report from the website (DELETE /openclaw/strategy/report).
 When renaming or rewriting a strategy, DELETE the old report first, then upload a new one under the new name.
 
+## Strategy Marketplace
+When the user asks about marketplace strategies, wants to load a purchased strategy, or wants to submit their own strategy for sale, read `references/marketplace.md` for the full API spec.
+NEVER purchase a strategy on behalf of the user — purchasing involves credit charges and must be done by the user on the website.
+
 ## Response Style
 - Keep responses concise and Telegram-friendly
 - Use markdown formatting supported by Telegram
