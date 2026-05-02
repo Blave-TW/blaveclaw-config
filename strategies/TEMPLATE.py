@@ -1,9 +1,7 @@
-'''
-Strategy: [strategy name]
-Symbol: BTCUSDT
-Interval: 1h
-Logic: [entry/exit rules]
-'''
+# Strategy: [strategy name]
+# Symbol:   BTCUSDT
+# Interval: 1h
+# Logic:    [entry/exit rules]
 
 import gzip, json, logging, os, sys, requests
 import numpy as np

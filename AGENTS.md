@@ -24,7 +24,8 @@ Before writing any strategy code, classify the strategy:
 - Entry/exit driven by indicators or price signals (e.g. MA cross, RSI)
 - Backtest is meaningful — REQUIRED before going live
 - Read `references/strategy-code.md` and use `strategies/TEMPLATE.py`
-- blave-quant-skill examples are for reference only — always rewrite as TEMPLATE.py for Type A deployment
+- If the strategy uses any Blave alpha indicator (taker intensity, holder concentration, liquidation, whale hunter, etc.), ALSO read `skills/blave-quant/examples/backtest-holder-concentration.md` BEFORE writing any code — it contains the correct data-fetch pattern (parallel arrays, annual chunking). Adapt its `fetch_data()` into `fetch_historical()` in TEMPLATE.py. Do NOT invent your own fetch logic.
+- blave-quant-skill examples provide the data-fetch pattern only — always structure the full strategy as TEMPLATE.py
 - `END` defaults to `None` (latest data) unless the user explicitly specifies an end date
 
 **Type B — Everything else** (screener, grid, arbitrage, portfolio, etc.)
