@@ -7,7 +7,7 @@ import gzip, json, logging, os, sys, requests
 import numpy as np
 import pandas as pd
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "blave-quant"))
 from backtesting import Backtest, Strategy
 from dotenv import dotenv_values
 
