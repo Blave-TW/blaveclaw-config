@@ -13,6 +13,9 @@ git clone https://github.com/Blave-TW/blaveclaw-config /tmp/oc-config
 cp /tmp/oc-config/AGENTS.md /root/.openclaw/workspace/AGENTS.md
 ```
 ```bash
+cp /tmp/oc-config/CLAUDE.md /root/.openclaw/workspace/CLAUDE.md
+```
+```bash
 cp -r /tmp/oc-config/references/ /root/.openclaw/workspace/references/
 ```
 ```bash
@@ -26,7 +29,8 @@ Or paste into the terminal directly.
 
 ## Files
 
-- `AGENTS.md` — agent instructions
+- `AGENTS.md` — agent instructions (openclaw)
+- `CLAUDE.md` — Claude Code context (points to AGENTS.md)
 - `references/deployment.md` — deployment confirmation flow, live bootstrap
 - `references/strategy-code.md` — strategy code structure rules
 - `references/strategy-report.md` — strategy report API spec
