@@ -55,5 +55,54 @@ Check submission status:
 ```
 GET /openclaw/marketplace/my/submissions
 ```
-Response: `[{id, title, price, status, created_at}, ...]`
+Response: `[{id, title, price, status, visibility, created_at}, ...]`
 Status values: `pending` | `approved` | `unlisted`
+
+## Private strategies
+
+Upload a private strategy (no review, immediately accessible):
+```
+POST /openclaw/marketplace/strategies/private
+Content-Type: application/json
+
+{
+  "title": "My Private Strategy",
+  "description": "Optional",
+  "category": "trend",
+  "code": "...full source code..."
+}
+```
+Response: `{"status": "ok", "strategy_id": 123}`
+
+Share with specific user IDs:
+```
+POST /openclaw/marketplace/strategies/{id}/share
+Content-Type: application/json
+
+{"user_ids": [456, 789]}
+```
+
+Remove a user's access:
+```
+DELETE /openclaw/marketplace/strategies/{id}/share
+Content-Type: application/json
+
+{"user_id": 456}
+```
+
+View share list (owner only):
+```
+GET /openclaw/marketplace/strategies/{id}/shares
+```
+Response: `{"shares": [{"user_id": 456, "shared_at": "..."}]}`
+
+View strategies shared with you:
+```
+GET /openclaw/marketplace/my/shared-with-me
+```
+
+Download code (works for owned, purchased, or shared strategies):
+```
+GET /openclaw/marketplace/strategies/{id}/code
+```
+Response: `{"code": "..."}` — save to `.py` and run with `python3`.
