@@ -36,6 +36,24 @@ Before writing any strategy code, classify the strategy:
 
 If unsure, ask: "Does this strategy trade a fixed symbol, or screen for symbols each run?"
 
+## Shared Library (lib/)
+
+The workspace has a shared library at `lib/`. Use it to avoid duplicating code across strategies.
+
+**Always import these — never write them inline:**
+- `from lib.data import fetch_kline` — kline data fetching (annual chunking built-in)
+- `from lib.report import upload_report` — backtest/live report upload (supports `indicators=` param)
+- `from lib.execute import execute, load_state, save_state, bootstrap` — trade execution and state management
+- `from lib.analysis import reconstruct_arrays, regime_analysis, plot_regime` — performance arrays, regime breakdown, regime chart
+
+**When writing new reusable logic** (new exchange order helper, new alpha data fetcher, etc.):
+- Add it to the appropriate `lib/` file first (or create a new one, e.g. `lib/orders_binance.py`)
+- Then import it in the strategy
+
+**Strategy-specific logic** (signal computation, indicator setup, place_order for a specific exchange) stays in the strategy file.
+
+Skill examples show data-fetch patterns only — integrate them into TEMPLATE.py using lib/ imports.
+
 ## Strategy Code Structure
 
 CRITICAL: Read the correct reference before writing any strategy code (see Strategy Types above).
@@ -58,6 +76,20 @@ When you generate charts or images, you MUST send them to Telegram:
 
 After every backtest AND every cron run (live/paper), upload the report so the user can track it on the website.
 Full API spec: read `references/strategy-report.md`
+
+IMPORTANT: Do NOT call `bt.plot()` — it generates a heavy interactive HTML file that takes 20-30 seconds and is not useful in Telegram.
+
+After every backtest, automatically:
+1. Generate PnL chart with `from lib.analysis import reconstruct_arrays, plot_pnl`
+2. Send to Telegram (see Sending Images section)
+3. Upload report with `upload_report(...)`
+
+For strategy-specific indicators (e.g. TI alpha, KD), pass them via `extra_panels`:
+```python
+result = reconstruct_arrays(df, stats)
+plot_pnl(df, result, title='...', output_path='/tmp/pnl.png', extra_panels=[
+    {'data': df['KD_K'].values, 'label': 'K', 'color': '#3498db', 'hlines': [(80, '#e74c3c', 'OB'), (20, '#2ecc71', 'OS')]}
+])
 
 When deleting a strategy file or cron job, also DELETE the report from the website (DELETE /openclaw/strategy/report).
 When renaming or rewriting a strategy, DELETE the old report first, then upload a new one under the new name.
