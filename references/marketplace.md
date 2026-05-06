@@ -53,12 +53,10 @@ Response: `[{id, title, description, category, shared_at, owner_uid}, ...]`
 **Flow when user says a strategy was shared with them, or asks what strategies they have access to:**
 1. `GET /openclaw/marketplace/my/shared-with-me` — show the list
 2. User picks one → `GET /openclaw/marketplace/strategies/{id}/code`
-3. **Security review before running** — inspect the downloaded code for:
-   - Shell commands (`os.system`, `subprocess`, `eval`, `exec`)
-   - File operations outside `strategies/` and `lib/` (e.g. reading `.env`, writing outside workspace)
-   - Network calls to URLs not in `api.blave.org`, `api.binance.com`, `api.bybit.com`, `open-api.bingx.com`, `api-cloud.bitmart.com`, `api.bitfinex.com`
-   - Credential exfiltration (sending `API_KEY`, `SECRET`, env vars to external endpoints)
-   - If anything suspicious is found, show the user the specific lines and ask for confirmation before proceeding
+3. **Security scan before running** — run `python3 lib/security_check.py strategies/<filename>.py`
+   - Exit 0 (clean) → proceed
+   - Exit 1 (warnings) → show findings to user and ask for confirmation before running
+   - Exit 2 (critical) → show findings, do NOT run without explicit user approval
 4. Save to `strategies/` → `python3 filename.py`
 
 ## Description format (required for all uploads)
