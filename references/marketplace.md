@@ -17,6 +17,18 @@ Strategy detail (includes `purchased: true/false`):
 GET /openclaw/marketplace/strategies/{id}
 ```
 
+## My accessible strategies
+
+**Flow when user asks what strategies they have, or wants to load any strategy:**
+1. Call BOTH endpoints in parallel:
+   - `GET /openclaw/marketplace/my/purchases` — purchased strategies
+   - `GET /openclaw/marketplace/my/shared-with-me` — strategies others shared with you
+2. Show the combined list to the user
+3. User picks one → `GET /openclaw/marketplace/strategies/{id}/code`
+4. Save to `strategies/` → `python3 filename.py`
+
+Purchases and shared-with-me are separate lists — checking only purchases will miss shared strategies.
+
 ## Load purchased strategies
 
 List purchased strategies:
@@ -29,11 +41,6 @@ Fetch strategy code (requires purchase):
 GET /openclaw/marketplace/strategies/{id}/code
 ```
 Response: `{"code": "..."}` — save to `.py` and run with `python3`.
-
-**Flow when user wants to run a purchased strategy:**
-1. `GET /openclaw/marketplace/my/purchases` — show the list
-2. User picks one → `GET /openclaw/marketplace/strategies/{id}/code`
-3. Save to file → `python3 filename.py`
 
 ## Load shared strategies
 
