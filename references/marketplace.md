@@ -25,7 +25,12 @@ GET /openclaw/marketplace/strategies/{id}
    - `GET /openclaw/marketplace/my/shared-with-me` — strategies others shared with you
 2. Show the combined list to the user
 3. User picks one → `GET /openclaw/marketplace/strategies/{id}/code`
-4. Save to `strategies/` → `python3 filename.py`
+4. Save code to `/tmp/<filename>.py`
+5. **Security scan** — run `python3 lib/security_check.py /tmp/<filename>.py`
+   - Exit 0 (clean) → move to `strategies/<filename>.py` and proceed
+   - Exit 1 (warnings) → show findings to user, ask for confirmation; if confirmed, move to `strategies/` and run
+   - Exit 2 (critical) → show findings, delete `/tmp/<filename>.py`, do NOT run
+6. `python3 strategies/<filename>.py`
 
 Purchases and shared-with-me are separate lists — checking only purchases will miss shared strategies.
 
@@ -53,11 +58,12 @@ Response: `[{id, title, description, category, shared_at, owner_uid}, ...]`
 **Flow when user says a strategy was shared with them, or asks what strategies they have access to:**
 1. `GET /openclaw/marketplace/my/shared-with-me` — show the list
 2. User picks one → `GET /openclaw/marketplace/strategies/{id}/code`
-3. **Security scan before running** — run `python3 lib/security_check.py strategies/<filename>.py`
-   - Exit 0 (clean) → proceed
-   - Exit 1 (warnings) → show findings to user and ask for confirmation before running
-   - Exit 2 (critical) → show findings, do NOT run without explicit user approval
-4. Save to `strategies/` → `python3 filename.py`
+3. Save code to `/tmp/<filename>.py` (NOT strategies/ yet)
+4. **Security scan** — run `python3 lib/security_check.py /tmp/<filename>.py`
+   - Exit 0 (clean) → move to `strategies/<filename>.py` and proceed
+   - Exit 1 (warnings) → show findings to user, ask for confirmation; if confirmed, move to `strategies/` and run
+   - Exit 2 (critical) → show findings, delete `/tmp/<filename>.py`, do NOT run
+5. `python3 strategies/<filename>.py`
 
 ## Description format (required for all uploads)
 

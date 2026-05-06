@@ -74,7 +74,7 @@ When you generate charts or images, you MUST send them to Telegram:
 ## Shell Commands
 
 - NEVER chain commands with && or || or ; — run ONE command at a time
-- Use `python3 file.py` or `node file.js` directly, never `pip install x && python3 file.py`
+- Use `python3 file.py [args]` or `node file.js` directly — passing arguments is fine, but never chain with && or || or ;
 - If you need to install a package, run `pip install x` as a separate command first, then run your script
 
 ## Strategy Report

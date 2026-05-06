@@ -66,7 +66,14 @@ def _ast_checks(tree: ast.AST) -> list[dict]:
             elif name in ("os.system", "os.popen"):
                 findings.append(_c(node.lineno, f"{name}() — shell execution"))
             elif name and name.startswith("subprocess."):
-                findings.append(_c(node.lineno, f"{name}() — shell execution"))
+                has_shell_true = any(
+                    kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True
+                    for kw in node.keywords
+                )
+                if has_shell_true:
+                    findings.append(_c(node.lineno, f"{name}(shell=True) — shell injection risk"))
+                else:
+                    findings.append(_w(node.lineno, f"{name}() — shell execution; verify args are not user-controlled"))
             elif name == "open":
                 _check_open(node, findings)
 
