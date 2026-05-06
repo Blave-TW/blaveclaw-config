@@ -137,6 +137,7 @@ Response: `{"status": "ok", "strategy_id": 123}`
 1. If the strategy isn't uploaded yet → `POST /openclaw/marketplace/strategies/private` first
 2. `POST /openclaw/marketplace/strategies/{id}/share` with the target user IDs
 3. Confirm back to the user which strategy ID was shared with which UIDs
+4. Tell the user to inform the recipient: **請對方跟他的 BlaveClaw agent 說「幫我看一下有沒有人分享策略給我」**，agent 會自動去 shared-with-me 撈取並載入。
 
 Share with specific user IDs:
 ```
