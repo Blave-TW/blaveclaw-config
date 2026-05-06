@@ -116,6 +116,11 @@ Content-Type: application/json
 ```
 Response: `{"status": "ok", "strategy_id": 123}`
 
+**Flow when user wants to share a private strategy with specific users:**
+1. If the strategy isn't uploaded yet → `POST /openclaw/marketplace/strategies/private` first
+2. `POST /openclaw/marketplace/strategies/{id}/share` with the target user IDs
+3. Confirm back to the user which strategy ID was shared with which UIDs
+
 Share with specific user IDs:
 ```
 POST /openclaw/marketplace/strategies/{id}/share

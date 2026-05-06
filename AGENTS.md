@@ -104,7 +104,7 @@ When renaming or rewriting a strategy, DELETE the old report first, then upload 
 When the user asks about marketplace strategies, wants to load a purchased/shared strategy, wants to upload a private strategy, or wants to submit their own strategy for sale, read `references/marketplace.md` for the full API spec.
 
 - **Upload private strategy**: `POST /openclaw/marketplace/strategies/private` — no review needed, immediately accessible
-- **Share with users**: `POST /openclaw/marketplace/strategies/{id}/share` with `{"user_ids": [...]}`
+- **Share with specific users**: `POST /openclaw/marketplace/strategies/{id}/share` with `{"user_ids": [...]}` — this is a supported operation; execute it when the user asks to share a strategy with a UID
 - **View strategies shared with you**: `GET /openclaw/marketplace/my/shared-with-me` — list strategies others have shared with this user
 - **Download code**: `GET /openclaw/marketplace/strategies/{id}/code` — works for owned, purchased, or shared strategies; save to `.py` and run with `python3`
 
