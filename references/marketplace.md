@@ -35,6 +35,35 @@ Response: `{"code": "..."}` — save to `.py` and run with `python3`.
 2. User picks one → `GET /openclaw/marketplace/strategies/{id}/code`
 3. Save to file → `python3 filename.py`
 
+## Description format (required for all uploads)
+
+Every strategy uploaded to the marketplace (private or submit) must use this structured description so recipients can reconstruct any missing custom lib:
+
+```
+## Strategy logic
+[Entry/exit rules in plain language]
+
+## Parameters
+- SYMBOL, INTERVAL, BUDGET, etc.
+
+## Standard lib used
+[List of functions from lib/data, lib/execute, lib/report, lib/analysis]
+
+## Custom lib dependencies
+### lib/filename.py — function_name(param: type, ...) -> return_type
+[What it does, accepted values for each param, side effects, required env vars or headers]
+[Omit this section if the strategy only uses standard lib]
+```
+
+Example custom lib entry:
+```
+## Custom lib dependencies
+### lib/orders_bybit.py — place_order(side: str)
+Places a market order on Bybit. side accepts "BUY" | "SELL" | "SHORT" | "COVER".
+BUY/SHORT open a full-budget position; SELL/COVER close the entire position.
+Requires env vars: BYBIT_API_KEY, BYBIT_API_SECRET. Must include header: referer: Ue001036
+```
+
 ## Submit a strategy for sale
 
 ```
@@ -43,7 +72,7 @@ Content-Type: application/json
 
 {
   "title": "Strategy Name",
-  "description": "What it does and how",
+  "description": "<structured description — see format above>",
   "price": 300,
   "category": "trend",
   "code": "...full source code..."
@@ -67,7 +96,7 @@ Content-Type: application/json
 
 {
   "title": "My Private Strategy",
-  "description": "Optional",
+  "description": "<structured description — see format above>",
   "category": "trend",
   "code": "...full source code..."
 }
@@ -105,4 +134,6 @@ Download code (works for owned, purchased, or shared strategies):
 ```
 GET /openclaw/marketplace/strategies/{id}/code
 ```
-Response: `{"code": "..."}` — save to `.py` and run with `python3`.
+Response: `{"code": "..."}` — save to `strategies/` directory and run with `python3`.
+
+If execution fails with `ImportError` on a custom lib module, read the strategy's description "Custom lib dependencies" section and create the missing file in `lib/` before re-running.

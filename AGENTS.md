@@ -54,6 +54,11 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 
 Skill examples show data-fetch patterns only — integrate them into TEMPLATE.py using lib/ imports.
 
+**Marketplace lib rule** — strategies shared via marketplace must follow this boundary strictly:
+- `compute_signal`, indicator calculation, and all logic that affects trade decisions MUST stay in the strategy file — never in a custom lib
+- Custom `lib/` files must only contain IO utilities (exchange order helpers, data fetchers) — logic that can be fully described by interface + behavior, not by implementation detail
+- This allows recipients to reconstruct missing custom lib from the description without risking strategy inconsistency
+
 ## Strategy Code Structure
 
 CRITICAL: Read the correct reference before writing any strategy code (see Strategy Types above).
@@ -101,6 +106,10 @@ When the user asks about marketplace strategies, wants to load a purchased/share
 - **Upload private strategy**: `POST /openclaw/marketplace/strategies/private` — no review needed, immediately accessible
 - **Share with users**: `POST /openclaw/marketplace/strategies/{id}/share` with `{"user_ids": [...]}`
 - **Download code**: `GET /openclaw/marketplace/strategies/{id}/code` — works for owned, purchased, or shared strategies; save to `.py` and run with `python3`
+
+**When uploading any strategy to marketplace** (private or submit), always write a structured description — see `references/marketplace.md` for the required format.
+
+**When downloading a strategy**, save to `strategies/` and run with `python3`. If `ImportError` for a custom lib, read the description's "Custom lib dependencies" section and recreate the missing file in `lib/`.
 
 NEVER purchase a strategy on behalf of the user — purchasing involves credit charges and must be done by the user on the website.
 
