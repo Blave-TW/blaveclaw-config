@@ -35,6 +35,19 @@ Response: `{"code": "..."}` — save to `.py` and run with `python3`.
 2. User picks one → `GET /openclaw/marketplace/strategies/{id}/code`
 3. Save to file → `python3 filename.py`
 
+## Load shared strategies
+
+List strategies shared with you:
+```
+GET /openclaw/marketplace/my/shared-with-me
+```
+Response: `[{id, title, description, category, shared_at, owner_uid}, ...]`
+
+**Flow when user says a strategy was shared with them, or asks what strategies they have access to:**
+1. `GET /openclaw/marketplace/my/shared-with-me` — show the list
+2. User picks one → `GET /openclaw/marketplace/strategies/{id}/code`
+3. Save to `strategies/` → `python3 filename.py`
+
 ## Description format (required for all uploads)
 
 Every strategy uploaded to the marketplace (private or submit) must use this structured description so recipients can reconstruct any missing custom lib:
