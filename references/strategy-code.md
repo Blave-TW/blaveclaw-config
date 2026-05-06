@@ -1,7 +1,7 @@
 # Strategy Code Structure (Type A — Signal Strategy)
 
 NOTE: This guide is for **Type A (Signal Strategy)** only — single symbol, fixed interval, backtest-first.
-For Type B (everything else), write from scratch — no template, no backtest, no upload_report().
+For Type B (everything else), write from scratch — no template, no backtest.
 
 CRITICAL: Every Type A strategy MUST be based on `strategies/TEMPLATE.py`. Copy the template and fill in the marked sections. Do NOT write a standalone backtest script from scratch — scripts that don't follow the template cannot be deployed live or update the website automatically.
 
@@ -23,7 +23,6 @@ CRITICAL: Every Type A strategy MUST be based on `strategies/TEMPLATE.py`. Copy 
 - `END` is backtest only — live/paper always fetches to today; keep `START` as the full history start date
 - Default is always `MODE = "backtest"` — only switch to `"live"` after user confirms
 - Do NOT force-close open positions at end of backtest data
-- `upload_report()` runs every time — do NOT add conditionals around it
 
 ## Backtest Output (mandatory)
 

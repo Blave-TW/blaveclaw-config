@@ -42,7 +42,6 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 
 **Always import these — never write them inline:**
 - `from lib.data import fetch_kline` — kline data fetching (annual chunking built-in)
-- `from lib.report import upload_report` — backtest/live report upload (supports `indicators=` param)
 - `from lib.execute import execute, load_state, save_state, bootstrap` — trade execution and state management
 - `from lib.analysis import reconstruct_arrays, regime_analysis, plot_regime` — performance arrays, regime breakdown, regime chart
 
@@ -77,17 +76,13 @@ When you generate charts or images, you MUST send them to Telegram:
 - Use `python3 file.py [args]` or `node file.js` directly — passing arguments is fine, but never chain with && or || or ;
 - If you need to install a package, run `pip install x` as a separate command first, then run your script
 
-## Strategy Report
-
-After every backtest AND every cron run (live/paper), upload the report so the user can track it on the website.
-Full API spec: read `references/strategy-report.md`
+## Backtest Output
 
 IMPORTANT: Do NOT call `bt.plot()` — it generates a heavy interactive HTML file that takes 20-30 seconds and is not useful in Telegram.
 
 After every backtest, automatically:
 1. Generate PnL chart with `from lib.analysis import reconstruct_arrays, plot_pnl`
 2. Send to Telegram (see Sending Images section)
-3. Upload report with `upload_report(...)`
 
 For strategy-specific indicators (e.g. TI alpha, KD), pass them via `extra_panels`:
 ```python
@@ -95,9 +90,6 @@ result = reconstruct_arrays(df, stats)
 plot_pnl(df, result, title='...', output_path='/tmp/pnl.png', extra_panels=[
     {'data': df['KD_K'].values, 'label': 'K', 'color': '#3498db', 'hlines': [(80, '#e74c3c', 'OB'), (20, '#2ecc71', 'OS')]}
 ])
-
-When deleting a strategy file or cron job, also DELETE the report from the website (DELETE /openclaw/strategy/report).
-When renaming or rewriting a strategy, DELETE the old report first, then upload a new one under the new name.
 
 ## Strategy Marketplace
 

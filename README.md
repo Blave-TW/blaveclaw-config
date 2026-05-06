@@ -33,5 +33,4 @@ Or paste into the terminal directly.
 - `CLAUDE.md` — Claude Code context (points to AGENTS.md)
 - `references/deployment.md` — deployment confirmation flow, live bootstrap
 - `references/strategy-code.md` — strategy code structure rules
-- `references/strategy-report.md` — strategy report API spec
 - `strategies/TEMPLATE.py` — base template for all strategies

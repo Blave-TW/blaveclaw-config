@@ -11,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from backtesting import Backtest, Strategy
 from dotenv import dotenv_values
 from lib.data import fetch_kline
-from lib.report import upload_report
 from lib.execute import execute, load_state, save_state, bootstrap
 from lib.analysis import reconstruct_arrays, plot_pnl
 
@@ -102,7 +101,6 @@ def main():
         result = reconstruct_arrays(df, stats)
         chart_path = plot_pnl(df, result, title=f'{SYMBOL} {STRATEGY_NAME}', output_path=f'/tmp/{STRATEGY_NAME}_pnl.png')
         # send_telegram_image(chart_path)  # uncomment and implement
-        upload_report(df, STRATEGY_NAME, SYMBOL, INTERVAL, MODE, _env, FEE, stats=stats, strategy_file=__file__)
         return
 
     candles = [{'time': int(t.timestamp()), 'close': float(r['Close']),
@@ -114,7 +112,6 @@ def main():
     signal = compute_signal(df.iloc[-1])
     logging.info(f"signal={signal} close={candle['close']}")
     execute(candle, signal, state, MODE, place_order_fn=place_order, send_telegram_fn=send_telegram)
-    upload_report(df, STRATEGY_NAME, SYMBOL, INTERVAL, MODE, _env, FEE, state=state, strategy_file=__file__)
     save_state(STRATEGY_NAME, state)
 
 
