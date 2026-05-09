@@ -27,6 +27,10 @@ VOL_CAP          = 2.0              # (VOL_TARGETING) max scale factor
 
 # ─────────────────────────────────────────────────────────────
 # FILL IN: Add indicator columns to df
+# For Blave alpha indicators (holder concentration, taker intensity,
+# liquidation, whale hunter, etc.): read
+# skills/blave-quant/examples/backtest-holder-concentration.md
+# for the correct fetch pattern, then fetch and merge into df here.
 # ─────────────────────────────────────────────────────────────
 def add_indicators(df):
     # df['SMA20'] = df['Close'].rolling(20).mean()
