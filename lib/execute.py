@@ -1,36 +1,34 @@
 import json, logging, os
 
 
+
 def bootstrap(df, signal_fn):
     """Replay historical candles to find initial position state (no orders placed).
     df: DataFrame with OHLCV + indicator columns (output of add_indicators)
     signal_fn: compute_signal function, accepts a pd.Series row
     """
-    state = {'side': None, 'entry': None, 'pnl': 0.0, 'trades': 0, 'trades_log': [], 'indicators': []}
+    state = {'position': 0.0, 'entry': None, 'pnl': 0.0, 'trades': 0, 'trades_log': []}
     for ts, row in df.iloc[:-1].iterrows():
-        sig = signal_fn(row)
-        p   = float(row['Close'])
-        t   = int(ts.timestamp())
-        if sig == 'LONG' and state['side'] != 'long':
-            if state['side'] == 'short':
-                pnl = (state['entry'] - p) / state['entry'] * 100
-                state.update({'side': None, 'entry': None, 'pnl': state['pnl'] + pnl, 'trades': state['trades'] + 1})
-                state['trades_log'].append({'time': t, 'action': 'COVER', 'price': p})
-            state.update({'side': 'long', 'entry': p})
-            state['trades_log'].append({'time': t, 'action': 'BUY', 'price': p})
-        elif sig == 'SHORT' and state['side'] != 'short':
-            if state['side'] == 'long':
-                pnl = (p - state['entry']) / state['entry'] * 100
-                state.update({'side': None, 'entry': None, 'pnl': state['pnl'] + pnl, 'trades': state['trades'] + 1})
-                state['trades_log'].append({'time': t, 'action': 'SELL', 'price': p})
-            state.update({'side': 'short', 'entry': p})
-            state['trades_log'].append({'time': t, 'action': 'SHORT', 'price': p})
-        elif sig == 'FLAT' and state['side']:
-            action = 'SELL' if state['side'] == 'long' else 'COVER'
-            pnl = (p - state['entry']) / state['entry'] * 100 * (1 if state['side'] == 'long' else -1)
-            state.update({'side': None, 'entry': None, 'pnl': state['pnl'] + pnl, 'trades': state['trades'] + 1})
+        p        = float(row['Close'])
+        t        = int(ts.timestamp())
+        prev_pos = state['position']
+        new_pos  = float(signal_fn(row))
+
+        if prev_pos != 0 and (new_pos == 0 or new_pos * prev_pos < 0):
+            pnl    = (p - state['entry']) / state['entry'] * 100 * (1 if prev_pos > 0 else -1)
+            action = 'SELL' if prev_pos > 0 else 'COVER'
+            state.update({'position': 0.0, 'entry': None, 'pnl': state['pnl'] + pnl, 'trades': state['trades'] + 1})
             state['trades_log'].append({'time': t, 'action': action, 'price': p})
-    logging.info(f"Bootstrapped: side={state['side']} entry={state['entry']}")
+
+        if new_pos != 0:
+            if state['position'] == 0:
+                state.update({'position': new_pos, 'entry': p})
+                action = 'BUY' if new_pos > 0 else 'SHORT'
+                state['trades_log'].append({'time': t, 'action': action, 'price': p})
+            elif new_pos != prev_pos:
+                state['position'] = new_pos
+
+    logging.info(f"Bootstrapped: position={state['position']} entry={state['entry']}")
     return state
 
 
@@ -43,45 +41,34 @@ def save_state(strategy_name, state):
     json.dump(state, open(f'strategies/{strategy_name}/{strategy_name}_state.json', 'w'), indent=2)
 
 
-def execute(candle, signal, state, mode, place_order_fn=None, send_telegram_fn=None):
-    """Process one candle: close opposite position, open new position."""
-    price = candle['close']
+def update_state(candle, signal, state, mode, symbol=None, exchange=None, send_telegram_fn=None):
+    """Process one candle: update position state only. Orders are placed by the reconciler."""
+    price    = candle['close']
+    prev_pos = float(state.get('position', 0))
+    new_pos  = float(signal)
 
-    if signal == 'LONG' and state['side'] == 'short':
-        pnl = (state['entry'] - price) / state['entry'] * 100
-        state.update({'side': None, 'entry': None, 'pnl': state['pnl'] + pnl, 'trades': state['trades'] + 1})
-        state['trades_log'].append({'time': candle['time'], 'action': 'COVER', 'price': price})
-        if mode == 'live' and place_order_fn:            place_order_fn('COVER')
-        if mode in ('live', 'paper') and send_telegram_fn: send_telegram_fn(f"COVER @ {price}  PnL={pnl:+.2f}%")
-        logging.info(f"COVER @ {price}  PnL={pnl:+.2f}%")
+    if symbol:   state['symbol']   = symbol
+    if exchange: state['exchange'] = exchange
 
-    elif signal == 'SHORT' and state['side'] == 'long':
-        pnl = (price - state['entry']) / state['entry'] * 100
-        state.update({'side': None, 'entry': None, 'pnl': state['pnl'] + pnl, 'trades': state['trades'] + 1})
-        state['trades_log'].append({'time': candle['time'], 'action': 'SELL', 'price': price})
-        if mode == 'live' and place_order_fn:            place_order_fn('SELL')
-        if mode in ('live', 'paper') and send_telegram_fn: send_telegram_fn(f"SELL @ {price}  PnL={pnl:+.2f}%")
-        logging.info(f"SELL @ {price}  PnL={pnl:+.2f}%")
-
-    elif signal == 'FLAT' and state['side']:
-        action = 'SELL' if state['side'] == 'long' else 'COVER'
-        pnl = (price - state['entry']) / state['entry'] * 100 * (1 if state['side'] == 'long' else -1)
-        state.update({'side': None, 'entry': None, 'pnl': state['pnl'] + pnl, 'trades': state['trades'] + 1})
+    # Close or flip
+    if prev_pos != 0 and (new_pos == 0 or new_pos * prev_pos < 0):
+        pnl    = (price - state['entry']) / state['entry'] * 100 * (1 if prev_pos > 0 else -1)
+        action = 'SELL' if prev_pos > 0 else 'COVER'
+        state.update({'position': 0.0, 'entry': None, 'pnl': state['pnl'] + pnl, 'trades': state['trades'] + 1})
         state['trades_log'].append({'time': candle['time'], 'action': action, 'price': price})
-        if mode == 'live' and place_order_fn:            place_order_fn(action)
-        if mode in ('live', 'paper') and send_telegram_fn: send_telegram_fn(f"{action} @ {price}  PnL={pnl:+.2f}%")
+        if mode in ('live', 'paper') and send_telegram_fn:
+            send_telegram_fn(f"Signal: {action} @ {price}  PnL={pnl:+.2f}%")
         logging.info(f"{action} @ {price}  PnL={pnl:+.2f}%")
 
-    if signal == 'LONG' and not state['side']:
-        state.update({'side': 'long', 'entry': price})
-        state['trades_log'].append({'time': candle['time'], 'action': 'BUY', 'price': price})
-        if mode == 'live' and place_order_fn:            place_order_fn('BUY')
-        if mode in ('live', 'paper') and send_telegram_fn: send_telegram_fn(f"BUY @ {price}")
-        logging.info(f"BUY @ {price}")
-
-    elif signal == 'SHORT' and not state['side']:
-        state.update({'side': 'short', 'entry': price})
-        state['trades_log'].append({'time': candle['time'], 'action': 'SHORT', 'price': price})
-        if mode == 'live' and place_order_fn:            place_order_fn('SHORT')
-        if mode in ('live', 'paper') and send_telegram_fn: send_telegram_fn(f"SHORT @ {price}")
-        logging.info(f"SHORT @ {price}")
+    # Open or scale
+    if new_pos != 0:
+        if state['position'] == 0:
+            state.update({'position': new_pos, 'entry': price})
+            action = 'BUY' if new_pos > 0 else 'SHORT'
+            state['trades_log'].append({'time': candle['time'], 'action': action, 'price': price})
+            if mode in ('live', 'paper') and send_telegram_fn:
+                send_telegram_fn(f"Signal: {action} @ {price}")
+            logging.info(f"{action} @ {price}")
+        elif new_pos != prev_pos:
+            state['position'] = new_pos
+            logging.info(f"SCALE {prev_pos:+.2f}→{new_pos:+.2f} @ {price}")
