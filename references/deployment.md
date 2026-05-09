@@ -7,11 +7,8 @@ CRITICAL: You MUST NEVER deploy a live strategy or set up a cron job without exp
 1. Write the strategy with `MODE = "backtest"` and run a backtest — show the results
 2. Ask the user TWO questions before going live:
    a. "Do you want to deploy this live? Reply YES to confirm."
-   b. "How much capital and position sizing? Options:
-      • Fixed amount — buy $X USDT each time
-      • Fixed % — use X% of account balance each time
-      • Vol-Targeting — size position so portfolio vol = X% annualized (recommended, matches backtest)"
-3. Only after receiving YES AND position sizing confirmation: implement `place_order()` with the correct sizing, change `MODE = "live"`, and set up the cron job
+   b. "Position sizing: set VOL_TARGETING=True (recommended) or leave False for fixed ±1.0 signal. Then confirm the strategy weight in portfolio_config.json."
+3. Only after receiving YES AND position sizing confirmation: change `MODE = "live"`, update portfolio_config.json, and set up the cron job
 
 Never assume the user wants to go live just because they described a strategy or said "let's try it."
 Even if the user says "deploy it" or "run it", always confirm with one message before touching cron or MODE = "live".
