@@ -24,7 +24,6 @@ INTERVAL         = "1h"
 START            = "2024-01-01"
 END              = None
 FEE              = 0.0005
-BUDGET_USDT      = 1_000        # backtest cash
 VOL_TARGETING    = False        # set True to size position by realized volatility
 TARGET_VOL       = 0.10         # (VOL_TARGETING only) annualized target vol, e.g. 0.10 = 10%
 VOL_LOOKBACK     = 720          # (VOL_TARGETING only) lookback candles, e.g. 720 = 30d on 1h
@@ -121,7 +120,7 @@ def main():
     df    = add_indicators(df)
 
     if MODE == 'backtest':
-        bt    = Backtest(df, BlaveStrategy, cash=BUDGET_USDT, commission=FEE, trade_on_close=True)
+        bt    = Backtest(df, BlaveStrategy, cash=100_000, commission=FEE, trade_on_close=True)
         stats = bt.run()
         print(stats[['Return [%]', 'Sharpe Ratio', 'Max. Drawdown [%]', 'Win Rate [%]', '# Trades']])
         result = reconstruct_arrays(df, stats)
