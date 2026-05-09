@@ -102,7 +102,7 @@ When the user asks about marketplace strategies, wants to load a purchased/share
 
 **When uploading any strategy to marketplace** (private or submit), always write a structured description — see `references/marketplace.md` for the required format.
 
-**When downloading a strategy**, save to `strategies/` and run with `python3`. If `ImportError` for a custom lib, read the description's "Custom lib dependencies" section and recreate the missing file in `lib/`.
+**When downloading a strategy**, save to `strategies/{name}/{name}.py` (create the subfolder) and run with `python3 strategies/{name}/{name}.py`. If `ImportError` for a custom lib, read the description's "Custom lib dependencies" section and recreate the missing file in `lib/`.
 
 **When a user says someone shared a strategy with them, or asks what strategies are available to them**, always call `GET /openclaw/marketplace/my/shared-with-me` to check.
 

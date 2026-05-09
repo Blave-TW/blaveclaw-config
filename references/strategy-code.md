@@ -7,7 +7,7 @@ CRITICAL: Every Type A strategy MUST be based on `strategies/TEMPLATE.py`. Copy 
 
 ## Steps
 
-1. Copy `strategies/TEMPLATE.py` to `strategies/[strategy_name].py`
+1. Copy `strategies/TEMPLATE.py` to `strategies/[strategy_name]/[strategy_name].py`
 2. Fill in the three marked sections:
    - `compute_signal()` — pure signal logic, returns `"LONG"` or `"FLAT"`
    - `BlaveStrategy.init()` — precompute indicators with `self.I()`
@@ -43,7 +43,7 @@ Example: see `strategies/btc_ti_strategy.py`
 
 ## Logging
 
-Log to `/root/.openclaw/workspace/logs/[strategy_name].log`
+Log to `strategies/[strategy_name]/[strategy_name].log`
 
 ## Arrays
 

@@ -6,8 +6,8 @@
 import logging, os, sys
 import pandas as pd
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "blave-quant"))
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "skills" / "blave-quant"))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from backtesting import Backtest, Strategy
 from dotenv import dotenv_values
 from lib.data import fetch_kline
@@ -28,9 +28,9 @@ _env  = dotenv_values()
 _HDRS = {'api-key': _env.get('blave_api_key', ''), 'secret-key': _env.get('blave_secret_key', '')}
 
 # --- Logging ---
-os.makedirs('logs', exist_ok=True)
+os.makedirs(f'strategies/{STRATEGY_NAME}', exist_ok=True)
 logging.basicConfig(
-    filename=f'logs/{STRATEGY_NAME}.log',
+    filename=f'strategies/{STRATEGY_NAME}/{STRATEGY_NAME}.log',
     level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s'
 )
 
@@ -99,7 +99,7 @@ def main():
         stats = bt.run()
         print(stats[['Return [%]', 'Sharpe Ratio', 'Max. Drawdown [%]', 'Win Rate [%]', '# Trades']])
         result = reconstruct_arrays(df, stats)
-        chart_path = plot_pnl(df, result, title=f'{SYMBOL} {STRATEGY_NAME}', output_path=f'/tmp/{STRATEGY_NAME}_pnl.png')
+        chart_path = plot_pnl(df, result, title=f'{SYMBOL} {STRATEGY_NAME}', output_path=f'strategies/{STRATEGY_NAME}/{STRATEGY_NAME}_pnl.png')
         # send_telegram_image(chart_path)  # uncomment and implement
         return
 

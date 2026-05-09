@@ -35,12 +35,12 @@ def bootstrap(df, signal_fn):
 
 
 def load_state(strategy_name):
-    path = f'{strategy_name}_state.json'
+    path = f'strategies/{strategy_name}/{strategy_name}_state.json'
     return json.load(open(path)) if os.path.exists(path) else None
 
 
 def save_state(strategy_name, state):
-    json.dump(state, open(f'{strategy_name}_state.json', 'w'), indent=2)
+    json.dump(state, open(f'strategies/{strategy_name}/{strategy_name}_state.json', 'w'), indent=2)
 
 
 def execute(candle, signal, state, mode, place_order_fn=None, send_telegram_fn=None):
