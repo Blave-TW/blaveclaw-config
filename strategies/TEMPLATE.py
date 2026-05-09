@@ -3,10 +3,11 @@
 # Interval: 1h
 # Logic:    [entry/exit rules]
 
-import sys, numpy as np
+import sys, numpy as np, pandas as pd
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "skills" / "blave-quant"))
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from backtesting import Backtest, Strategy
 
 # --- Config ---
 MODE             = "backtest"        # "backtest" | "paper" | "live"
