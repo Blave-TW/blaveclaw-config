@@ -76,6 +76,26 @@ When you generate charts or images, you MUST send them to Telegram:
 - Use `python3 file.py [args]` or `node file.js` directly — passing arguments is fine, but never chain with && or || or ;
 - If you need to install a package, run `pip install x` as a separate command first, then run your script
 
+## Skill Install / Update
+
+When the user asks to install or update a skill (e.g. "更新 blave-quant skill", "install blave skill"), you MUST use the full non-interactive form of `skills add`:
+
+```
+npx -y skills add <github-url> -a openclaw -s <skill-name> -y
+```
+
+For the Blave skill specifically:
+
+```
+npx -y skills add https://github.com/Blave-TW/blave-quant-skill -a openclaw -s blave-quant -y
+```
+
+DO NOT run the bare `npx skills add <url>` — it triggers a multi-step interactive TUI (agent picker, skill picker, scope, copy/symlink, confirm) which cannot be reliably driven via tmux send-keys. Specifically:
+- Arrow keys fail with `cursor key mode is not known yet`
+- Space gets eaten by the search input box and filters the list to "No matches found"
+
+The non-interactive flags (`-a` agent, `-s` skill name, `-y` confirm) skip the entire TUI. The skill name comes from the skill's `clawhub.json` `name` field.
+
 ## Backtest Output
 
 IMPORTANT: Do NOT call `bt.plot()` — it generates a heavy interactive HTML file that takes 20-30 seconds and is not useful in Telegram.
