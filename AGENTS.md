@@ -28,13 +28,38 @@ Before writing any strategy code, classify the strategy:
 - blave-quant-skill examples provide the data-fetch pattern only — always structure the full strategy as TEMPLATE.py
 - `END` defaults to `None` (latest data) unless the user explicitly specifies an end date
 
-**Type B — Everything else** (screener, grid, arbitrage, portfolio, etc.)
+**Type B — Everything else** (screener, grid, arbitrage, one-off execution, etc.)
 
 - Write code from scratch based on the user's requirements — no template
 - **No backtest** — skip it entirely
 - Still require explicit user confirmation before deploying or setting up cron jobs
 
-If unsure, ask: "Does this strategy trade a fixed symbol, or screen for symbols each run?"
+**Type C — Portfolio Strategy** (multi-stock, periodic rebalancing, weight-based)
+
+Examples: 「台股外資 Z-Score 選股」「多因子輪動」「跨市場資金分配」「ETF 週期調倉」
+
+- Allocates capital across a **basket of stocks/assets** using a weight vector
+- Rebalances periodically (daily / weekly / monthly); weight changes drive trades
+- Uses `backtesting.py` **portfolio mode**: pass a MultiIndex DataFrame `(stock, Open/Close)` to `Backtest`, subclass `Strategy`, call `self.allocate(weights)` inside `next()`
+- Pass pre-computed signals (e.g. Z-Score DataFrame) via `Backtest(signals=df, warmup_bars=N)`
+- **Backtest REQUIRED** before going live — read `skills/blave-quant/examples/backtest-twstock-foreign-zscore.md` for the canonical pattern
+- Still require explicit user confirmation before deploying or setting up cron jobs
+
+**Decision tree — classify BEFORE writing any code:**
+
+```
+Does the strategy trade ONE fixed symbol (e.g. BTCUSDT) on a fixed interval?
+  → YES → Type A  (backtesting.py single-asset + TEMPLATE.py)
+
+Does the strategy allocate weights across MULTIPLE symbols / a basket of assets,
+rebalancing on a schedule (daily / weekly / monthly)?
+  → YES → Type C  (backtesting.py portfolio mode + backtest-twstock example)
+
+Everything else (screener, grid, arbitrage, one-off execution, alert bot)?
+  → Type B  (write from scratch, no backtest)
+```
+
+If unsure between Type A and C: Type A has ONE symbol and ONE position (long/short/flat). Type C has N symbols and a weight vector that sums to ≤ 1.
 
 ## Shared Library (lib/)
 
