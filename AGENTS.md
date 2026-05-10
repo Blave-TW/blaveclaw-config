@@ -42,6 +42,13 @@ Examples: 「台股外資 Z-Score 選股」「多因子輪動」「跨市場資�
 - Rebalances periodically (daily / weekly / monthly); weight changes drive trades
 - Uses `backtesting.py` **portfolio mode**: pass a MultiIndex DataFrame `(stock, Open/Close)` to `Backtest`, subclass `Strategy`, call `self.allocate(weights)` inside `next()`
 - Pass pre-computed signals (e.g. Z-Score DataFrame) via `Backtest(signals=df, warmup_bars=N)`
+- **CRITICAL — use the skill's backtesting package, NOT PyPI**: always add these two lines before `from backtesting import ...`:
+  ```python
+  import sys; from pathlib import Path
+  sys.path.insert(0, str(Path(__file__).parent.parent.parent / "skills" / "blave-quant"))
+  sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+  ```
+  Never run `pip install backtesting` — the PyPI version does not have portfolio mode.
 - **Backtest REQUIRED** before going live — read `skills/blave-quant/examples/backtest-twstock-foreign-zscore.md` for the canonical pattern
 - Still require explicit user confirmation before deploying or setting up cron jobs
 
