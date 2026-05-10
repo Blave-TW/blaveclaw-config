@@ -62,7 +62,7 @@ def run(config, add_indicators_fn, compute_signal_fn, send_telegram_fn=None):
         StratClass = type('BlaveStrategy', (_BlaveBase,), {
             '_compute_signal': staticmethod(compute_signal_fn),
         })
-        bt    = Backtest(df, StratClass, cash=100_000, commission=fee, trade_on_close=True)
+        bt    = Backtest(df, StratClass, cash=100_000, commission=fee, trade_on_close=False)
         stats = bt.run()
         print(stats[['Return [%]', 'Sharpe Ratio', 'Max. Drawdown [%]', 'Win Rate [%]', '# Trades']])
         result = reconstruct_arrays(df, stats)
