@@ -107,6 +107,9 @@ When you generate charts or images, you MUST send them to Telegram:
 - NEVER chain commands with && or || or ; — run ONE command at a time
 - Use `python3 file.py [args]` or `node file.js` directly — passing arguments is fine, but never chain with && or || or ;
 - If you need to install a package, run `pip install x` as a separate command first, then run your script
+- **To run a strategy that needs a specific working directory**: use an absolute path and pass `workdir` if your exec tool supports it. Do NOT use `cd path && python3 ...`. Instead:
+  - Correct: `python3 /root/.openclaw/workspace/strategies/my_strategy/strategy.py` with `workdir=/root/.openclaw/workspace`
+  - Or: `python3 strategies/my_strategy/strategy.py` with `workdir=/root/.openclaw/workspace`
 
 ## Skill Install / Update
 

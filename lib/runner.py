@@ -18,6 +18,8 @@ class _BlaveBase(Strategy):
     def next(self):
         row    = self.data.df.iloc[-1]
         signal = self._compute_signal(row)
+        if np.isnan(float(signal)):
+            return  # nan = hold: keep current position unchanged
         if signal > 0:
             if self.position.is_short: self.position.close()
             if not self.position.is_long: self.buy()

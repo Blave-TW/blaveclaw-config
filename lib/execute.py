@@ -1,4 +1,4 @@
-import json, logging, os
+import json, logging, math, os
 
 
 
@@ -13,6 +13,8 @@ def bootstrap(df, signal_fn):
         t        = int(ts.timestamp())
         prev_pos = state['position']
         new_pos  = float(signal_fn(row))
+        if math.isnan(new_pos):
+            continue                 # nan = hold: keep current position unchanged
 
         if prev_pos != 0 and (new_pos == 0 or new_pos * prev_pos < 0):
             pnl    = (p - state['entry']) / state['entry'] * 100 * (1 if prev_pos > 0 else -1)
@@ -46,6 +48,8 @@ def update_state(candle, signal, state, mode, symbol=None, exchange=None, send_t
     price    = candle['close']
     prev_pos = float(state.get('position', 0))
     new_pos  = float(signal)
+    if math.isnan(new_pos):
+        return                       # nan = hold: keep current position unchanged
 
     if symbol:   state['symbol']   = symbol
     if exchange: state['exchange'] = exchange
