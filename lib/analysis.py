@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
-matplotlib.rcParams['font.family'] = ['Heiti TC', 'Arial Unicode MS', 'DejaVu Sans']
+matplotlib.rcParams['font.family'] = ['Noto Sans CJK TC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', 'Heiti TC', 'Arial Unicode MS', 'DejaVu Sans']
 import matplotlib.pyplot as plt
 
 
