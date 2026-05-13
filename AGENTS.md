@@ -109,6 +109,12 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 - `from lib.param_scan import scan_grid` — run 2D param scan, returns Sharpe grid; accepts compute_signals_fn with row_param/col_param kwargs, fee, freq
 - `from lib.param_scan import find_plateau, plot_heatmap` — plateau detection and heatmap chart
 
+**Parameter scan workflow:**
+1. Run `scan.py` to find the best parameters
+2. **Update the params directly in the existing `strategy.py`** — do NOT create a new strategy folder
+3. Run backtest in the same `strategy.py` to verify
+Never create a duplicate strategy folder just because you ran a scan.
+
 `lib/validation.py`:
 - `from lib.validation import mcpt, plot_mcpt` — Monte Carlo Permutation Test; call `mcpt(close, position, n=2000, fee=..., target_vol=..., ...)` → `(actual_sharpe, p_value, dist)`
 
