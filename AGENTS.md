@@ -27,7 +27,9 @@ Before writing any strategy code, classify the strategy:
 - If the strategy uses any Blave alpha indicator (taker intensity, holder concentration, liquidation, whale hunter, etc.), ALSO read `skills/blave-quant/examples/backtest-holder-concentration.md` BEFORE writing any code — it contains the correct data-fetch pattern (parallel arrays, annual chunking). Implement the fetch logic inside `add_indicators(df)` in the strategy file: fetch alpha data, align to df index, add as columns, return df. Do NOT invent your own fetch logic and do NOT put it in runner.py.
 - blave-quant-skill examples provide the data-fetch pattern only — always structure the full strategy as TEMPLATE.py
 - `END` defaults to `None` (latest data) unless the user explicitly specifies an end date
-- Signal function is **`compute_signals(df) → pd.Series`** (vectorized, whole df at once) — NOT `compute_signal(row)`. Returns: positive float = long (size fraction), 0.0 = flat, nan = hold
+- Write two functions: **`fetch_data(hdrs) → df`** (kline + indicators + realized_vol) and **`compute_signals(df) → pd.Series`** (pure signal logic)
+- `run(locals(), fetch_data, compute_signals, send_telegram_fn=make_sender())` — runner handles everything else
+- Signal values: positive float = long (size fraction), 0.0 = flat, nan = hold (ffill)
 
 **Type B — Everything else** (screener, grid, arbitrage, one-off execution, etc.)
 
