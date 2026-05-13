@@ -5,9 +5,7 @@
 
 import sys, numpy as np, pandas as pd
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "skills" / "blave-quant"))
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from backtesting import Backtest, Strategy
+sys.path.insert(0, str(Path(__file__).parent.parent))  # → blaveclaw-config/
 
 # --- Config ---
 MODE             = "backtest"        # "backtest" | "paper" | "live"
@@ -38,29 +36,31 @@ def add_indicators(df):
 
 
 # ─────────────────────────────────────────────────────────────
-# FILL IN: Signal logic
-# Returns float: 1.0=long  -1.0=short  0.0=flat  (fractions ok)
+# FILL IN: Signal logic (vectorized)
+# Receives the full df (including 'realized_vol' if VOL_TARGETING=True).
+# Returns pd.Series: positive float=long, -1.0=short, 0.0=flat, nan=hold
 # ─────────────────────────────────────────────────────────────
-def compute_signal(row) -> float:
-    direction = 0.0
-    # if row['Close'] > row['SMA20']:
-    #     direction = 1.0
-    # elif row['Close'] < row['SMA20']:
-    #     direction = -1.0
+def compute_signals(df) -> pd.Series:
+    signal = pd.Series(np.nan, index=df.index)
 
-    if direction == 0.0 or not VOL_TARGETING:
-        return direction
+    # Example: long when Close > SMA20
+    # long_mask  = df['Close'] > df['SMA20']
+    # short_mask = df['Close'] < df['SMA20']
+    # signal[long_mask]  = 1.0
+    # signal[short_mask] = -1.0
 
-    vol = row.get('realized_vol')
-    if not vol or np.isnan(vol) or vol <= 0:
-        return 0.0
-    return direction * min(TARGET_VOL / vol, VOL_CAP)
+    if not VOL_TARGETING:
+        return signal
 
-
-def send_telegram(msg):
-    pass
+    # Scale by realized vol
+    vol = df.get('realized_vol', pd.Series(np.nan, index=df.index))
+    size = (TARGET_VOL / vol).clip(upper=VOL_CAP)
+    signal[signal > 0]  = size[signal > 0]
+    signal[signal < 0]  = -size[signal < 0]
+    return signal
 
 
 if __name__ == '__main__':
     from lib.runner import run
-    run(locals(), add_indicators, compute_signal, send_telegram_fn=send_telegram)
+    from lib.notify import make_sender
+    run(locals(), add_indicators, compute_signals, send_telegram_fn=make_sender())

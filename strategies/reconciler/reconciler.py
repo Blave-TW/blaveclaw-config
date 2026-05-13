@@ -42,8 +42,8 @@ def place_order(symbol, signed_diff_usdt):
     raise NotImplementedError("implement exchange-specific order placement")
 
 
-def send_telegram(msg):
-    pass  # implement if notifications needed
+from lib.notify import make_sender as _make_sender
+send_telegram = _make_sender()
 
 
 if __name__ == '__main__':

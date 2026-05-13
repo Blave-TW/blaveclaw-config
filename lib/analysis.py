@@ -6,19 +6,16 @@ matplotlib.rcParams['font.family'] = ['Noto Sans CJK TC', 'Noto Sans CJK SC', 'W
 import matplotlib.pyplot as plt
 
 
-def reconstruct_arrays(df, stats, vol_lookback=720, hours_per_year=8760):
-    """Reconstruct equity, position, realized vol, cumulative return arrays from backtesting.py stats."""
-    equity    = stats['_equity_curve']['Equity'].reindex(df.index, method='ffill')
-    strat_ret = equity.pct_change().fillna(0).values
-    position  = np.zeros(len(df))
-    for _, row in stats['_trades'].iterrows():
-        i0 = df.index.searchsorted(row['EntryTime'])
-        i1 = df.index.searchsorted(row['ExitTime'])
-        position[i0:i1] = 1.0
+
+def reconstruct_arrays_vbt(df, pf, signals, vol_lookback=720, periods_per_year=8760):
+    """Reconstruct equity, position, realized vol arrays from a vectorbt Portfolio."""
     close        = df['Close'].values
     log_ret      = np.concatenate([[0.0], np.log(close[1:] / close[:-1])])
-    realized_vol = pd.Series(log_ret).rolling(vol_lookback).std().values * np.sqrt(hours_per_year)
-    cum          = equity.values / equity.values[0]
+    realized_vol = pd.Series(log_ret).rolling(vol_lookback).std().values * np.sqrt(periods_per_year)
+    equity       = pf.value().reindex(df.index, method='ffill')
+    cum          = (equity / equity.iloc[0]).values
+    strat_ret    = equity.pct_change().fillna(0).values
+    position     = (signals.ffill().fillna(0) > 0).astype(float).values
     return {'strat_ret': strat_ret, 'position': position, 'realized_vol': realized_vol, 'cum': cum}
 
 

@@ -27,6 +27,7 @@ Before writing any strategy code, classify the strategy:
 - If the strategy uses any Blave alpha indicator (taker intensity, holder concentration, liquidation, whale hunter, etc.), ALSO read `skills/blave-quant/examples/backtest-holder-concentration.md` BEFORE writing any code — it contains the correct data-fetch pattern (parallel arrays, annual chunking). Implement the fetch logic inside `add_indicators(df)` in the strategy file: fetch alpha data, align to df index, add as columns, return df. Do NOT invent your own fetch logic and do NOT put it in runner.py.
 - blave-quant-skill examples provide the data-fetch pattern only — always structure the full strategy as TEMPLATE.py
 - `END` defaults to `None` (latest data) unless the user explicitly specifies an end date
+- Signal function is **`compute_signals(df) → pd.Series`** (vectorized, whole df at once) — NOT `compute_signal(row)`. Returns: positive float = long (size fraction), 0.0 = flat, nan = hold
 
 **Type B — Everything else** (screener, grid, arbitrage, one-off execution, etc.)
 
@@ -40,15 +41,9 @@ Examples: 「台股外資 Z-Score 選股」「多因子輪動」「跨市場資�
 
 - Allocates capital across a **basket of stocks/assets** using a weight vector
 - Rebalances periodically (daily / weekly / monthly); weight changes drive trades
-- Uses `backtesting.py` **portfolio mode**: pass a MultiIndex DataFrame `(stock, Open/Close)` to `Backtest`, subclass `Strategy`, call `self.allocate(weights)` inside `next()`
-- Pass pre-computed signals (e.g. Z-Score DataFrame) via `Backtest(signals=df, warmup_bars=N)`
-- **CRITICAL — use the skill's backtesting package, NOT PyPI**: always add these two lines before `from backtesting import ...`:
-  ```python
-  import sys; from pathlib import Path
-  sys.path.insert(0, str(Path(__file__).parent.parent.parent / "skills" / "blave-quant"))
-  sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-  ```
-  Never run `pip install backtesting` — the PyPI version does not have portfolio mode.
+- Uses **vectorbt** + vectorized numpy weight matrix — compute weight matrix `(n_days, n_stocks)`, multiply by return matrix, subtract transaction costs
+- Pre-compute signals (e.g. Z-Score DataFrame) externally; build weight matrix from signals
+- Run `pip install vectorbt` before backtesting
 - **Backtest REQUIRED** before going live — read `skills/blave-quant/examples/backtest-twstock-foreign-zscore.md` for the canonical pattern
 - Still require explicit user confirmation before deploying or setting up cron jobs
 
@@ -56,11 +51,11 @@ Examples: 「台股外資 Z-Score 選股」「多因子輪動」「跨市場資�
 
 ```
 Does the strategy trade ONE fixed symbol (e.g. BTCUSDT) on a fixed interval?
-  → YES → Type A  (backtesting.py single-asset + TEMPLATE.py)
+  → YES → Type A  (vectorbt via lib/runner.py + TEMPLATE.py)
 
 Does the strategy allocate weights across MULTIPLE symbols / a basket of assets,
 rebalancing on a schedule (daily / weekly / monthly)?
-  → YES → Type C  (backtesting.py portfolio mode + backtest-twstock example)
+  → YES → Type C  (vectorbt portfolio mode + backtest-twstock example)
 
 Everything else (screener, grid, arbitrage, one-off execution, alert bot)?
   → Type B  (write from scratch, no backtest)
@@ -73,9 +68,36 @@ If unsure between Type A and C: Type A has ONE symbol and ONE position (long/sho
 The workspace has a shared library at `lib/`. Use it to avoid duplicating code across strategies.
 
 **Always import these — never write them inline:**
-- `from lib.data import fetch_kline` — kline data fetching (annual chunking built-in)
-- `from lib.execute import execute, load_state, save_state, bootstrap` — trade execution and state management
-- `from lib.analysis import reconstruct_arrays, regime_analysis, plot_regime` — performance arrays, regime breakdown, regime chart
+
+`lib/data.py` — all data fetching (annual chunking built-in):
+- `fetch_kline(symbol, interval, start, end, headers)` → OHLCV DataFrame (Open/High/Low/Close/Volume)
+- `fetch_holder_concentration(symbol, interval, start, end, headers)` → DataFrame with `alpha` column
+- `fetch_taker_intensity(symbol, interval, start, end, headers, timeframe='24h')` → DataFrame with `alpha`
+- `fetch_whale_hunter(symbol, interval, start, end, headers, timeframe='24h', score_type='score_oi')` → DataFrame with `alpha`
+- `fetch_squeeze_momentum(symbol, start, end, headers)` → DataFrame with `alpha` (period fixed to 1d)
+- `fetch_liquidation(symbol, interval, start, end, headers, timeframe='24h')` → DataFrame with `alpha`
+- `fetch_market_direction(interval, start, end, headers)` → DataFrame with `alpha` (no symbol)
+- `fetch_capital_shortage(interval, start, end, headers)` → DataFrame with `alpha` (no symbol)
+- `fetch_twstock_price_adj(stock_id, start, end, headers)` → DataFrame with Open/Close
+- `fetch_twstock_institutional(stock_id, start, end, headers)` → DataFrame with foreign_net and raw fields
+
+`lib/execute.py`:
+- `from lib.execute import update_state, load_state, save_state, bootstrap` — trade execution and state management
+
+`lib/analysis.py`:
+- `from lib.analysis import reconstruct_arrays_vbt, regime_analysis, plot_regime` — performance arrays, regime breakdown, regime chart
+
+`lib/param_scan.py`:
+- `from lib.param_scan import find_plateau, plot_heatmap` — 2D param grid plateau detection and heatmap chart
+
+`lib/validation.py`:
+- `from lib.validation import mcpt, plot_mcpt` — Monte Carlo Permutation Test; call `mcpt(close, position, n=2000, fee=..., target_vol=..., ...)` → `(actual_sharpe, p_value, dist)`
+
+`lib/notify.py`:
+- `from lib.notify import make_sender, send_text, send_photo`
+- `make_sender()` → text sender function (reads token+chat_id from openclaw.json)
+- `make_sender(photo=True)` → photo sender function
+- Use `send_telegram_fn=make_sender()` when calling `run()`
 
 **When writing new reusable logic** (new exchange order helper, new alpha data fetcher, etc.):
 - Add it to the appropriate `lib/` file first (or create a new one, e.g. `lib/orders_binance.py`)
@@ -98,9 +120,13 @@ CRITICAL: Read the correct reference before writing any strategy code (see Strat
 
 When you generate charts or images, you MUST send them to Telegram:
 
-1. Save the image to a file (e.g. /tmp/chart.png)
-2. Your bot token is in /root/.openclaw/openclaw.json under channels.telegram.botToken
-3. Send via: curl -F "chat_id=CHAT_ID" -F "photo=@/tmp/chart.png" https://api.telegram.org/botTOKEN/sendPhoto
+```python
+from lib.notify import send_photo, send_text
+send_photo("/tmp/chart.png")
+send_text("Backtest complete — Sharpe 1.42, MDD -12%")
+```
+
+Token and chat_id are read automatically from `/root/.openclaw/openclaw.json`.
 
 ## Shell Commands
 
@@ -136,14 +162,14 @@ The non-interactive flags (`-a` agent, `-s` skill name, `-y` confirm) skip the e
 IMPORTANT: Do NOT call `bt.plot()` — it generates a heavy interactive HTML file that takes 20-30 seconds and is not useful in Telegram.
 
 After every backtest, automatically:
-1. Generate PnL chart with `from lib.analysis import reconstruct_arrays, plot_pnl`
+1. Generate PnL chart with `from lib.analysis import reconstruct_arrays_vbt, plot_pnl`
 2. Send to Telegram (see Sending Images section)
 
 For strategy-specific indicators (e.g. TI alpha, KD), pass them via `extra_panels`:
 ```python
-result = reconstruct_arrays(df, stats)
+result = reconstruct_arrays_vbt(df, pf, signals)
 plot_pnl(df, result, title='...', output_path='/tmp/pnl.png', extra_panels=[
-    {'data': df['KD_K'].values, 'label': 'K', 'color': '#3498db', 'hlines': [(80, '#e74c3c', 'OB'), (20, '#2ecc71', 'OS')]}
+    {'data': df['K'].values, 'label': 'K', 'color': '#3498db', 'hlines': [(80, '#e74c3c', 'OB'), (20, '#2ecc71', 'OS')]}
 ])
 
 ## Strategy Marketplace
@@ -162,6 +188,22 @@ When the user asks about marketplace strategies, wants to load a purchased/share
 **When a user says someone shared a strategy with them, or asks what strategies are available to them**, always call `GET /openclaw/marketplace/my/shared-with-me` to check.
 
 NEVER purchase a strategy on behalf of the user — purchasing involves credit charges and must be done by the user on the website.
+
+## Reconciler
+
+`strategies/reconciler/reconciler.py` is a **shared system component** — it is NOT a strategy and must NEVER be deleted when the user removes a strategy.
+
+**What it does:** Reads all strategy state files, computes target positions across all active strategies, queries actual exchange positions, and places orders to close any gap.
+
+**Key rules:**
+- Do NOT delete or modify `strategies/reconciler/` when deleting individual strategies
+- The reconciler runs as its own cron job, independent of strategy crons
+- `get_positions()` and `place_order()` inside it are exchange-specific stubs the user fills in once — they apply to ALL strategies in the workspace
+- `lib/portfolio.py` contains the `reconcile()` logic; the reconciler file only provides the exchange-specific implementation
+
+When the user asks to delete a strategy, delete only its own directory (e.g. `strategies/btc_kd_long/`). Never touch `strategies/reconciler/`.
+
+---
 
 ## Response Style
 
