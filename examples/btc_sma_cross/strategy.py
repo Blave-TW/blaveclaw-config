@@ -1,34 +1,33 @@
-# Strategy: [strategy name]
+# Strategy: BTC SMA Cross
 # Type:     A (single symbol, signal-based)
 # Symbol:   BTCUSDT
 # Interval: 1h
-# Logic:    [entry/exit rules]
+# Logic:    Long on SMA20/SMA50 golden cross, flat on death cross
 
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # ── Config ────────────────────────────────────────────────────────────────────
-MODE          = "backtest"        # "backtest" | "paper" | "live"
-STRATEGY_NAME = "[strategy_name]"
+MODE          = "paper"
+STRATEGY_NAME = "btc_sma_cross"
 SYMBOL        = "BTCUSDT"
 EXCHANGE      = "binance"
 INTERVAL      = "1h"
-START         = "2024-01-01"
+START         = "2022-01-01"
 END           = None
 FEE           = 0.0005
 
-# PARAM1 = ...
-# PARAM2 = ...
-# WARMUP = PARAM1 + PARAM2   # bars to skip at start of backtest (sum of rolling windows)
+SMA_FAST = 45
+SMA_SLOW = 100
+WARMUP   = SMA_SLOW
 
 
 # ── indicators ────────────────────────────────────────────────────────────────
-# Called by fetch_data (normal run) and scan.py (param scan) with different params.
-def _add_indicators(df, param1, param2):
+def _add_indicators(df, fast=SMA_FAST, slow=SMA_SLOW):
     df = df.copy()
-    # df['SMA_F'] = df['Close'].rolling(param1).mean()
-    # df['SMA_S'] = df['Close'].rolling(param2).mean()
+    df['SMA_F'] = df['Close'].rolling(fast).mean()
+    df['SMA_S'] = df['Close'].rolling(slow).mean()
     return df
 
 
@@ -36,18 +35,17 @@ def _add_indicators(df, param1, param2):
 def fetch_data(hdrs):
     from lib.data import fetch_kline
     df = fetch_kline(SYMBOL, INTERVAL, START, END, hdrs)
-    return _add_indicators(df, param1=None, param2=None)
+    return _add_indicators(df)
 
 
 # ── compute_signals ───────────────────────────────────────────────────────────
-# Returns pd.Series:  1.0=long  0.0=flat  nan=hold  -1.0=settlement
 def compute_signals(df):
     import pandas as pd, numpy as np
     signal = pd.Series(np.nan, index=df.index)
-
-    # signal[df['SMA_F'] > df['SMA_S']] = 1.0
-    # signal[df['SMA_F'] < df['SMA_S']] = 0.0
-
+    golden = (df['SMA_F'] > df['SMA_S']) & (df['SMA_F'].shift(1) <= df['SMA_S'].shift(1))
+    death  = (df['SMA_F'] < df['SMA_S']) & (df['SMA_F'].shift(1) >= df['SMA_S'].shift(1))
+    signal[golden] = 1.0
+    signal[death]  = 0.0
     return signal
 
 

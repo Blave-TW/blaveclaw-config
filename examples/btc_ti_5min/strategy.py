@@ -1,34 +1,35 @@
-# Strategy: [strategy name]
+# Strategy: BTC Taker Intensity 5min
 # Type:     A (single symbol, signal-based)
 # Symbol:   BTCUSDT
-# Interval: 1h
-# Logic:    [entry/exit rules]
+# Interval: 5min
+# Logic:    Long when TI 24h > ENTRY_TH, flat when < EXIT_TH (dead zone)
 
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # ── Config ────────────────────────────────────────────────────────────────────
-MODE          = "backtest"        # "backtest" | "paper" | "live"
-STRATEGY_NAME = "[strategy_name]"
+MODE          = "backtest"
+STRATEGY_NAME = "btc_ti_5min"
 SYMBOL        = "BTCUSDT"
 EXCHANGE      = "binance"
-INTERVAL      = "1h"
-START         = "2024-01-01"
+INTERVAL      = "5min"
+START         = "2023-01-01"
 END           = None
 FEE           = 0.0005
 
-# PARAM1 = ...
-# PARAM2 = ...
-# WARMUP = PARAM1 + PARAM2   # bars to skip at start of backtest (sum of rolling windows)
+ENTRY_TH = 1.693
+EXIT_TH  = -0.453
 
 
 # ── indicators ────────────────────────────────────────────────────────────────
-# Called by fetch_data (normal run) and scan.py (param scan) with different params.
-def _add_indicators(df, param1, param2):
+# TI 本身不隨 threshold 變動，所以 scan 時只需呼叫一次
+def _add_indicators(df, hdrs):
+    from lib.data import fetch_taker_intensity
     df = df.copy()
-    # df['SMA_F'] = df['Close'].rolling(param1).mean()
-    # df['SMA_S'] = df['Close'].rolling(param2).mean()
+    ti = fetch_taker_intensity(SYMBOL, INTERVAL, START, END, hdrs, timeframe='24h')
+    df = df.join(ti.rename(columns={'alpha': 'TI'}))
+    df['TI'] = df['TI'].ffill()
     return df
 
 
@@ -36,18 +37,19 @@ def _add_indicators(df, param1, param2):
 def fetch_data(hdrs):
     from lib.data import fetch_kline
     df = fetch_kline(SYMBOL, INTERVAL, START, END, hdrs)
-    return _add_indicators(df, param1=None, param2=None)
+    return _add_indicators(df, hdrs)
 
 
 # ── compute_signals ───────────────────────────────────────────────────────────
-# Returns pd.Series:  1.0=long  0.0=flat  nan=hold  -1.0=settlement
-def compute_signals(df):
+# entry_th / exit_th 可由 scan.py 傳入；正常執行用 module-level 預設值
+def compute_signals(df, entry_th=None, exit_th=None):
     import pandas as pd, numpy as np
+    eth    = entry_th if entry_th is not None else ENTRY_TH
+    xth    = exit_th  if exit_th  is not None else EXIT_TH
+    ti     = df['TI']
     signal = pd.Series(np.nan, index=df.index)
-
-    # signal[df['SMA_F'] > df['SMA_S']] = 1.0
-    # signal[df['SMA_F'] < df['SMA_S']] = 0.0
-
+    signal[ti > eth] = 1.0
+    signal[ti < xth] = 0.0
     return signal
 
 

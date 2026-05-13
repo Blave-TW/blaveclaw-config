@@ -7,26 +7,20 @@ def bootstrap(df, signal_fn):
     df: DataFrame with OHLCV + indicator columns (output of add_indicators)
     signal_fn: compute_signal function, accepts a pd.Series row
     """
-    state = {'position': 0.0, 'entry': None, 'pnl': 0.0, 'trades': 0, 'trades_log': []}
+    state = {'position': 0.0, 'entry': None}
     for ts, row in df.iloc[:-1].iterrows():
         p        = float(row['Close'])
-        t        = int(ts.timestamp())
         prev_pos = state['position']
         new_pos  = float(signal_fn(row))
         if math.isnan(new_pos):
-            continue                 # nan = hold: keep current position unchanged
+            continue
 
         if prev_pos != 0 and (new_pos == 0 or new_pos * prev_pos < 0):
-            pnl    = (p - state['entry']) / state['entry'] * 100 * (1 if prev_pos > 0 else -1)
-            action = 'SELL' if prev_pos > 0 else 'COVER'
-            state.update({'position': 0.0, 'entry': None, 'pnl': state['pnl'] + pnl, 'trades': state['trades'] + 1})
-            state['trades_log'].append({'time': t, 'action': action, 'price': p})
+            state.update({'position': 0.0, 'entry': None})
 
         if new_pos != 0:
             if state['position'] == 0:
                 state.update({'position': new_pos, 'entry': p})
-                action = 'BUY' if new_pos > 0 else 'SHORT'
-                state['trades_log'].append({'time': t, 'action': action, 'price': p})
             elif new_pos != prev_pos:
                 state['position'] = new_pos
 
@@ -35,12 +29,12 @@ def bootstrap(df, signal_fn):
 
 
 def load_state(strategy_name):
-    path = f'strategies/{strategy_name}/{strategy_name}_state.json'
+    path = f'strategies/{strategy_name}/state.json'
     return json.load(open(path)) if os.path.exists(path) else None
 
 
 def save_state(strategy_name, state):
-    json.dump(state, open(f'strategies/{strategy_name}/{strategy_name}_state.json', 'w'), indent=2)
+    json.dump(state, open(f'strategies/{strategy_name}/state.json', 'w'), indent=2)
 
 
 def update_state(candle, signal, state, mode, symbol=None, exchange=None, send_telegram_fn=None):
@@ -56,20 +50,17 @@ def update_state(candle, signal, state, mode, symbol=None, exchange=None, send_t
 
     # Close or flip
     if prev_pos != 0 and (new_pos == 0 or new_pos * prev_pos < 0):
-        pnl    = (price - state['entry']) / state['entry'] * 100 * (1 if prev_pos > 0 else -1)
         action = 'SELL' if prev_pos > 0 else 'COVER'
-        state.update({'position': 0.0, 'entry': None, 'pnl': state['pnl'] + pnl, 'trades': state['trades'] + 1})
-        state['trades_log'].append({'time': candle['time'], 'action': action, 'price': price})
+        state.update({'position': 0.0, 'entry': None})
         if mode in ('live', 'paper') and send_telegram_fn:
-            send_telegram_fn(f"Signal: {action} @ {price}  PnL={pnl:+.2f}%")
-        logging.info(f"{action} @ {price}  PnL={pnl:+.2f}%")
+            send_telegram_fn(f"Signal: {action} @ {price}")
+        logging.info(f"{action} @ {price}")
 
     # Open or scale
     if new_pos != 0:
         if state['position'] == 0:
-            state.update({'position': new_pos, 'entry': price})
             action = 'BUY' if new_pos > 0 else 'SHORT'
-            state['trades_log'].append({'time': candle['time'], 'action': action, 'price': price})
+            state.update({'position': new_pos, 'entry': price})
             if mode in ('live', 'paper') and send_telegram_fn:
                 send_telegram_fn(f"Signal: {action} @ {price}")
             logging.info(f"{action} @ {price}")

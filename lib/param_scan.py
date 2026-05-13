@@ -2,13 +2,99 @@
 Utilities for 2D parameter scanning and plateau detection.
 
 Usage:
-    from lib.param_scan import find_plateau, plot_heatmap
+    from lib.param_scan import find_plateau, plot_heatmap, percentile_thresholds
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from matplotlib.patches import Rectangle
+
+
+def percentile_thresholds(series, n_parts=9):
+    """
+    Split an indicator's distribution into n_parts equal percentile bands.
+    Returns (entry_vals, exit_vals) — upper and lower halves of the percentile grid.
+
+    Typical use: indicator threshold scan where entry > exit (dead zone strategy).
+
+    Example (n_parts=9):
+        percentiles at 10%, 20%, ..., 90% → 9 threshold candidates
+        entry_vals = upper half (p50–p90)  → candidates for ENTRY_TH
+        exit_vals  = lower half (p10–p50)  → candidates for EXIT_TH
+
+    Parameters
+    ----------
+    series   : pd.Series — indicator values (NaNs ignored)
+    n_parts  : int — number of equal bands (default 9)
+
+    Returns
+    -------
+    entry_vals : np.ndarray — upper percentile thresholds
+    exit_vals  : np.ndarray — lower percentile thresholds
+    """
+    s    = series.dropna()
+    lo   = np.percentile(s, 5)
+    hi   = np.percentile(s, 95)
+    vals = np.round(np.linspace(lo, hi, n_parts), 3)
+    mid  = len(vals) // 2
+    entry_vals = vals[mid:]
+    exit_vals  = vals[:mid + 1]
+
+    p = np.percentile(s, [0, 25, 50, 75, 100])
+    print(f"指標分佈 (n={len(s):,}): "
+          f"min={p[0]:.3f}  p25={p[1]:.3f}  median={p[2]:.3f}  "
+          f"p75={p[3]:.3f}  max={p[4]:.3f}")
+    print(f"ENTRY_TH 候選 ({len(entry_vals)}): {list(entry_vals)}")
+    print(f"EXIT_TH  候選 ({len(exit_vals)}):  {list(exit_vals)}")
+    return entry_vals, exit_vals
+
+
+def scan_grid(df, compute_signals_fn, row_vals, col_vals,
+              row_param='entry_th', col_param='exit_th',
+              fee=0.0005, freq='1h', valid_fn=None):
+    """
+    Run a 2D parameter scan and return a Sharpe grid.
+
+    Parameters
+    ----------
+    df                : DataFrame with OHLCV + indicators
+    compute_signals_fn: strategy's compute_signals(df, **kwargs)
+    row_vals          : iterable of row parameter values
+    col_vals          : iterable of col parameter values
+    row_param         : kwarg name for row values (default 'entry_th')
+    col_param         : kwarg name for col values (default 'exit_th')
+    fee               : per-trade fee rate (default 0.0005)
+    freq              : vectorbt frequency string (default '1h')
+    valid_fn          : optional (row_val, col_val) → bool; skips invalid combos
+                        defaults to row_val > col_val (entry > exit)
+
+    Returns
+    -------
+    grid : 2D np.ndarray of Sharpe ratios (NaN for skipped/invalid combos)
+    """
+    import warnings
+    warnings.filterwarnings('ignore', category=FutureWarning)
+    from lib.runner import backtest_signals
+
+    if valid_fn is None:
+        valid_fn = lambda r, c: r > c
+
+    row_vals = list(row_vals)
+    col_vals = list(col_vals)
+    grid     = np.full((len(row_vals), len(col_vals)), np.nan)
+
+    for i, rv in enumerate(row_vals):
+        for j, cv in enumerate(col_vals):
+            if not valid_fn(rv, cv):
+                continue
+            signals = compute_signals_fn(df, **{row_param: rv, col_param: cv})
+            pf = backtest_signals(df['Close'], signals, fee=fee, freq=freq)
+            sharpe = pf.stats()['Sharpe Ratio']
+            if np.isfinite(sharpe):
+                grid[i, j] = sharpe
+
+    return grid
 
 
 def find_plateau(grid, row_vals=None, col_vals=None, window=1):
@@ -85,12 +171,14 @@ def plot_heatmap(
 
     fig, ax = plt.subplots(figsize=(max(8, n_cols * 1.2), max(6, n_rows * 1.0)))
 
+    from matplotlib.colors import TwoSlopeNorm
     masked = np.ma.masked_invalid(grid)
     valid  = grid[~np.isnan(grid)]
-    vmax   = np.nanpercentile(valid, 95) if len(valid) else 1
-    vmin   = np.nanpercentile(valid, 5)  if len(valid) else -1
+    vmin   = min(np.nanmin(valid), -0.01) if len(valid) else -1
+    vmax   = max(np.nanmax(valid),  0.01) if len(valid) else  1
+    norm   = TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
     im     = ax.imshow(masked, aspect="auto", cmap="RdYlGn",
-                       origin="upper", vmin=vmin, vmax=vmax)
+                       origin="upper", norm=norm)
     plt.colorbar(im, ax=ax, label="Sharpe")
 
     ax.set_xticks(range(n_cols)); ax.set_xticklabels([str(v) for v in col_vals], fontsize=8)

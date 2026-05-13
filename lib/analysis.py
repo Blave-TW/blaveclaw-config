@@ -1,10 +1,11 @@
 import numpy as np
 import pandas as pd
+import logging
 import matplotlib
 matplotlib.use('Agg')
 matplotlib.rcParams['font.family'] = ['Noto Sans CJK TC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', 'Heiti TC', 'Arial Unicode MS', 'DejaVu Sans']
+logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
 import matplotlib.pyplot as plt
-
 
 
 def reconstruct_arrays_vbt(df, pf, signals, vol_lookback=720, periods_per_year=8760):
@@ -19,13 +20,8 @@ def reconstruct_arrays_vbt(df, pf, signals, vol_lookback=720, periods_per_year=8
     return {'strat_ret': strat_ret, 'position': position, 'realized_vol': realized_vol, 'cum': cum}
 
 
-def regime_analysis(df, result, vol_lookback=720, hours_per_year=8760):
-    """Print text table of strategy performance by year / bull-bear / high-low vol regime."""
-    strat_ret    = result['strat_ret']
-    realized_vol = result['realized_vol']
-    close        = df['Close'].values
-    dates        = df.index
-
+def _build_regimes(strat_ret, close, dates, realized_vol, hours_per_year=8760, vol_lookback=720):
+    """Compute per-regime stats. Returns [(group_name, [(label, stats_or_None)])]."""
     ma_window  = vol_lookback * 200 // 30
     ma200      = pd.Series(close).rolling(ma_window).mean().values
     valid_ma   = ~np.isnan(ma200)
@@ -33,6 +29,7 @@ def regime_analysis(df, result, vol_lookback=720, hours_per_year=8760):
     valid_vol  = ~np.isnan(realized_vol)
     bull       = close > ma200
     highvol    = realized_vol > vol_median
+    n_total    = len(strat_ret[~np.isnan(strat_ret)])
 
     def _stats(mask):
         r = strat_ret[mask]; r = r[~np.isnan(r)]
@@ -44,71 +41,47 @@ def regime_analysis(df, result, vol_lookback=720, hours_per_year=8760):
         sharpe  = (r.mean() / r.std()) * np.sqrt(hours_per_year) if r.std() > 0 else np.nan
         cc = np.cumprod(1 + r); pk = np.maximum.accumulate(cc)
         mdd = ((cc - pk) / pk).min()
-        n_total = len(strat_ret[~np.isnan(strat_ret)])
         return dict(ann_ret=ann_r, ann_vol=ann_vol, sharpe=sharpe, max_dd=mdd, pct_time=len(r) / n_total)
 
-    rows = []
-    for yr in sorted(dates.year.unique()):
-        s = _stats(dates.year == yr)
-        if s: rows.append({'label': str(yr), **s})
-    rows.append({'label': '─' * 20})
-    for label, mask in [('Bull (price > MA200)', bull & valid_ma),
-                         ('Bear (price < MA200)', ~bull & valid_ma)]:
-        s = _stats(mask)
-        if s: rows.append({'label': label, **s})
-    rows.append({'label': '─' * 20})
-    for label, mask in [('High Vol (>median)',  highvol & valid_vol),
-                         ('Low  Vol (≤median)', ~highvol & valid_vol)]:
-        s = _stats(mask)
-        if s: rows.append({'label': label, **s})
+    return [
+        ('By Year',           [(str(yr), _stats(dates.year == yr)) for yr in sorted(dates.year.unique())]),
+        ('Trend Regime',      [('Bull (price > MA200)', _stats(bull & valid_ma)),
+                                ('Bear (price < MA200)', _stats(~bull & valid_ma))]),
+        ('Volatility Regime', [('High Vol (>median)',   _stats(highvol & valid_vol)),
+                                ('Low  Vol (≤median)',  _stats(~highvol & valid_vol))]),
+    ]
 
+
+def regime_analysis(df, result, vol_lookback=720, hours_per_year=8760):
+    """Print text table of strategy performance by year / bull-bear / high-low vol regime."""
+    groups = _build_regimes(
+        result['strat_ret'], df['Close'].values, df.index, result['realized_vol'],
+        hours_per_year, vol_lookback,
+    )
     hdr = f"  {'Regime':<22} {'Ann Ret':>9} {'Ann Vol':>9} {'Sharpe':>8} {'MDD':>8} {'Time%':>7}"
     print(f"\n{'─' * len(hdr)}\n  Regime Analysis\n{'─' * len(hdr)}\n{hdr}\n{'─' * len(hdr)}")
-    for row in rows:
-        if 'ann_ret' not in row:
-            print(f"  {row['label']}")
-            continue
-        print(f"  {row['label']:<22} {row['ann_ret']*100:>8.1f}% {row['ann_vol']*100:>8.1f}%"
-              f" {row['sharpe']:>8.2f} {row['max_dd']*100:>7.1f}% {row['pct_time']*100:>6.1f}%")
+    for i, (_, items) in enumerate(groups):
+        if i > 0: print(f"  {'─' * 20}")
+        for label, s in items:
+            if s is None: continue
+            print(f"  {label:<22} {s['ann_ret']*100:>8.1f}% {s['ann_vol']*100:>8.1f}%"
+                  f" {s['sharpe']:>8.2f} {s['max_dd']*100:>7.1f}% {s['pct_time']*100:>6.1f}%")
     print('─' * len(hdr))
 
 
 def plot_regime(df, result, title='Regime Analysis', vol_lookback=720, hours_per_year=8760, output_path='/tmp/regime.png'):
     """Bar chart of ann_ret/sharpe/mdd by year, trend regime, volatility regime."""
-    strat_ret    = result['strat_ret']
-    realized_vol = result['realized_vol']
-    close        = df['Close'].values
-    dates        = df.index
-
-    ma_window  = vol_lookback * 200 // 30
-    ma200      = pd.Series(close).rolling(ma_window).mean().values
-    valid_ma   = ~np.isnan(ma200)
-    vol_median = np.nanmedian(realized_vol)
-    valid_vol  = ~np.isnan(realized_vol)
-    bull       = close > ma200
-    highvol    = realized_vol > vol_median
-
-    def _stats(mask):
-        r = strat_ret[mask]; r = r[~np.isnan(r)]
-        if len(r) < 2: return None
-        total_years = len(r) / hours_per_year; cum_r = np.prod(1 + r) - 1
-        ann_r   = (1 + cum_r) ** (1 / total_years) - 1 if total_years > 0 else np.nan
-        ann_vol = r.std() * np.sqrt(hours_per_year)
-        sharpe  = (r.mean() / r.std()) * np.sqrt(hours_per_year) if r.std() > 0 else np.nan
-        cc = np.cumprod(1 + r); pk = np.maximum.accumulate(cc)
-        return dict(ann_ret=ann_r, sharpe=sharpe, max_dd=((cc - pk) / pk).min())
-
-    groups = {
-        'By Year':           [(str(yr), _stats(dates.year == yr)) for yr in sorted(dates.year.unique())],
-        'Trend Regime':      [('Bull\n(>MA200)', _stats(bull & valid_ma)),
-                               ('Bear\n(<MA200)', _stats(~bull & valid_ma))],
-        'Volatility Regime': [('High Vol\n(>median)', _stats(highvol & valid_vol)),
-                               ('Low Vol\n(≤median)',  _stats(~highvol & valid_vol))],
+    raw_groups = _build_regimes(
+        result['strat_ret'], df['Close'].values, df.index, result['realized_vol'],
+        hours_per_year, vol_lookback,
+    )
+    chart_groups = {
+        name: [(lbl.replace(' (', '\n(', 1), s) for lbl, s in items if s is not None]
+        for name, items in raw_groups
     }
-    groups = {k: [(lbl, s) for lbl, s in v if s is not None] for k, v in groups.items()}
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 6))
-    for ax, (group_name, items) in zip(axes, groups.items()):
+    for ax, (group_name, items) in zip(axes, chart_groups.items()):
         labels  = [lbl for lbl, _ in items]
         ann_ret = [s['ann_ret'] * 100 for _, s in items]
         sharpe  = [s['sharpe']        for _, s in items]
@@ -198,6 +171,171 @@ def plot_pnl(df, result, title='Strategy PnL', output_path='/tmp/pnl.png', extra
         ax.axhline(0, color='#888', lw=0.5)
         ax.set_ylabel(panel.get('label', ''), fontsize=10)
         ax.legend(fontsize=9, loc='upper right')
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+    print(f'Chart saved: {output_path}')
+    return output_path
+
+
+def random_bh_benchmark(close_df, strat_total_ret, strat_sharpe, n=1000, seed=42):
+    """
+    Compare strategy against n random B&H portfolios (Dirichlet weights).
+    Uses vectorbt returns accessor for consistent stats.
+    """
+    import vectorbt as vbt
+    daily_ret = close_df.pct_change().fillna(0).values
+    rng       = np.random.default_rng(seed)
+    W         = rng.dirichlet(np.ones(daily_ret.shape[1]), size=n)  # (n, S)
+    all_daily = pd.DataFrame(daily_ret @ W.T, index=close_df.index) # (T, n)
+
+    rets      = all_daily.vbt.returns(freq='1D')
+    all_ret   = rets.total() * 100
+    all_sharpe = rets.sharpe_ratio()
+
+    all_equity = np.cumprod(1 + all_daily.values, axis=0)  # (T, n)
+    bench_pct  = pd.DataFrame({
+        'p5':  np.percentile(all_equity, 5,  axis=1),
+        'p50': np.percentile(all_equity, 50, axis=1),
+        'p95': np.percentile(all_equity, 95, axis=1),
+    }, index=close_df.index)
+
+    pct_ret    = float((all_ret    < strat_total_ret).mean() * 100)
+    pct_sharpe = float((all_sharpe < strat_sharpe).mean()    * 100)
+
+    print(f"\n── Random B&H Benchmark (n={n}) ──")
+    print(f"  Total Return  median={all_ret.median():.1f}%  "
+          f"p5={all_ret.quantile(.05):.1f}%  p95={all_ret.quantile(.95):.1f}%")
+    print(f"  Sharpe        median={all_sharpe.median():.2f}  "
+          f"p5={all_sharpe.quantile(.05):.2f}  p95={all_sharpe.quantile(.95):.2f}")
+    print(f"  Strategy beats {pct_ret:.0f}% on Return, {pct_sharpe:.0f}% on Sharpe")
+
+    stats = {
+        'benchmark_n':                   n,
+        'benchmark_median_ret_%':        round(float(all_ret.median()),         2),
+        'benchmark_p5_ret_%':            round(float(all_ret.quantile(.05)),    2),
+        'benchmark_p95_ret_%':           round(float(all_ret.quantile(.95)),    2),
+        'benchmark_median_sharpe':       round(float(all_sharpe.median()),      3),
+        'benchmark_strategy_ret_pct':    round(pct_ret,    1),
+        'benchmark_strategy_sharpe_pct': round(pct_sharpe, 1),
+    }
+    return stats, bench_pct
+
+
+def slippage_analysis_portfolio(close_df, open_df, delta_w):
+    """
+    Type C slippage: weighted-average (Open[t+1] - Close[t]) / Close[t]
+    for each rebalancing day, weighted by abs(delta_w).
+
+    delta_w : (n_days, n_stocks) np.ndarray — weight changes from runner
+    """
+    close  = close_df.values
+    open_  = open_df.reindex(close_df.index).values
+    n      = len(close_df)
+
+    # next-bar open vs current close gap
+    open_next        = np.full_like(close, np.nan)
+    open_next[:-1]   = open_[1:]
+    gap              = (open_next - close) / np.where(close != 0, close, np.nan)
+
+    abs_delta   = np.abs(delta_w)
+    total_trade = abs_delta.sum(axis=1)
+    rebal_mask  = total_trade > 0
+
+    weighted_gap = np.where(
+        rebal_mask,
+        (gap * abs_delta).sum(axis=1) / np.where(total_trade > 0, total_trade, 1),
+        np.nan,
+    )
+
+    n_rebal  = rebal_mask.sum()
+    avg_gap  = np.nanmean(weighted_gap) * 100
+    cum_gap  = np.nansum(weighted_gap[rebal_mask]) * 100
+
+    print(f"\n── Portfolio Slippage ({n_rebal} rebalancing days, next-bar Open vs Close[t]) ──")
+    print(f"  Avg gap per rebalance: {avg_gap:+.3f}%")
+    print(f"  Cumulative impact:     {cum_gap:+.2f}%")
+
+    return {
+        'slippage_rebalance_days':    int(n_rebal),
+        'slippage_avg_gap_%':         round(avg_gap, 4),
+        'slippage_cumulative_%':      round(cum_gap, 4),
+    }
+
+
+def slippage_analysis(df, pf):
+    """
+    Record next-bar Open vs current Close gap for each trade entry/exit.
+
+    Execution model: MOC (signal + fill at Close[t]).
+    Gap = (Open[t+1] - Close[t]) / Close[t]
+    Positive gap → next open is higher than close (gap-up).
+
+    For a LONG trade:
+      entry gap > 0 → next open gapped up → would have paid more at open
+      exit  gap > 0 → next open gapped up → would have received more at open
+      net gap = exit_gap - entry_gap
+        > 0 → open execution would improve P&L
+        < 0 → MOC execution was better
+
+    Returns per-trade DataFrame with gap columns.
+    """
+    trades = pf.trades.records_readable.copy()
+    if trades.empty:
+        print("\n── Slippage Analysis: no closed trades ──")
+        return trades
+
+    entry_pos  = df.index.get_indexer(pd.DatetimeIndex(trades['Entry Timestamp']))
+    exit_pos   = df.index.get_indexer(pd.DatetimeIndex(trades['Exit Timestamp']))
+    last       = len(df) - 1
+    entry_next = np.clip(entry_pos + 1, 0, last)
+    exit_next  = np.clip(exit_pos  + 1, 0, last)
+
+    entry_gap = (df['Open'].iloc[entry_next].values - df['Close'].iloc[entry_pos].values) \
+                / df['Close'].iloc[entry_pos].values * 100
+    exit_gap  = (df['Open'].iloc[exit_next].values  - df['Close'].iloc[exit_pos].values)  \
+                / df['Close'].iloc[exit_pos].values  * 100
+    net_gap   = exit_gap - entry_gap
+
+    trades['entry_gap_%'] = entry_gap.round(4)
+    trades['exit_gap_%']  = exit_gap.round(4)
+    trades['net_gap_%']   = net_gap.round(4)
+
+    n = len(trades)
+    print(f"\n── Slippage Analysis ({n} trades, next-bar Open vs Close[t]) ──")
+    print(f"  Entry gap  avg={entry_gap.mean():+.3f}%  std={entry_gap.std():.3f}%")
+    print(f"  Exit  gap  avg={exit_gap.mean():+.3f}%  std={exit_gap.std():.3f}%")
+    print(f"  Net   gap  avg={net_gap.mean():+.3f}%  "
+          f"({'open exec better' if net_gap.mean() > 0 else 'MOC better'})")
+    print(f"  Cumulative impact ≈ {net_gap.sum():+.2f}%")
+    return trades[['entry_gap_%', 'exit_gap_%', 'net_gap_%']]
+
+
+def plot_pnl_portfolio(pf_ret, close_df, title='Portfolio PnL', output_path='/tmp/pnl.png',
+                       bench_pct=None):
+    """2-panel PnL chart for Type C strategies. bench_pct: DataFrame with p5/p50/p95 columns."""
+    pf_equity = np.cumprod(1 + pf_ret.values)
+    dd  = pf_equity / np.maximum.accumulate(pf_equity) - 1
+    idx = close_df.index
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 9),
+                                    gridspec_kw={'height_ratios': [3, 1]}, sharex=True)
+
+    if bench_pct is not None:
+        b = bench_pct.reindex(idx, method='ffill')
+        ax1.fill_between(idx, b['p5'], b['p95'], color='#9E9E9E', alpha=0.2, label='Random B&H p5–p95')
+        ax1.plot(idx, b['p50'], color='#9E9E9E', linewidth=1, linestyle='--', label='Random B&H median')
+
+    ax1.plot(idx, pf_equity, color='#2196F3', linewidth=2, label=title)
+    ax1.set_ylabel('Portfolio Value')
+    ax1.legend(fontsize=9)
+    ax1.grid(alpha=0.3)
+    ax1.set_title(title)
+
+    ax2.fill_between(idx, dd, 0, color='#2196F3', alpha=0.4)
+    ax2.set_ylabel('Drawdown')
+    ax2.grid(alpha=0.3)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)

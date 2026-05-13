@@ -14,6 +14,16 @@ Blave API credentials are in .env file in the workspace.
 
 CRITICAL: Read `references/deployment.md` before deploying any strategy live or setting up cron jobs.
 
+## Examples
+
+`examples/` contains three complete reference strategies — read them when you need concrete patterns:
+- `btc_sma_cross/` — Type A, SMA crossover, includes `scan.py` for parameter search
+- `btc_ti_5min/` — Type A, Taker Intensity threshold (Blave alpha), 5min kline
+- `tw100_foreign_zscore/` — Type C, Taiwan 100-stock portfolio, foreign institutional z-score
+- `cl_sma_1h/` — Type A, WTI crude oil (CL) 1h SMA crossover with NYMEX settlement exit; uses `fetch_db_kline`
+
+These are not user strategies. User strategies live in `strategies/`.
+
 ## Strategy Types
 
 Before writing any strategy code, classify the strategy:
@@ -24,11 +34,12 @@ Before writing any strategy code, classify the strategy:
 - Entry/exit driven by indicators or price signals (e.g. MA cross, RSI)
 - Backtest is meaningful — REQUIRED before going live
 - Read `references/strategy-code.md` and use `strategies/TEMPLATE.py`
-- If the strategy uses any Blave alpha indicator (taker intensity, holder concentration, liquidation, whale hunter, etc.), ALSO read `skills/blave-quant/examples/backtest-holder-concentration.md` BEFORE writing any code — it contains the correct data-fetch pattern (parallel arrays, annual chunking). Implement the fetch logic inside `add_indicators(df)` in the strategy file: fetch alpha data, align to df index, add as columns, return df. Do NOT invent your own fetch logic and do NOT put it in runner.py.
-- blave-quant-skill examples provide the data-fetch pattern only — always structure the full strategy as TEMPLATE.py
+- If the strategy uses any Blave alpha indicator (taker intensity, holder concentration, liquidation, whale hunter, etc.), read the **Alpha Indicators** section in `references/strategy-code.md` for the canonical fetch pattern: use `lib.data` fetchers inside `fetch_data(hdrs)`, join to df index, ffill. Do NOT write your own fetch logic inline.
+- blave-quant-skill provides data reference only — always structure the full strategy as TEMPLATE.py
 - `END` defaults to `None` (latest data) unless the user explicitly specifies an end date
-- Write two functions: **`fetch_data(hdrs) → df`** (kline + indicators + realized_vol) and **`compute_signals(df) → pd.Series`** (pure signal logic)
+- Write three functions: **`_add_indicators(df, *params)`** (indicator columns, parameterized), **`fetch_data(hdrs) → df`** (kline + calls `_add_indicators` with module params), and **`compute_signals(df) → pd.Series`** (pure signal logic)
 - `run(locals(), fetch_data, compute_signals, send_telegram_fn=make_sender())` — runner handles everything else
+- `WARMUP` (optional config) — number of bars to trim from the start of the backtest (warm-up period where indicators are not yet stable). Set to the sum of all rolling windows used. Runner automatically trims if present.
 - Signal values: positive float = long (size fraction), 0.0 = flat, nan = hold (ffill)
 
 **Type B — Everything else** (screener, grid, arbitrage, one-off execution, etc.)
@@ -45,8 +56,9 @@ Examples: 「台股外資 Z-Score 選股」「多因子輪動」「跨市場資�
 - Rebalances periodically (daily / weekly / monthly); weight changes drive trades
 - Uses **vectorbt** + vectorized numpy weight matrix — compute weight matrix `(n_days, n_stocks)`, multiply by return matrix, subtract transaction costs
 - Pre-compute signals (e.g. Z-Score DataFrame) externally; build weight matrix from signals
+- **DO NOT pre-shift weights** — runner automatically shift(1) weights (weights[t] from close[t] → earns daily_ret[t+1]), consistent with Type A
 - Run `pip install vectorbt` before backtesting
-- **Backtest REQUIRED** before going live — read `skills/blave-quant/examples/backtest-twstock-foreign-zscore.md` for the canonical pattern
+- **Backtest REQUIRED** before going live — read `references/strategy-code.md` for the canonical multi-asset pattern
 - Still require explicit user confirmation before deploying or setting up cron jobs
 
 **Decision tree — classify BEFORE writing any code:**
@@ -71,7 +83,8 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 
 **Always import these — never write them inline:**
 
-`lib/data.py` — all data fetching (annual chunking built-in):
+`lib/data.py` — all data fetching (chunking + cache built-in):
+- `fetch_db_kline(dataset, symbol, schema, start, end, headers)` → CME/NYMEX/ICE OHLCV; datasets: `GLBX.MDP3` (CL, GC), `IFEU.IMPACT` (BRN); schemas: `ohlcv-1m` / `ohlcv-1h` / `ohlcv-1d`
 - `fetch_kline(symbol, interval, start, end, headers)` → OHLCV DataFrame (Open/High/Low/Close/Volume)
 - `fetch_holder_concentration(symbol, interval, start, end, headers)` → DataFrame with `alpha` column
 - `fetch_taker_intensity(symbol, interval, start, end, headers, timeframe='24h')` → DataFrame with `alpha`
@@ -80,6 +93,8 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 - `fetch_liquidation(symbol, interval, start, end, headers, timeframe='24h')` → DataFrame with `alpha`
 - `fetch_market_direction(interval, start, end, headers)` → DataFrame with `alpha` (no symbol)
 - `fetch_capital_shortage(interval, start, end, headers)` → DataFrame with `alpha` (no symbol)
+- `fetch_market_sentiment(symbol, interval, start, end, headers)` → DataFrame with `alpha`
+- `fetch_top_trader_exposure(interval, start, end, headers)` → DataFrame with `alpha` (BTC only, no symbol)
 - `fetch_twstock_price_adj(stock_id, start, end, headers)` → DataFrame with Open/Close
 - `fetch_twstock_institutional(stock_id, start, end, headers)` → DataFrame with foreign_net and raw fields
 
@@ -90,7 +105,9 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 - `from lib.analysis import reconstruct_arrays_vbt, regime_analysis, plot_regime` — performance arrays, regime breakdown, regime chart
 
 `lib/param_scan.py`:
-- `from lib.param_scan import find_plateau, plot_heatmap` — 2D param grid plateau detection and heatmap chart
+- `from lib.param_scan import percentile_thresholds` — use p5/p95 as bounds, linspace n_parts values → returns (entry_vals, exit_vals); prints distribution stats
+- `from lib.param_scan import scan_grid` — run 2D param scan, returns Sharpe grid; accepts compute_signals_fn with row_param/col_param kwargs, fee, freq
+- `from lib.param_scan import find_plateau, plot_heatmap` — plateau detection and heatmap chart
 
 `lib/validation.py`:
 - `from lib.validation import mcpt, plot_mcpt` — Monte Carlo Permutation Test; call `mcpt(close, position, n=2000, fee=..., target_vol=..., ...)` → `(actual_sharpe, p_value, dist)`
@@ -100,6 +117,10 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 - `make_sender()` → text sender function (reads token+chat_id from openclaw.json)
 - `make_sender(photo=True)` → photo sender function
 - Use `send_telegram_fn=make_sender()` when calling `run()`
+
+`lib/strategy.py`:
+- `from lib.strategy import add_realized_vol` — 計算 realized_vol，in-place 寫入 df（vol targeting 用）
+- `from lib.strategy import apply_vol_scaling` — 以 realized_vol 縮放多頭倉位，回傳新 signal Series
 
 **When writing new reusable logic** (new exchange order helper, new alpha data fetcher, etc.):
 - Add it to the appropriate `lib/` file first (or create a new one, e.g. `lib/orders_binance.py`)
@@ -193,17 +214,17 @@ NEVER purchase a strategy on behalf of the user — purchasing involves credit c
 
 ## Reconciler
 
-`strategies/reconciler/reconciler.py` is a **shared system component** — it is NOT a strategy and must NEVER be deleted when the user removes a strategy.
+`reconciler.py` (workspace root) is a **shared system component** — it is NOT a strategy and must NEVER be deleted when the user removes a strategy.
 
 **What it does:** Reads all strategy state files, computes target positions across all active strategies, queries actual exchange positions, and places orders to close any gap.
 
 **Key rules:**
-- Do NOT delete or modify `strategies/reconciler/` when deleting individual strategies
+- Do NOT delete or modify `reconciler.py` when deleting individual strategies
 - The reconciler runs as its own cron job, independent of strategy crons
 - `get_positions()` and `place_order()` inside it are exchange-specific stubs the user fills in once — they apply to ALL strategies in the workspace
 - `lib/portfolio.py` contains the `reconcile()` logic; the reconciler file only provides the exchange-specific implementation
 
-When the user asks to delete a strategy, delete only its own directory (e.g. `strategies/btc_kd_long/`). Never touch `strategies/reconciler/`.
+When the user asks to delete a strategy, delete only its own directory (e.g. `strategies/btc_kd_long/`). Never touch `reconciler.py`.
 
 ---
 
