@@ -150,9 +150,55 @@ def compute_signals(df):
 
 Default values: `TARGET_VOL=0.10`, `VOL_CAP=2.0`. For 1h bars: `VOL_LOOKBACK=720`, `PERIODS_PER_YEAR=8760`.
 
+## Futures Strategies (CME / NYMEX / ICE)
+
+For futures contracts, use `fetch_db_kline(dataset, symbol, schema, start, end, headers)`.
+
+**CRITICAL — always include settlement exit.** Futures contracts expire monthly. Holding through expiry risks forced settlement at an unfavorable price. Always force-exit on the last trading day:
+
+```python
+# settlement exit: -1.0 on last bar of expiry day → executes at that bar's close
+def _settlement_dates(start, end):
+    """NYMEX WTI CL: 3rd business day before 25th of preceding month."""
+    from datetime import date, timedelta
+    import pandas as pd
+    s_year = pd.Timestamp(start).year
+    e_year = (pd.Timestamp(end) if end else pd.Timestamp.now()).year
+    dates = set()
+    for year in range(s_year - 1, e_year + 2):
+        for month in range(1, 13):
+            anchor = date(year, month, 25)
+            d = anchor
+            while d.weekday() >= 5:
+                d -= timedelta(days=1)
+            count = 0
+            while count < 3:
+                d -= timedelta(days=1)
+                if d.weekday() < 5:
+                    count += 1
+            dates.add(d)
+    return dates
+
+def compute_signals(df):
+    import pandas as pd, numpy as np
+    signal = pd.Series(np.nan, index=df.index)
+    # ... signal logic ...
+
+    # settlement exit
+    settle_dates = _settlement_dates(START, END)
+    idx_dates    = pd.to_datetime(df.index.date)
+    for d in settle_dates:
+        mask = idx_dates == pd.Timestamp(d)
+        if mask.any():
+            signal.loc[df.index[mask][-1]] = -1.0
+    return signal
+```
+
+Each exchange has its own settlement rule — adjust `_settlement_dates` accordingly. See `examples/cl_sma_1h/strategy.py` for a complete working example.
+
 ## Key Rules
 
 - `END = None` always fetches to today — `fetch_kline` handles this automatically
 - Default is always `MODE = "backtest"` — only switch to `"live"` after user confirms
 - NEVER truncate or cap arrays (no `[:N]` slicing)
-- Execution timing: signal fires at bar i close → executed at bar i+1 open (handled by runner)
+- Execution timing: signal fires at Close[t] → executes at Close[t] (MOC)
