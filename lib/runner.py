@@ -2,9 +2,12 @@ import json, logging, math, os
 import numpy as np
 import pandas as pd
 import vectorbt as vbt
+from numba import njit
+from vectorbt.portfolio.enums import SizeType, Direction
+import vectorbt.portfolio.nb as pnb
 from dotenv import dotenv_values
 from lib.execute import update_state, load_state, save_state, bootstrap
-from lib.analysis import reconstruct_arrays_vbt, plot_pnl, plot_pnl_portfolio
+from lib.analysis import plot_pnl, plot_pnl_portfolio
 
 _VBT_FREQ = {
     '1m': '1min', '5min': '5min', '15min': '15min',
@@ -13,46 +16,74 @@ _VBT_FREQ = {
 }
 
 
-def backtest_signals(close, signals, fee, freq, init_cash=100_000):
-    """Run a single Type A backtest. Returns vbt Portfolio.
-
-    Execution: signal fires at Close[t] → fills at Close[t] (MOC).
-    settlement (-1.0) treated identically to normal exit (0.0).
-    """
-    pos_sig = signals.copy(); pos_sig[signals == -1.0] = 0.0
-    pos     = pos_sig.ffill().fillna(0)
-    entries = (pos > 0) & (pos.shift(1, fill_value=0) == 0)
-    exits   = (pos == 0) & (pos.shift(1, fill_value=0) > 0)
-    size    = signals.where(signals > 0).ffill().fillna(1.0)
-    return vbt.Portfolio.from_signals(
-        close, entries, exits, size=size,
-        size_type='percent', fees=fee, freq=freq, init_cash=init_cash,
+@njit
+def _order_func_nb(c, sig, fee_val):
+    """Target-percent order: signal = signed position fraction."""
+    return pnb.order_nb(
+        size=sig[c.i],
+        size_type=SizeType.TargetPercent,
+        direction=Direction.Both,
+        fees=fee_val,
     )
+
+
+def backtest_signals(close, signals, fee, freq, init_cash=100_000):
+    """Backtest using from_order_func + TargetPercent.
+
+    Signal convention:
+      positive float → long position fraction  (e.g.  1.0 = full long)
+      negative float → short position fraction (e.g. -1.0 = full short)
+      0.0            → flat
+      nan            → hold (carry forward previous position)
+    """
+    sig_arr = signals.ffill().fillna(0).values.astype(float)
+    return vbt.Portfolio.from_order_func(
+        close, _order_func_nb, sig_arr, fee,
+        freq=_VBT_FREQ.get(freq, '1h'), init_cash=init_cash,
+    )
+
+
+def _slippage_stats(df, pos):
+    """Entry/exit slippage: close[t] → open[t+1]."""
+    next_open = df['Open'].shift(-1)
+    gap_pct   = (next_open - df['Close']) / df['Close'] * 100
+
+    entry_mask = (pos != 0) & (pos.shift(1, fill_value=0) == 0)
+    exit_mask  = (pos == 0) & (pos.shift(1, fill_value=0) != 0)
+    entry_gaps = gap_pct[entry_mask].dropna()
+    exit_gaps  = gap_pct[exit_mask].dropna()
+
+    if entry_gaps.empty and exit_gaps.empty:
+        return {}
+
+    avg_entry = float(entry_gaps.mean()) if not entry_gaps.empty else 0.0
+    avg_exit  = float(exit_gaps.mean())  if not exit_gaps.empty  else 0.0
+    n         = max(len(entry_gaps), len(exit_gaps))
+
+    print(f"\n── Slippage Analysis ({n} trades, next-bar Open vs Close[t]) ──")
+    print(f"  Entry gap  avg={avg_entry:+.3f}%")
+    print(f"  Exit  gap  avg={avg_exit:+.3f}%")
+    print(f"  Net   gap  avg={avg_entry - avg_exit:+.3f}%")
+
+    return {
+        'slippage_entry_gap_avg_%': round(avg_entry, 4),
+        'slippage_exit_gap_avg_%':  round(avg_exit, 4),
+        'slippage_net_gap_avg_%':   round(avg_entry - avg_exit, 4),
+        'slippage_cumulative_%':    round(float(entry_gaps.sum() - exit_gaps.sum()), 4),
+    }
 
 
 def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
     """
     Unified runner for Type A and Type C strategies.
 
-    fetch_data_fn(hdrs) → any
-        Type A: returns a single DataFrame (OHLCV + indicators)
-        Type C: returns any data structure the strategy needs
-
-    compute_fn(data) → pd.Series | tuple(np.ndarray, pd.DataFrame)
-        Type A: returns pd.Series of signals
-                  positive float → long (size fraction), execute at close[t]  (MOC)
-                  0.0            → flat, execute at close[t]  (MOC)
-                 -1.0            → settlement, same as 0.0
-                  nan            → hold (no action)
-        Type C: returns (weights_mat, close_df)
-                weights_mat: np.ndarray (n_days, n_stocks), weights based on close[t]
-                close_df:    pd.DataFrame of close prices
-                Runner shift(1) weights → weights[t] earns return from close[t] to close[t+1]  (MOC)
-                DO NOT pre-shift in compute_fn.
-
-    Runner routes by return type:
-        pd.Series  → vectorbt from_signals backtest (shift handled internally)
-        tuple      → weight-matrix portfolio backtest (shift handled internally)
+    compute_fn(data) → pd.Series | tuple
+      Type A: pd.Series of signals
+        positive float → long position fraction
+        negative float → short position fraction
+        0.0            → flat
+        nan            → hold
+      Type C: (weights_mat, close_df[, open_df])
     """
     mode          = config['MODE']
     strategy_name = config['STRATEGY_NAME']
@@ -82,41 +113,58 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
                 df      = df.iloc[warmup:]
                 signals = signals.iloc[warmup:]
 
-            freq = _VBT_FREQ.get(interval, '1h')
-            pf   = backtest_signals(df['Close'], signals, fee, freq)
+            # Drop bars with invalid prices (e.g. futures overnight gaps)
+            valid = df['Close'].notna() & (df['Close'] > 0)
+            if not valid.all():
+                df      = df[valid]
+                signals = signals.reindex(df.index).ffill()
 
+            pf    = backtest_signals(df['Close'], signals, fee, interval)
             stats = pf.stats()
-            print(stats[['Total Return [%]', 'Sharpe Ratio', 'Max Drawdown [%]', 'Win Rate [%]', 'Total Trades']])
-            print(f"Fee Rate: {fee*100:.4f}%  Total Fees: {float(stats['Total Fees Paid'])/100_000*100:.2f}%")
+            pos   = signals.ffill().fillna(0)
 
+            # Trade-level stats (Total Trades, Win Rate, etc.) are excluded:
+            # from_order_func + TargetPercent rebalances every bar when vol-scaled,
+            # making those counts meaningless. Reliable stats only:
             _skeys = ['Total Return [%]', 'Benchmark Return [%]',
-                      'Max Drawdown [%]', 'Total Trades', 'Win Rate [%]',
-                      'Best Trade [%]', 'Worst Trade [%]', 'Expectancy',
-                      'Sharpe Ratio', 'Sortino Ratio', 'Omega Ratio']
-            from lib.analysis import slippage_analysis
-            slip = slippage_analysis(df, pf)
+                      'Max Drawdown [%]', 'Sharpe Ratio', 'Sortino Ratio', 'Omega Ratio']
+            slip = _slippage_stats(df, pos)
 
             def _v(x):
-                return None if (isinstance(x, float) and (math.isnan(x) or math.isinf(x))) else round(float(x), 4)
-            slip_stats = {} if slip.empty else {
-                'slippage_entry_gap_avg_%':  round(float(slip['entry_gap_%'].mean()), 4),
-                'slippage_exit_gap_avg_%':   round(float(slip['exit_gap_%'].mean()),  4),
-                'slippage_net_gap_avg_%':    round(float(slip['net_gap_%'].mean()),   4),
-                'slippage_cumulative_%':     round(float(slip['net_gap_%'].sum()),    4),
+                if x is None: return None
+                if isinstance(x, float) and (math.isnan(x) or math.isinf(x)): return None
+                return round(float(x), 4)
+
+            print(stats[['Total Return [%]', 'Sharpe Ratio', 'Max Drawdown [%]']])
+            print(f"Fee Rate: {fee*100:.4f}%  Total Fees: {float(stats['Total Fees Paid'])/100_000*100:.2f}%")
+
+            equity   = pf.value()
+            result_d = {
+                'strat_ret':    pf.returns().values,
+                'position':     pos.values,
+                'realized_vol': df['realized_vol'].values if 'realized_vol' in df.columns
+                                else np.full(len(df), np.nan),
+                'cum':          (equity / equity.iloc[0]).values,
             }
+
+            from lib.pnl import daily_returns_typeA
+            d_dates, d_rets = daily_returns_typeA(pf.returns())
+
             json.dump(
                 {'strategy': strategy_name, 'symbol': config.get('SYMBOL'), 'interval': interval,
                  'start': config.get('START'), 'end': df.index[-1].strftime('%Y-%m-%d'),
                  'fee [%]': round(fee * 100, 4),
-                 **{k: _v(stats[k]) for k in _skeys},
+                 **{k: _v(stats[k]) for k in _skeys if k in stats},
                  'Total Fees Paid [%]': round(float(stats['Total Fees Paid']) / 100_000 * 100, 4),
-                 **slip_stats},
+                 **slip,
+                 'daily_dates': d_dates, 'daily_returns': d_rets,
+                 'order_params': {'symbol': config.get('SYMBOL'), 'exchange': config.get('EXCHANGE'),
+                                  'interval': interval, 'current_position': 0.0}},
                 open(f'strategies/{strategy_name}/stats.json', 'w'), indent=2
             )
 
-            out_path = f'strategies/{strategy_name}/pnl.png'
-            result_d = reconstruct_arrays_vbt(df, pf, signals)
-            plot_pnl(df, result_d, title=f'{strategy_name}', output_path=out_path)
+            plot_pnl(df, result_d, title=strategy_name,
+                     output_path=f'strategies/{strategy_name}/pnl.png')
 
             if send_telegram_fn:
                 send_telegram_fn(
@@ -127,7 +175,7 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
                 )
             return
 
-        # Live / paper mode
+        # ── Live / paper mode ──────────────────────────────────────────────────
         all_signals = signals
 
         def _row_signal(row):
@@ -141,11 +189,21 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         candle = candles[-1]
         signal = float(all_signals.iloc[-1])
         logging.info(f"signal={signal:.4f} close={candle['close']}")
+
+        _ohlcv = {'Open', 'High', 'Low', 'Close', 'Volume'}
+        ctx = {k: round(float(v), 6) for k, v in df.iloc[-1].items()
+               if k not in _ohlcv and not (isinstance(v, float) and math.isnan(v))}
+
         update_state(candle, signal, state, mode,
                      symbol=config.get('SYMBOL', ''),
                      exchange=config.get('EXCHANGE', ''),
-                     send_telegram_fn=send_telegram_fn)
+                     send_telegram_fn=send_telegram_fn,
+                     strategy_name=strategy_name,
+                     context=ctx)
         save_state(strategy_name, state)
+
+        from lib.pnl import update_stats_live
+        update_stats_live(strategy_name, state, config)
 
     # ── Type C: portfolio strategy ────────────────────────────────────────────
     elif isinstance(result, tuple):
@@ -191,23 +249,31 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         bench_stats, bench_pct = random_bh_benchmark(close_df, total_ret * 100, sharpe)
 
         def _v(x):
-            return None if (isinstance(x, float) and (math.isnan(x) or math.isinf(x))) else round(float(x), 4)
+            if x is None: return None
+            if isinstance(x, float) and (math.isnan(x) or math.isinf(x)): return None
+            return round(float(x), 4)
+
+        from lib.pnl import daily_returns_typeC
+        d_dates, d_rets = daily_returns_typeC(pf_series)
+
         json.dump(
             {'strategy': strategy_name, 'interval': '1d',
              'start': close_df.index[0].strftime('%Y-%m-%d'),
              'end':   close_df.index[-1].strftime('%Y-%m-%d'),
              'fee': fee,
-             'Total Return [%]':      _v(total_ret * 100),
-             'Ann. Return [%]':       _v(ann_ret   * 100),
-             'Sharpe Ratio':          _v(sharpe),
-             'Max Drawdown [%]':      _v(mdd       * 100),
-             'Total Fees Paid [%]':   round(float(tc_daily.sum()) * 100, 4),
-             **slip_stats, **bench_stats},
+             'Total Return [%]':    _v(total_ret * 100),
+             'Ann. Return [%]':     _v(ann_ret   * 100),
+             'Sharpe Ratio':        _v(sharpe),
+             'Max Drawdown [%]':    _v(mdd       * 100),
+             'Total Fees Paid [%]': round(float(tc_daily.sum()) * 100, 4),
+             **slip_stats, **bench_stats,
+             'daily_dates': d_dates, 'daily_returns': d_rets,
+             'order_params': None},
             open(f'strategies/{strategy_name}/stats.json', 'w'), indent=2
         )
 
-        out_path = f'strategies/{strategy_name}/pnl.png'
-        plot_pnl_portfolio(pf_series, close_df, title=strategy_name, output_path=out_path,
+        plot_pnl_portfolio(pf_series, close_df, title=strategy_name,
+                           output_path=f'strategies/{strategy_name}/pnl.png',
                            bench_pct=bench_pct)
 
         if send_telegram_fn:

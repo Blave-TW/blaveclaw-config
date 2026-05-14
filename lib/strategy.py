@@ -9,9 +9,7 @@ def add_realized_vol(df, lookback=720, periods_per_year=8760):
 
 
 def apply_vol_scaling(signal, df, target_vol=0.10, vol_cap=2.0):
-    """Scale long signal sizes by vol targeting. Returns a new signal Series."""
+    """Scale signal by vol targeting. signal × (target_vol / realized_vol)."""
     vol = df.get('realized_vol', pd.Series(np.nan, index=df.index))
-    size = (target_vol / vol).clip(upper=vol_cap)
-    scaled = signal.copy()
-    scaled[scaled > 0] = size[scaled > 0]
-    return scaled
+    scale = (target_vol / vol).clip(upper=vol_cap)
+    return signal * scale

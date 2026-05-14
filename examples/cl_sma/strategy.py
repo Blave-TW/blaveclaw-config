@@ -81,7 +81,7 @@ def compute_signals(df):
     for d in settle_dates:
         mask = idx_dates == pd.Timestamp(d)
         if mask.any():
-            signal.loc[df.index[mask][-1]] = -1.0
+            signal.loc[df.index[mask][-1]] = 0.0
 
     return signal
 

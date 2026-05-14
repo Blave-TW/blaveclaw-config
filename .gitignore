@@ -3,13 +3,10 @@ cache/
 __pycache__/
 *.pyc
 *.pyo
-strategies/**/strategy.log
-strategies/**/state.json
-strategies/**/stats.json
-strategies/**/pnl.png
-strategies/**/regime.png
-strategies/**/mcpt.png
-strategies/**/heatmap.png
+strategies/*
+!strategies/TEMPLATE.py
+manager/portfolio_config.json
+manager/orders.jsonl
 examples/**/strategy.log
 examples/**/state.json
 examples/**/stats.json

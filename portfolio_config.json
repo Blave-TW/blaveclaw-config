@@ -1,7 +1,0 @@
-{
-  "account_value": 10000,
-  "weights": {
-    "strategy_a": 0.3,
-    "strategy_b": 0.2
-  }
-}

@@ -1,9 +1,17 @@
 import glob, json, logging, os
+from datetime import datetime
+
+
+def _append_reconciler_log(order):
+    os.makedirs('manager', exist_ok=True)
+    entry = {'ts': datetime.utcnow().isoformat(), **order}
+    with open('manager/orders.jsonl', 'a') as f:
+        f.write(json.dumps(entry) + '\n')
 
 
 def load_portfolio_config():
-    """Load portfolio_config.json from working directory."""
-    path = 'portfolio_config.json'
+    """Load portfolio_config.json from manager/ directory."""
+    path = 'manager/portfolio_config.json'
     if not os.path.exists(path):
         return {'account_value': 0, 'weights': {}}
     with open(path) as f:
@@ -13,8 +21,8 @@ def load_portfolio_config():
 def load_all_states():
     """Load all strategy state files. Returns {strategy_name: state_dict}."""
     states = {}
-    for path in glob.glob('strategies/**/*_state.json', recursive=True):
-        name = os.path.basename(path).replace('_state.json', '')
+    for path in glob.glob('strategies/*/state.json'):
+        name = os.path.basename(os.path.dirname(path))
         try:
             with open(path) as f:
                 states[name] = json.load(f)
@@ -34,6 +42,7 @@ def aggregate_portfolio():
     """
     config        = load_portfolio_config()
     account_value = float(config.get('account_value', 0))
+    leverage      = float(config.get('leverage', 1.0))
     weights       = config.get('weights', {})
     states        = load_all_states()
     totals        = {}
@@ -47,7 +56,7 @@ def aggregate_portfolio():
         if not symbol or not exchange or weight == 0:
             continue
 
-        contribution = account_value * weight * position
+        contribution = account_value * leverage * weight * position
 
         if symbol not in totals:
             totals[symbol] = {'signed_usdt': 0.0, 'exchange': exchange}
@@ -124,5 +133,11 @@ def reconcile(get_positions_fn, place_order_fn, threshold_usdt=10, send_telegram
         logging.info(msg)
         if send_telegram_fn:
             send_telegram_fn(msg)
+        _append_reconciler_log({
+            'action':           direction,
+            'symbol':           symbol,
+            'signed_diff_usdt': diff,
+            'exchange':         order.get('exchange'),
+        })
 
     return orders

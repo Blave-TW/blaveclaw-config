@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # ── Config ────────────────────────────────────────────────────────────────────
-MODE          = "paper"
+MODE          = "backtest"
 STRATEGY_NAME = "btc_sma_cross"
 SYMBOL        = "BTCUSDT"
 EXCHANGE      = "binance"
@@ -42,8 +42,8 @@ def fetch_data(hdrs):
 def compute_signals(df):
     import pandas as pd, numpy as np
     signal = pd.Series(np.nan, index=df.index)
-    golden = (df['SMA_F'] > df['SMA_S']) & (df['SMA_F'].shift(1) <= df['SMA_S'].shift(1))
-    death  = (df['SMA_F'] < df['SMA_S']) & (df['SMA_F'].shift(1) >= df['SMA_S'].shift(1))
+    golden = (df['SMA_F'] > df['SMA_S'])
+    death  = (df['SMA_F'] < df['SMA_S']) 
     signal[golden] = 1.0
     signal[death]  = 0.0
     return signal
