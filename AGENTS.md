@@ -20,7 +20,7 @@ CRITICAL: Read `references/deployment.md` before deploying any strategy live or 
 - `btc_sma_cross/` — Type A, SMA crossover, includes `scan.py` for parameter search
 - `btc_ti_5min/` — Type A, Taker Intensity threshold (Blave alpha), 5min kline
 - `tw100_foreign_zscore/` — Type C, Taiwan 100-stock portfolio, foreign institutional z-score
-- `cl_sma_1h/` — Type A, WTI crude oil (CL) 1h SMA crossover with NYMEX settlement exit; uses `fetch_db_kline`
+- `cl_sma/` — Type A, WTI crude oil (CL) 1h SMA crossover with NYMEX settlement exit (use 0.0, not -1.0); uses `fetch_db_kline`
 
 These are not user strategies. User strategies live in `strategies/`.
 
@@ -40,7 +40,8 @@ Before writing any strategy code, classify the strategy:
 - Write three functions: **`_add_indicators(df, *params)`** (indicator columns, parameterized), **`fetch_data(hdrs) → df`** (kline + calls `_add_indicators` with module params), and **`compute_signals(df) → pd.Series`** (pure signal logic)
 - `run(locals(), fetch_data, compute_signals, send_telegram_fn=make_sender())` — runner handles everything else
 - `WARMUP` (optional config) — number of bars to trim from the start of the backtest (warm-up period where indicators are not yet stable). Set to the sum of all rolling windows used. Runner automatically trims if present.
-- Signal values: positive float = long (size fraction), 0.0 = flat, nan = hold (ffill)
+- Signal values: positive float = long (size fraction), negative float = short (size fraction), 0.0 = flat/cover, nan = hold (ffill)
+- Settlement exit for futures: use 0.0 (same as flat) — do NOT use -1.0 (that means short)
 
 **Type B — Everything else** (screener, grid, arbitrage, one-off execution, etc.)
 
@@ -125,8 +126,12 @@ Never create a duplicate strategy folder just because you ran a scan.
 - Use `send_telegram_fn=make_sender()` when calling `run()`
 
 `lib/strategy.py`:
-- `from lib.strategy import add_realized_vol` — 計算 realized_vol，in-place 寫入 df（vol targeting 用）
-- `from lib.strategy import apply_vol_scaling` — 以 realized_vol 縮放多頭倉位，回傳新 signal Series
+- `from lib.strategy import add_realized_vol` — 計算 30-day realized_vol（lookback=720 1h bars），in-place 寫入 df
+- `from lib.strategy import apply_vol_scaling` — `signal × (target_vol / realized_vol).clip(vol_cap)`，多空都支援；在 `compute_signals` 最後呼叫
+
+`lib/pnl.py`:
+- `from lib.pnl import daily_returns_typeA, daily_returns_typeC` — 從 pf.returns() 或 pf_series 萃取日頻報酬（runner 自動呼叫，無需手動）
+- `from lib.pnl import load_all_stats` — 讀取所有 `strategies/*/stats.json`（含 daily_returns）供 manager 使用
 
 **When writing new reusable logic** (new exchange order helper, new alpha data fetcher, etc.):
 - Add it to the appropriate `lib/` file first (or create a new one, e.g. `lib/orders_binance.py`)
@@ -190,16 +195,11 @@ The non-interactive flags (`-a` agent, `-s` skill name, `-y` confirm) skip the e
 
 IMPORTANT: Do NOT call `bt.plot()` — it generates a heavy interactive HTML file that takes 20-30 seconds and is not useful in Telegram.
 
-After every backtest, automatically:
-1. Generate PnL chart with `from lib.analysis import reconstruct_arrays_vbt, plot_pnl`
-2. Send to Telegram (see Sending Images section)
+After every backtest, `run()` automatically:
+1. Writes `strategies/{name}/stats.json` — includes Sharpe, MDD, daily_returns, slippage
+2. Generates `strategies/{name}/pnl.png` and sends to Telegram
 
-For strategy-specific indicators (e.g. TI alpha, KD), pass them via `extra_panels`:
-```python
-result = reconstruct_arrays_vbt(df, pf, signals)
-plot_pnl(df, result, title='...', output_path='/tmp/pnl.png', extra_panels=[
-    {'data': df['K'].values, 'label': 'K', 'color': '#3498db', 'hlines': [(80, '#e74c3c', 'OB'), (20, '#2ecc71', 'OS')]}
-])
+Note: `reconstruct_arrays_vbt` is no longer needed for Type A — the runner builds result_d internally from manual P&L computation.
 
 ## Strategy Marketplace
 
@@ -218,19 +218,26 @@ When the user asks about marketplace strategies, wants to load a purchased/share
 
 NEVER purchase a strategy on behalf of the user — purchasing involves credit charges and must be done by the user on the website.
 
-## Reconciler
+## Manager & Reconciler
 
-`reconciler.py` (workspace root) is a **shared system component** — it is NOT a strategy and must NEVER be deleted when the user removes a strategy.
+`manager/` contains the portfolio management system — do NOT delete any file in it when removing strategies.
 
-**What it does:** Reads all strategy state files, computes target positions across all active strategies, queries actual exchange positions, and places orders to close any gap.
+**`manager/manager.py`** — portfolio optimizer:
+- Reads all `strategies/*/stats.json` (daily_returns)
+- Maximizes `slope/std` of the combined portfolio equity curve (365-day lookback)
+- Writes optimal weights + leverage to `manager/portfolio_config.json`
+- Run: `python3 manager/manager.py [--lookback 365] [--account 10000] [--target-vol 0.30]`
+- `--target-vol`: sets target annual volatility; computes `leverage = target_vol / ann_vol`
 
-**Key rules:**
-- Do NOT delete or modify `reconciler.py` when deleting individual strategies
-- The reconciler runs as its own cron job, independent of strategy crons
-- `get_positions()` and `place_order()` inside it are exchange-specific stubs the user fills in once — they apply to ALL strategies in the workspace
-- `lib/portfolio.py` contains the `reconcile()` logic; the reconciler file only provides the exchange-specific implementation
+**`manager/reconciler.py`** — position reconciler (polling loop):
+- Polls every 5 seconds; only reconciles when a strategy's `state.json` mtime changes
+- `get_positions()` and `place_order()` are exchange-specific stubs to fill in once
+- `lib/portfolio.py` contains `reconcile()` logic; applies `leverage` from portfolio_config
+- Run: `python3 manager/reconciler.py` (keeps running)
 
-When the user asks to delete a strategy, delete only its own directory (e.g. `strategies/btc_kd_long/`). Never touch `reconciler.py`.
+**`manager/portfolio_config.json`** — gitignored; written by manager.py
+
+When the user asks to delete a strategy, delete only its own directory (e.g. `strategies/btc_kd_long/`). Never touch `manager/`.
 
 ---
 
