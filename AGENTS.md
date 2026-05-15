@@ -235,6 +235,7 @@ NEVER purchase a strategy on behalf of the user — purchasing involves credit c
 - `get_positions()` and `place_order()` are exchange-specific stubs to fill in once
 - `lib/portfolio.py` contains `reconcile()` logic; applies `leverage` from portfolio_config
 - Run: `python3 manager/reconciler.py` (keeps running)
+- **Before starting the reconciler (or triggering a manual reconcile), always show the user the pending order summary from `aggregate_portfolio()` + `compute_diff()` and ask for explicit confirmation. Only proceed if the user confirms.**
 
 **`manager/portfolio_config.json`** — gitignored; written by manager.py
 
