@@ -85,7 +85,8 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 **Always import these — never write them inline:**
 
 `lib/data.py` — all data fetching (chunking + cache built-in):
-- `fetch_db_kline(dataset, symbol, schema, start, end, headers)` → CME/NYMEX/ICE OHLCV; datasets: `GLBX.MDP3` (CL, GC), `IFEU.IMPACT` (BRN); schemas: `ohlcv-1m` / `ohlcv-1h` / `ohlcv-1d`
+- `fetch_db_kline(dataset, symbol, schema, start, end, headers)` → CME/NYMEX/ICE OHLCV + `instrument_id` column; datasets: `GLBX.MDP3` (CL, GC), `IFEU.IMPACT` (BRN); schemas: `ohlcv-1m` / `ohlcv-1h` / `ohlcv-1d`
+- `settlement_signals_from_db(df, signal)` → for any strategy using `fetch_db_kline`, call this at the end of `compute_signals` to force `signal=0.0` on the last bar before each contract rollover (detected via `instrument_id` change). In backtest (TargetPercent), `signal=0.0` exits at that bar's close — NOT the next open. Do NOT use `-1.0` for settlement — that opens a short position.
 - `fetch_kline(symbol, interval, start, end, headers)` → OHLCV DataFrame (Open/High/Low/Close/Volume)
 - `fetch_holder_concentration(symbol, interval, start, end, headers)` → DataFrame with `alpha` column
 - `fetch_taker_intensity(symbol, interval, start, end, headers, timeframe='24h')` → DataFrame with `alpha`
