@@ -139,7 +139,7 @@ def main():
         cfg['account_value'] = args.account
     cfg['weights'] = weights
 
-    # Portfolio volatility
+    # Portfolio volatility and Sharpe
     active_names = [k for k, v in weights.items() if v > 0]
     if len(active_names) >= 2:
         w_active = np.array([weights[k] for k in active_names])
@@ -150,12 +150,17 @@ def main():
     else:
         port_vol = 0.0
 
+    port_ret_series = ret_df.values @ w_arr
+    port_std = port_ret_series.std()
+    port_sharpe = float(port_ret_series.mean() / port_std * np.sqrt(365)) if port_std > 0 else 0.0
+
     account_value = cfg['account_value']
     leverage      = round(args.target_vol / (port_vol / 100), 4) if port_vol > 0 else 1.0
 
     cfg['ann_volatility_pct'] = round(port_vol, 2)
     cfg['target_vol_pct']     = round(args.target_vol * 100, 1)
     cfg['leverage']           = leverage
+    cfg['sharpe_ratio']       = round(port_sharpe, 4)
     cfg.pop('daily_vol_usdt', None)
 
     with open(CONFIG_PATH, 'w') as f:
@@ -174,6 +179,7 @@ def main():
               f'{sharpe:>8.2f} {mdd:>7.1f}% {sym:<16}')
 
     print(f'\nPortfolio slope/std : {port_score:.4f}')
+    print(f'Portfolio Sharpe    : {port_sharpe:.4f}')
     print(f'Account Value       : ${account_value:,.0f}')
     print(f'Ann. Volatility     : {port_vol:.1f}%  →  target {args.target_vol*100:.0f}%  leverage {leverage:.2f}x')
     print(f'manager/portfolio_config.json updated\n')
