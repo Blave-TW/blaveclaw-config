@@ -167,6 +167,8 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
                      output_path=f'strategies/{strategy_name}/pnl.png')
 
             if send_telegram_fn:
+                from lib.notify import send_photo
+                send_photo(f'strategies/{strategy_name}/pnl.png')
                 send_telegram_fn(
                     f"回測完成：{strategy_name}\n"
                     f"Return {stats['Total Return [%]']:.1f}%  "
@@ -190,7 +192,7 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         signal = float(all_signals.iloc[-1])
         logging.info(f"signal={signal:.4f} close={candle['close']}")
 
-        _ohlcv = {'Open', 'High', 'Low', 'Close', 'Volume'}
+        _ohlcv = {'Open', 'High', 'Low', 'Close', 'Volume', 'instrument_id'}
         ctx = {k: round(float(v), 6) for k, v in df.iloc[-1].items()
                if k not in _ohlcv and not (isinstance(v, float) and math.isnan(v))}
 
@@ -277,6 +279,8 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
                            bench_pct=bench_pct)
 
         if send_telegram_fn:
+            from lib.notify import send_photo
+            send_photo(f'strategies/{strategy_name}/pnl.png')
             send_telegram_fn(
                 f"回測完成：{strategy_name}\n"
                 f"總報酬 {total_ret:.1%}  年化 {ann_ret:.1%}\n"

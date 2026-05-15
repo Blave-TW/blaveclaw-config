@@ -233,7 +233,24 @@ def _fetch_db_raw(dataset, symbol, schema, start, end, headers):
     df = df[~df.index.duplicated(keep='first')]
     df = df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low',
                              'close': 'Close', 'volume': 'Volume'})
-    return df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float)
+    ohlcv = df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float)
+    if 'instrument_id' in df.columns:
+        ohlcv['instrument_id'] = df['instrument_id'].values
+    return ohlcv
+
+
+def settlement_signals_from_db(df, signal):
+    """Force signal=0.0 on last bar before each instrument_id rollover (contract expiry).
+
+    If instrument_id column is absent (e.g. old cache), returns signal unchanged.
+    """
+    if 'instrument_id' not in df.columns:
+        return signal
+    changes = (df['instrument_id'] != df['instrument_id'].shift(1)).values
+    for i, changed in enumerate(changes):
+        if changed and i > 0:
+            signal.iloc[i - 1] = 0.0
+    return signal
 
 
 def fetch_db_kline(dataset, symbol, schema, start, end, headers):
