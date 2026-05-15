@@ -59,16 +59,23 @@ def aggregate_portfolio():
         contribution = account_value * leverage * weight * position
 
         if symbol not in totals:
-            totals[symbol] = {'signed_usdt': 0.0, 'exchange': exchange}
+            totals[symbol] = {'signed_usdt': 0.0, 'exchange': exchange, 'contributors': []}
         totals[symbol]['signed_usdt'] += contribution
+        totals[symbol]['contributors'].append({
+            'strategy':          name,
+            'position':          position,
+            'weight':            weight,
+            'contribution_usdt': round(contribution, 4),
+        })
 
     result = {}
     for symbol, data in totals.items():
         s = data['signed_usdt']
         result[symbol] = {
-            'side':      'long' if s > 0 else ('short' if s < 0 else None),
-            'size_usdt': abs(s),
-            'exchange':  data['exchange'],
+            'side':         'long' if s > 0 else ('short' if s < 0 else None),
+            'size_usdt':    abs(s),
+            'exchange':     data['exchange'],
+            'contributors': data['contributors'],
         }
     return result
 
@@ -102,6 +109,7 @@ def compute_diff(target, actual, threshold_usdt=10):
             'symbol':           symbol,
             'signed_diff_usdt': diff,
             'exchange':         t.get('exchange'),
+            'contributors':     t.get('contributors', []),
         })
 
     return orders
@@ -138,6 +146,7 @@ def reconcile(get_positions_fn, place_order_fn, threshold_usdt=10, send_telegram
             'symbol':           symbol,
             'signed_diff_usdt': diff,
             'exchange':         order.get('exchange'),
+            'contributors':     order.get('contributors', []),
         })
 
     return orders

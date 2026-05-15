@@ -50,11 +50,10 @@ def update_state(candle, signal, state, mode, symbol=None, exchange=None,
     price    = candle['close']
     prev_pos = float(state.get('position', 0))
     new_pos  = float(signal)
-    if math.isnan(new_pos):
-        return                       # nan = hold: keep current position unchanged
-
     if symbol:   state['symbol']   = symbol
     if exchange: state['exchange'] = exchange
+    if math.isnan(new_pos):
+        return                       # nan = hold: keep current position unchanged
 
     def _log(action, pos_after):
         logging.info(f"{action} @ {price}")
