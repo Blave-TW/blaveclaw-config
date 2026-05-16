@@ -26,13 +26,30 @@ GET /openclaw/marketplace/strategies/{id}
 2. Show the combined list to the user
 3. User picks one → `GET /openclaw/marketplace/strategies/{id}/code`
 4. Save code to `/tmp/<filename>.py`
-5. **Security scan** — run `python3 lib/security_check.py /tmp/<filename>.py`
+5. **Check for multi-strategy bundle** — scan the file for lines matching `# ===== STRATEGY \d+:`:
+   - If found: split into separate files (see "Deploying a multi-strategy bundle" below), security scan and deploy each one individually
+   - If not found: proceed as single strategy
+6. **Security scan** — run `python3 lib/security_check.py /tmp/<filename>.py`
    - Exit 0 (clean) → move to `strategies/<filename>.py` and proceed
    - Exit 1 (warnings) → show findings to user, ask for confirmation; if confirmed, move to `strategies/` and run
    - Exit 2 (critical) → show findings, delete `/tmp/<filename>.py`, do NOT run
-6. `python3 strategies/<filename>.py`
+7. `python3 strategies/<filename>.py`
 
 Purchases and shared-with-me are separate lists — checking only purchases will miss shared strategies.
+
+## Deploying a multi-strategy bundle
+
+When the downloaded code contains `# ===== STRATEGY N: <name> =====` markers, treat it as a bundle:
+
+1. Split the code at each `# ===== STRATEGY N:` line into N separate strings
+2. Save each to `/tmp/<name_slug>.py` (derive slug from the strategy name after the colon)
+3. Run `python3 lib/security_check.py` on **each** file separately
+   - If any file exits 2 (critical) → delete that file, do NOT run it; continue with the others
+   - If any file exits 1 (warnings) → show findings, ask user for confirmation before moving
+4. Move approved files to `strategies/<name_slug>.py`
+5. Run each: `python3 strategies/<name_slug>.py`
+
+Example: a file containing two strategies marked as `# ===== STRATEGY 1: BTC SMA Cross =====` and `# ===== STRATEGY 2: ETH RSI Fade =====` should produce `strategies/btc_sma_cross.py` and `strategies/eth_rsi_fade.py`.
 
 ## Load purchased strategies
 
@@ -116,6 +133,64 @@ GET /openclaw/marketplace/my/submissions
 ```
 Response: `[{id, title, price, status, visibility, created_at}, ...]`
 Status values: `pending` | `approved` | `unlisted`
+
+## Submitting a multi-strategy bundle
+
+Pack two or more strategies into a single file using the `# ===== STRATEGY N: <name> =====` delimiter. Submit via the normal endpoint — no new endpoint needed.
+
+**File format:**
+```python
+# ===== STRATEGY 1: BTC SMA Cross =====
+MODE          = "live"
+STRATEGY_NAME = "btc_sma_cross"
+SYMBOL        = "BTCUSDT"
+# ... full strategy 1 code ...
+
+# ===== STRATEGY 2: ETH RSI Fade =====
+MODE          = "live"
+STRATEGY_NAME = "eth_rsi_fade"
+SYMBOL        = "ETHUSDT"
+# ... full strategy 2 code ...
+```
+
+**Description format** — repeat the structured block once per strategy, separated by `---`:
+```
+## Strategy logic
+[Strategy 1 logic]
+
+## Parameters
+- SYMBOL: BTCUSDT, INTERVAL: 1h, ...
+
+## Standard lib used
+[...]
+
+---
+
+## Strategy logic
+[Strategy 2 logic]
+
+## Parameters
+- SYMBOL: ETHUSDT, INTERVAL: 4h, ...
+
+## Standard lib used
+[...]
+```
+
+**Submit:**
+```
+POST /openclaw/marketplace/strategies/submit
+Content-Type: application/json
+
+{
+  "title": "BTC SMA Cross + ETH RSI Fade Bundle",
+  "description": "<structured description for both strategies>",
+  "price": 500,
+  "category": "bundle",
+  "code": "# ===== STRATEGY 1: BTC SMA Cross =====\n...\n\n# ===== STRATEGY 2: ETH RSI Fade =====\n..."
+}
+```
+
+Status starts as `pending`. Blave reviews and publishes it. Buyer downloads the single file and their agent automatically splits and deploys both strategies.
 
 ## Private strategies
 
