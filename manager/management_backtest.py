@@ -8,12 +8,13 @@ then applies those weights to the next day's strategy returns.
 Compares against N random static Dirichlet-weighted portfolios.
 
 Usage:
-    python3 manager/management_backtest.py [--lookback 365] [--random-n 500] [--output manager/management_backtest]
+    python3 manager/management_backtest.py [--lookback 365] [--random-n 500] [--output manager]
+    # outputs: manager/pnl.png + manager/stats.json
 """
 # ── Config ────────────────────────────────────────────────────────────────────
 LOOKBACK  = 365   # days of history used to optimize weights each step
 RANDOM_N  = 500   # number of random portfolios for benchmark comparison
-OUTPUT    = 'manager/management_backtest'  # output prefix (.json + .png)
+OUTPUT    = 'manager'  # output folder (saves pnl.png + report.json inside)
 # ─────────────────────────────────────────────────────────────────────────────
 
 import argparse, json, math, sys
@@ -99,37 +100,49 @@ def _plot(managed_ret: pd.Series, bench_rets: np.ndarray,
     dates = managed_ret.index
 
     managed_cum = np.cumprod(1 + managed_ret.values) - 1
+    peak        = np.maximum.accumulate(managed_cum + 1)
+    dd          = (managed_cum + 1 - peak) / peak
 
     bench_cum = np.cumprod(1 + bench_rets, axis=1) - 1  # (n, T)
     p5  = np.percentile(bench_cum, 5,  axis=0)
     p50 = np.percentile(bench_cum, 50, axis=0)
     p95 = np.percentile(bench_cum, 95, axis=0)
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8),
-                                   gridspec_kw={'height_ratios': [3, 2]})
-    fig.suptitle('Management Walk-Forward Backtest', fontsize=13, fontweight='bold')
+    fig, axes = plt.subplots(3, 1, figsize=(14, 10),
+                             gridspec_kw={'height_ratios': [3, 1, 2]}, sharex=True)
+    fig.suptitle('Management Walk-Forward Backtest', fontsize=12)
 
-    # ── Top: cumulative return ──
+    # ── Panel 1: cumulative return ──
+    ax1 = axes[0]
     ax1.fill_between(dates, p5 * 100, p95 * 100,
-                     alpha=0.25, color='grey', label='Random p5–p95')
-    ax1.plot(dates, p50 * 100, color='grey', linewidth=1, linestyle='--', label='Random median')
-    ax1.plot(dates, managed_cum * 100, color='royalblue', linewidth=1.5, label='Managed')
-    ax1.axhline(0, color='black', linewidth=0.5)
+                     alpha=0.2, color='#888888', label='Random p5–p95')
+    ax1.plot(dates, p50 * 100, color='#888888', lw=1, linestyle='--', label='Random median')
+    ax1.plot(dates, managed_cum * 100, color='#2ecc71', lw=1.5, label='Managed')
+    ax1.axhline(0, color='#888', lw=0.5, ls='--')
     ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda y, _: f'{y:.0f}%'))
-    ax1.set_ylabel('Cumulative Return')
-    ax1.legend(fontsize=8)
+    ax1.set_ylabel('Cumulative Return', fontsize=10)
+    ax1.legend(fontsize=9, loc='upper left')
     ax1.grid(True, alpha=0.3)
 
-    # ── Bottom: weight history (stacked area) ──
-    cols    = weights_history.columns.tolist()
-    w_vals  = weights_history.values.T          # (S, T)
-    colors  = plt.cm.tab10(np.linspace(0, 1, len(cols)))
-    ax2.stackplot(dates, w_vals, labels=cols, colors=colors, alpha=0.8)
-    ax2.set_ylim(0, 1)
-    ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda y, _: f'{y:.0%}'))
-    ax2.set_ylabel('Portfolio Weight')
-    ax2.legend(fontsize=7, loc='upper left', ncol=2)
+    # ── Panel 2: drawdown ──
+    ax2 = axes[1]
+    ax2.fill_between(dates, dd * 100, 0, color='#e74c3c', alpha=0.6)
+    ax2.axhline(0, color='#888', lw=0.5)
+    ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda y, _: f'{y:.0f}%'))
+    ax2.set_ylabel('Drawdown (%)', fontsize=10)
     ax2.grid(True, alpha=0.3)
+
+    # ── Panel 3: weight history (stacked area) ──
+    ax3   = axes[2]
+    cols  = weights_history.columns.tolist()
+    w_vals = weights_history.values.T
+    colors = plt.cm.tab10(np.linspace(0, 1, len(cols)))
+    ax3.stackplot(dates, w_vals, labels=cols, colors=colors, alpha=0.8)
+    ax3.set_ylim(0, 1)
+    ax3.yaxis.set_major_formatter(mticker.FuncFormatter(lambda y, _: f'{y:.0%}'))
+    ax3.set_ylabel('Portfolio Weight', fontsize=10)
+    ax3.legend(fontsize=7, loc='upper left', ncol=2)
+    ax3.grid(True, alpha=0.3)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
@@ -221,16 +234,19 @@ def main():
         },
     }
 
-    json_path = args.output + '.json'
-    png_path  = args.output + '.png'
+    import os
+    os.makedirs(args.output, exist_ok=True)
+    json_path = os.path.join(args.output, 'stats.json')
+    png_path  = os.path.join(args.output, 'pnl.png')
 
     with open(json_path, 'w') as f:
         json.dump(result, f, indent=2)
 
     _plot(managed_ret, bench_rets, weights_history, png_path)
 
-    print(f'\n  Output: {json_path}')
-    print(f'          {png_path}\n')
+    print(f'\n  Output: {args.output}/')
+    print(f'          ├── stats.json')
+    print(f'          └── pnl.png\n')
 
 
 if __name__ == '__main__':
