@@ -216,6 +216,13 @@ When the user asks about marketplace strategies, wants to load a purchased/share
 
 **When uploading any strategy to marketplace** (private or submit), always write a structured description — see `references/marketplace.md` for the required format.
 
+**Strategy backup & restore** — use marketplace private as personal cloud storage:
+- **Backup**: `POST /openclaw/marketplace/strategies/private` with `{"title": "<name>", "code": "<file content>", "description": "...", "category": "backup"}` — no review, instantly saved, price=0
+- **List backups**: `GET /openclaw/marketplace/my/submissions` — filter by `visibility=private`
+- **Restore**: `GET /openclaw/marketplace/strategies/<id>/code` → write to `strategies/<name>/strategy.py`
+- When user asks to backup all strategies, upload each `strategies/*/strategy.py` as a separate private entry
+- When user switches to a new machine and asks to restore, list their private submissions and restore the ones they want
+
 **When downloading a strategy**, save to `strategies/{name}/strategy.py` (create the subfolder) and run with `python3 strategies/{name}/strategy.py`. If `ImportError` for a custom lib, read the description's "Custom lib dependencies" section and recreate the missing file in `lib/`.
 
 **When a user says someone shared a strategy with them, or asks what strategies are available to them**, always call `GET /openclaw/marketplace/my/shared-with-me` to check.
