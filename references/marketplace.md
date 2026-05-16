@@ -133,6 +133,14 @@ Content-Type: application/json
 ```
 Response: `{"status": "ok", "strategy_id": 123}`
 
+**Delete a private strategy:**
+```
+DELETE /openclaw/marketplace/strategies/{id}
+```
+Response: `{"status": "ok"}`
+- Owner only. Private strategies only — public strategies cannot be deleted.
+- Also removes all shares associated with the strategy.
+
 **Flow when user wants to share a private strategy with specific users:**
 1. If the strategy isn't uploaded yet → `POST /openclaw/marketplace/strategies/private` first
 2. `POST /openclaw/marketplace/strategies/{id}/share` with the target user IDs
