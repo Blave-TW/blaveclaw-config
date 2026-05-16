@@ -5,14 +5,16 @@ CRITICAL: You MUST NEVER deploy a live strategy or set up a cron job without exp
 
 ## Type A (Signal Strategy) — mandatory flow:
 1. Write the strategy with `MODE = "backtest"` and run a backtest — show the results
-2. Ask the user TWO questions before going live:
-   a. "Do you want to deploy this live? Reply YES to confirm."
-   b. "Position sizing: set VOL_TARGETING=True (recommended) or leave False for fixed ±1.0 signal. Then confirm the strategy weight in portfolio_config.json."
-3. Only after receiving YES AND position sizing confirmation: change `MODE = "live"`, update portfolio_config.json, and set up the cron job
+2. Ask the user to confirm deployment: "Do you want to deploy this live? Reply YES to confirm."
+3. After YES, confirm portfolio_config.json settings with the user:
+   - **`account_value`**: total USDT capital allocated to the portfolio
+   - **`target_vol_pct`**: target annual volatility % (default 30%). If the user prefers to think in terms of acceptable MDD, use the approximation `target_vol ≈ MDD / 2` (e.g. willing to lose 20% → target_vol ≈ 10%). Show both the vol and the implied MDD so the user can decide.
+   - Show current values from portfolio_config.json if it exists, and ask the user to confirm or update them before proceeding.
+4. Only after all confirmations: change `MODE = "live"`, update portfolio_config.json, and set up the cron job
 
 Never assume the user wants to go live just because they described a strategy or said "let's try it."
 Even if the user says "deploy it" or "run it", always confirm with one message before touching cron or MODE = "live".
-Once deployed live, send a confirmation message with the strategy name, cron schedule, and position sizing method.
+Once deployed live, send a confirmation message with the strategy name, cron schedule, account_value, and target_vol_pct.
 
 ## Cron Job Format
 Always use this exact format — the `cd` is mandatory; without it the script runs from an unknown directory and fails silently:
