@@ -220,6 +220,7 @@ When the user asks about marketplace strategies, wants to load a purchased/share
 - **Backup**: `POST /openclaw/marketplace/strategies/private` with `{"title": "<name>", "code": "<file content>", "description": "...", "category": "backup"}` — no review, instantly saved, price=0
 - **List backups**: `GET /openclaw/marketplace/my/submissions` — filter by `visibility=private`
 - **Restore**: `GET /openclaw/marketplace/strategies/<id>/code` → write to `strategies/<name>/strategy.py`
+- **Delete**: `DELETE /openclaw/marketplace/strategies/<id>` — owner only; private strategies only (public cannot be deleted)
 - When user asks to backup all strategies, upload each `strategies/*/strategy.py` as a separate private entry
 - When user switches to a new machine and asks to restore, list their private submissions and restore the ones they want
 
