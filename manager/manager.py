@@ -18,6 +18,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lib.pnl import load_all_stats
 
+# ── Config ────────────────────────────────────────────────────────────────────
+LOOKBACK   = 365   # days of history used for weight optimization
+TARGET_VOL = 0.30  # target annual volatility (used to compute leverage)
+NOTIFY     = False # send Telegram notification after update
+# ─────────────────────────────────────────────────────────────────────────────
+
 CONFIG_PATH = Path(__file__).parent / 'portfolio_config.json'
 
 
@@ -93,10 +99,10 @@ def optimize_weights(ret_df, lookback):
 
 def main():
     parser = argparse.ArgumentParser(description='BlaveClaw Strategy Manager')
-    parser.add_argument('--lookback',   type=int,   default=365,  help='Lookback window in days (default 365)')
-    parser.add_argument('--account',    type=float, default=None, help='Override account_value in portfolio_config.json')
-    parser.add_argument('--target-vol', type=float, default=0.30, help='Target annual volatility for leverage (default 0.30)')
-    parser.add_argument('--notify',     action='store_true',      help='Send Telegram notification after update')
+    parser.add_argument('--lookback',   type=int,   default=LOOKBACK,   help=f'Lookback window in days (default {LOOKBACK})')
+    parser.add_argument('--account',    type=float, default=None,       help='Override account_value in portfolio_config.json')
+    parser.add_argument('--target-vol', type=float, default=TARGET_VOL, help=f'Target annual volatility for leverage (default {TARGET_VOL})')
+    parser.add_argument('--notify',     action='store_true',             default=NOTIFY, help='Send Telegram notification after update')
     args = parser.parse_args()
 
     np.random.seed(42)

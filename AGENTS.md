@@ -127,8 +127,11 @@ Never create a duplicate strategy folder just because you ran a scan.
 - Use `send_telegram_fn=make_sender()` when calling `run()`
 
 `lib/strategy.py`:
-- `from lib.strategy import add_realized_vol` — 計算 30-day realized_vol（lookback=720 1h bars），in-place 寫入 df
+- `from lib.strategy import add_realized_vol` — 計算 realized_vol in-place。**標準窗格為 30 天**，根據策略 interval 換算對應的 bar 數（例如 1d→30、1h→720、5min→8640）
 - `from lib.strategy import apply_vol_scaling` — `signal × (target_vol / realized_vol).clip(vol_cap)`，多空都支援；在 `compute_signals` 最後呼叫
+  - 標準預設：`target_vol=0.30`、`vol_cap=2.0`
+  - 必須先呼叫 `add_realized_vol` 讓 df 有 `realized_vol` 欄位
+- **所有使用風險平價的策略都應透過這兩個函數實作，不要在策略檔案裡自行計算 vol**
 
 `lib/pnl.py`:
 - `from lib.pnl import daily_returns_typeA, daily_returns_typeC` — 從 pf.returns() 或 pf_series 萃取日頻報酬（runner 自動呼叫，無需手動）
