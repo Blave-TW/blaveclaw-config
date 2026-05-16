@@ -14,6 +14,13 @@ Never assume the user wants to go live just because they described a strategy or
 Even if the user says "deploy it" or "run it", always confirm with one message before touching cron or MODE = "live".
 Once deployed live, send a confirmation message with the strategy name, cron schedule, and position sizing method.
 
+## Cron Job Format
+Always use this exact format — the `cd` is mandatory; without it the script runs from an unknown directory and fails silently:
+```
+5 * * * * cd /root/.openclaw/workspace && python3 strategies/<name>/strategy.py
+```
+Never write `python3 strategies/<name>/strategy.py` alone without the `cd` prefix.
+
 ## Type B (Everything else) — mandatory flow:
 1. Skip backtest entirely
 2. Ask the user to confirm before deploying: "Do you want to deploy this live? Reply YES to confirm."
