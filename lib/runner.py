@@ -7,7 +7,7 @@ from vectorbt.portfolio.enums import SizeType, Direction
 import vectorbt.portfolio.nb as pnb
 from dotenv import dotenv_values
 from lib.execute import update_state, load_state, save_state, bootstrap
-from lib.analysis import plot_pnl, plot_pnl_portfolio
+from lib.analysis import plot_pnl, plot_pnl_portfolio, compute_slippage
 
 _VBT_FREQ = {
     '1m': '1min', '5min': '5min', '15min': '15min',
@@ -42,35 +42,6 @@ def backtest_signals(close, signals, fee, freq, init_cash=100_000):
         freq=_VBT_FREQ.get(freq, '1h'), init_cash=init_cash,
     )
 
-
-def _slippage_stats(df, pos):
-    """Entry/exit slippage: close[t] → open[t+1]."""
-    next_open = df['Open'].shift(-1)
-    gap_pct   = (next_open - df['Close']) / df['Close'] * 100
-
-    entry_mask = (pos != 0) & (pos.shift(1, fill_value=0) == 0)
-    exit_mask  = (pos == 0) & (pos.shift(1, fill_value=0) != 0)
-    entry_gaps = gap_pct[entry_mask].dropna()
-    exit_gaps  = gap_pct[exit_mask].dropna()
-
-    if entry_gaps.empty and exit_gaps.empty:
-        return {}
-
-    avg_entry = float(entry_gaps.mean()) if not entry_gaps.empty else 0.0
-    avg_exit  = float(exit_gaps.mean())  if not exit_gaps.empty  else 0.0
-    n         = max(len(entry_gaps), len(exit_gaps))
-
-    print(f"\n── Slippage Analysis ({n} trades, next-bar Open vs Close[t]) ──")
-    print(f"  Entry gap  avg={avg_entry:+.3f}%")
-    print(f"  Exit  gap  avg={avg_exit:+.3f}%")
-    print(f"  Net   gap  avg={avg_entry - avg_exit:+.3f}%")
-
-    return {
-        'slippage_entry_gap_avg_%': round(avg_entry, 4),
-        'slippage_exit_gap_avg_%':  round(avg_exit, 4),
-        'slippage_net_gap_avg_%':   round(avg_entry - avg_exit, 4),
-        'slippage_cumulative_%':    round(float(entry_gaps.sum() - exit_gaps.sum()), 4),
-    }
 
 
 def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
@@ -119,44 +90,55 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
                 df      = df[valid]
                 signals = signals.reindex(df.index).ffill()
 
-            pf    = backtest_signals(df['Close'], signals, fee, interval)
-            stats = pf.stats()
-            pos   = signals.ffill().fillna(0)
+            pf  = backtest_signals(df['Close'], signals, fee, interval)
+            pos = signals.ffill().fillna(0)
 
-            # Trade-level stats (Total Trades, Win Rate, etc.) are excluded:
-            # from_order_func + TargetPercent rebalances every bar when vol-scaled,
-            # making those counts meaningless. Reliable stats only:
-            _skeys = ['Total Return [%]', 'Benchmark Return [%]',
-                      'Max Drawdown [%]', 'Sharpe Ratio', 'Sortino Ratio', 'Omega Ratio']
-            slip = _slippage_stats(df, pos)
+            delta_w_a            = np.diff(pos.values, prepend=0.0)
+            slip_ret, slip_stats = compute_slippage(df['Close'], df['Open'], delta_w_a)
+
+            adj_rets   = pd.Series(pf.returns().values + slip_ret.values, index=df.index)
+            adj_acc    = adj_rets.vbt.returns(freq=_VBT_FREQ.get(interval, '1h'))
+            adj_equity = adj_rets.add(1).cumprod() * pf.value().iloc[0]
+
+            adj_total_ret = float(np.prod(1 + adj_rets) - 1) * 100
+            adj_mdd       = float(abs(adj_acc.max_drawdown()) * 100)
+            adj_sharpe    = float(adj_acc.sharpe_ratio())
+            adj_sortino   = float(adj_acc.sortino_ratio())
+            adj_omega     = float(adj_acc.omega_ratio())
+            _orig         = pf.stats()
 
             def _v(x):
                 if x is None: return None
                 if isinstance(x, float) and (math.isnan(x) or math.isinf(x)): return None
                 return round(float(x), 4)
 
-            print(stats[['Total Return [%]', 'Sharpe Ratio', 'Max Drawdown [%]']])
-            print(f"Fee Rate: {fee*100:.4f}%  Total Fees: {float(stats['Total Fees Paid'])/100_000*100:.2f}%")
+            print(f"  Total Return (adj): {adj_total_ret:.2f}%  Sharpe: {adj_sharpe:.2f}  MDD: {adj_mdd:.2f}%")
+            print(f"  Fee Rate: {fee*100:.4f}%  Total Fees: {float(_orig['Total Fees Paid'])/100_000*100:.2f}%")
 
-            equity   = pf.value()
             result_d = {
-                'strat_ret':    pf.returns().values,
+                'strat_ret':    adj_rets.values,
                 'position':     pos.values,
                 'realized_vol': df['realized_vol'].values if 'realized_vol' in df.columns
                                 else np.full(len(df), np.nan),
-                'cum':          (equity / equity.iloc[0]).values,
+                'cum':          (adj_equity / adj_equity.iloc[0]).values,
             }
 
             from lib.pnl import daily_returns_typeA
-            d_dates, d_rets = daily_returns_typeA(pf.returns())
+            d_dates, d_rets = daily_returns_typeA(adj_rets)
 
+            _bench = _orig['Benchmark Return [%]'] if 'Benchmark Return [%]' in _orig.index else None
             json.dump(
                 {'strategy': strategy_name, 'symbol': config.get('SYMBOL'), 'interval': interval,
                  'start': config.get('START'), 'end': df.index[-1].strftime('%Y-%m-%d'),
                  'fee [%]': round(fee * 100, 4),
-                 **{k: _v(stats[k]) for k in _skeys if k in stats},
-                 'Total Fees Paid [%]': round(float(stats['Total Fees Paid']) / 100_000 * 100, 4),
-                 **slip,
+                 'Total Return [%]':     _v(adj_total_ret),
+                 'Benchmark Return [%]': _v(_bench),
+                 'Max Drawdown [%]':     _v(adj_mdd),
+                 'Sharpe Ratio':         _v(adj_sharpe),
+                 'Sortino Ratio':        _v(adj_sortino),
+                 'Omega Ratio':          _v(adj_omega),
+                 'Total Fees Paid [%]':  round(float(_orig['Total Fees Paid']) / 100_000 * 100, 4),
+                 **slip_stats,
                  'daily_dates': d_dates, 'daily_returns': d_rets,
                  'order_params': {'symbol': config.get('SYMBOL'), 'exchange': config.get('EXCHANGE'),
                                   'interval': interval, 'current_position': 0.0}},
@@ -171,9 +153,9 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
                 send_photo(f'strategies/{strategy_name}/pnl.png')
                 send_telegram_fn(
                     f"回測完成：{strategy_name}\n"
-                    f"Return {stats['Total Return [%]']:.1f}%  "
-                    f"Sharpe {stats['Sharpe Ratio']:.2f}  "
-                    f"MDD {stats['Max Drawdown [%]']:.1f}%"
+                    f"Return {adj_total_ret:.1f}%  "
+                    f"Sharpe {adj_sharpe:.2f}  "
+                    f"MDD {adj_mdd:.1f}%"
                 )
             return
 
@@ -226,9 +208,16 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         delta_w   = np.diff(weights_mat, axis=0, prepend=weights_mat[:1] * 0)
         tc_daily  = (np.abs(delta_w) * fee).sum(axis=1)
         pf_ret    = (weights_mat * daily_ret).sum(axis=1) - tc_daily
-        pf_equity = np.cumprod(1 + pf_ret)
+        slip_stats  = {}
+        bench_stats = {}
+        if open_df is not None:
+            slip_ret_c, slip_stats = compute_slippage(close_df, open_df, delta_w)
+            pf_ret_adj = pf_ret + slip_ret_c.values
+        else:
+            pf_ret_adj = pf_ret
 
-        pf_series = pd.Series(pf_ret, index=close_df.index)
+        pf_equity = np.cumprod(1 + pf_ret_adj)
+        pf_series = pd.Series(pf_ret_adj, index=close_df.index)
         rets_acc  = pf_series.vbt.returns(freq='1D')
         total_ret = pf_equity[-1] - 1
         ann_ret   = rets_acc.annualized()
@@ -240,12 +229,6 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         print(f"  Sharpe Ratio:  {sharpe:.2f}")
         print(f"  Max Drawdown:  {mdd:.1%}")
         print(f"  Fee Rate:      {fee*100:.4f}%  Total Fees: {tc_daily.sum()*100:.2f}%")
-
-        slip_stats  = {}
-        bench_stats = {}
-        if open_df is not None:
-            from lib.analysis import slippage_analysis_portfolio
-            slip_stats = slippage_analysis_portfolio(close_df, open_df, delta_w)
 
         from lib.analysis import random_bh_benchmark
         bench_stats, bench_pct = random_bh_benchmark(close_df, total_ret * 100, sharpe)

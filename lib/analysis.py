@@ -223,93 +223,57 @@ def random_bh_benchmark(close_df, strat_total_ret, strat_sharpe, n=1000, seed=42
     return stats, bench_pct
 
 
-def slippage_analysis_portfolio(close_df, open_df, delta_w):
+def compute_slippage(close_df, open_df, delta_w):
     """
-    Type C slippage: weighted-average (Open[t+1] - Close[t]) / Close[t]
-    for each rebalancing day, weighted by abs(delta_w).
+    Unified slippage for Type A (1-D delta_w) and Type C (2-D delta_w).
 
-    delta_w : (n_days, n_stocks) np.ndarray — weight changes from runner
+    gap[t]      = (open[t+1] - close[t]) / close[t]
+    slip_pnl[t] = -Σ_s gap[t,s] * delta_w[t,s]
+
+    Args:
+        close_df : pd.Series or pd.DataFrame — close prices, DatetimeIndex
+        open_df  : pd.Series or pd.DataFrame — open prices, same index as close_df
+        delta_w  : np.ndarray shape (n,) for Type A or (n, k) for Type C
+
+    Returns:
+        slip_ret   : pd.Series (same index as close_df) — per-bar slippage return; add to pf_ret
+        stats_dict : {'slippage_n_trades': int, 'slippage_avg_gap_%': float, 'slippage_pnl_%': float}
     """
-    close  = close_df.values
-    open_  = open_df.reindex(close_df.index).values
-    n      = len(close_df)
+    if isinstance(close_df, pd.Series):
+        close_vals = close_df.values.reshape(-1, 1)
+        open_vals  = open_df.reindex(close_df.index).values.reshape(-1, 1)
+    else:
+        close_vals = close_df.values
+        open_vals  = open_df.reindex(close_df.index).values
 
-    # next-bar open vs current close gap
-    open_next        = np.full_like(close, np.nan)
-    open_next[:-1]   = open_[1:]
-    gap              = (open_next - close) / np.where(close != 0, close, np.nan)
+    n = len(close_df)
+    open_next      = np.full_like(close_vals, np.nan, dtype=float)
+    open_next[:-1] = open_vals[1:]
+    with np.errstate(invalid='ignore', divide='ignore'):
+        gap = np.where(close_vals != 0, (open_next - close_vals) / close_vals, 0.0)
+    gap = np.nan_to_num(gap, nan=0.0)
 
-    abs_delta   = np.abs(delta_w)
-    total_trade = abs_delta.sum(axis=1)
-    rebal_mask  = total_trade > 0
+    dw       = delta_w.reshape(n, -1).astype(float)
+    slip_pnl = -(gap * dw).sum(axis=1)
 
-    weighted_gap = np.where(
-        rebal_mask,
-        (gap * abs_delta).sum(axis=1) / np.where(total_trade > 0, total_trade, 1),
-        np.nan,
+    trade_mask = np.abs(dw).sum(axis=1) > 0
+    n_trades   = int(trade_mask.sum())
+
+    total_dw    = np.abs(dw).sum(axis=1)[trade_mask].sum()
+    avg_gap_pct = float((np.abs(gap) * np.abs(dw)).sum(axis=1)[trade_mask].sum() / total_dw) * 100 \
+                  if total_dw > 0 else 0.0
+    slip_pnl_pct = float(slip_pnl.sum()) * 100
+
+    print(f"\n── Slippage ({n_trades} trade bars, next-bar Open vs Close[t]) ──")
+    print(f"  Avg gap (abs, turnover-weighted): {avg_gap_pct:+.3f}%")
+    print(f"  Slippage P&L impact:              {slip_pnl_pct:+.3f}%")
+
+    return (
+        pd.Series(slip_pnl, index=close_df.index),
+        {'slippage_n_trades':  n_trades,
+         'slippage_avg_gap_%': round(avg_gap_pct,  4),
+         'slippage_pnl_%':     round(slip_pnl_pct, 4)},
     )
-
-    n_rebal  = rebal_mask.sum()
-    avg_gap  = np.nanmean(weighted_gap) * 100
-    cum_gap  = np.nansum(weighted_gap[rebal_mask]) * 100
-
-    print(f"\n── Portfolio Slippage ({n_rebal} rebalancing days, next-bar Open vs Close[t]) ──")
-    print(f"  Avg gap per rebalance: {avg_gap:+.3f}%")
-    print(f"  Cumulative impact:     {cum_gap:+.2f}%")
-
-    return {
-        'slippage_rebalance_days':    int(n_rebal),
-        'slippage_avg_gap_%':         round(avg_gap, 4),
-        'slippage_cumulative_%':      round(cum_gap, 4),
-    }
-
-
-def slippage_analysis(df, pf):
-    """
-    Record next-bar Open vs current Close gap for each trade entry/exit.
-
-    Execution model: MOC (signal + fill at Close[t]).
-    Gap = (Open[t+1] - Close[t]) / Close[t]
-    Positive gap → next open is higher than close (gap-up).
-
-    For a LONG trade:
-      entry gap > 0 → next open gapped up → would have paid more at open
-      exit  gap > 0 → next open gapped up → would have received more at open
-      net gap = exit_gap - entry_gap
-        > 0 → open execution would improve P&L
-        < 0 → MOC execution was better
-
-    Returns per-trade DataFrame with gap columns.
-    """
-    trades = pf.trades.records_readable.copy()
-    if trades.empty:
-        print("\n── Slippage Analysis: no closed trades ──")
-        return trades
-
-    entry_pos  = df.index.get_indexer(pd.DatetimeIndex(trades['Entry Timestamp']))
-    exit_pos   = df.index.get_indexer(pd.DatetimeIndex(trades['Exit Timestamp']))
-    last       = len(df) - 1
-    entry_next = np.clip(entry_pos + 1, 0, last)
-    exit_next  = np.clip(exit_pos  + 1, 0, last)
-
-    entry_gap = (df['Open'].iloc[entry_next].values - df['Close'].iloc[entry_pos].values) \
-                / df['Close'].iloc[entry_pos].values * 100
-    exit_gap  = (df['Open'].iloc[exit_next].values  - df['Close'].iloc[exit_pos].values)  \
-                / df['Close'].iloc[exit_pos].values  * 100
-    net_gap   = exit_gap - entry_gap
-
-    trades['entry_gap_%'] = entry_gap.round(4)
-    trades['exit_gap_%']  = exit_gap.round(4)
-    trades['net_gap_%']   = net_gap.round(4)
-
-    n = len(trades)
-    print(f"\n── Slippage Analysis ({n} trades, next-bar Open vs Close[t]) ──")
-    print(f"  Entry gap  avg={entry_gap.mean():+.3f}%  std={entry_gap.std():.3f}%")
-    print(f"  Exit  gap  avg={exit_gap.mean():+.3f}%  std={exit_gap.std():.3f}%")
-    print(f"  Net   gap  avg={net_gap.mean():+.3f}%  "
-          f"({'open exec better' if net_gap.mean() > 0 else 'MOC better'})")
-    print(f"  Cumulative impact ≈ {net_gap.sum():+.2f}%")
-    return trades[['entry_gap_%', 'exit_gap_%', 'net_gap_%']]
 
 
 def plot_pnl_portfolio(pf_ret, close_df, title='Portfolio PnL', output_path='/tmp/pnl.png',

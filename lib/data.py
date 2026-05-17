@@ -1,3 +1,4 @@
+import time
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
@@ -5,6 +6,20 @@ from pathlib import Path
 
 BASE      = 'https://api.blave.org'
 _CACHE_DIR = Path('cache')
+
+
+def _retry_get(url, max_retries=6, **kwargs):
+    """GET with exponential backoff on 429 (2, 4, 8, 16, 32, 64 s)."""
+    for attempt in range(max_retries):
+        r = requests.get(url, **kwargs)
+        if r.status_code != 429:
+            r.raise_for_status()
+            return r
+        wait = 2 ** (attempt + 1)
+        print(f"  429 rate limit — retrying in {wait}s ({url.split('/')[-2]}/{url.split('/')[-1]})")
+        time.sleep(wait)
+    r.raise_for_status()
+    return r
 
 
 def _cache_path(prefix, params, start):
@@ -267,9 +282,8 @@ def fetch_db_kline(dataset, symbol, schema, start, end, headers):
 
 def _fetch_twstock_price_raw(stock_id, start, end, headers):
     end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
-    r = requests.get(f'{BASE}/studio/market/twstock/price_adj/{stock_id}',
-                     headers=headers, params={'start': start, 'end': end_str}, timeout=60)
-    r.raise_for_status()
+    r = _retry_get(f'{BASE}/studio/market/twstock/price_adj/{stock_id}',
+                   headers=headers, params={'start': start, 'end': end_str}, timeout=60)
     df = pd.DataFrame(r.json()['data'])
     df['date'] = pd.to_datetime(df['date'])
     df = df.set_index('date').sort_index()[['open', 'close']].rename(
@@ -288,9 +302,8 @@ def fetch_twstock_price_adj(stock_id, start, end, headers):
 
 def _fetch_twstock_inst_raw(stock_id, start, end, headers):
     end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
-    r = requests.get(f'{BASE}/studio/market/twstock/institutional/{stock_id}',
-                     headers=headers, params={'start': start, 'end': end_str}, timeout=60)
-    r.raise_for_status()
+    r = _retry_get(f'{BASE}/studio/market/twstock/institutional/{stock_id}',
+                   headers=headers, params={'start': start, 'end': end_str}, timeout=60)
     df = pd.DataFrame(r.json()['data'])
     df['date'] = pd.to_datetime(df['date'])
     df = df.set_index('date').sort_index()
@@ -303,5 +316,28 @@ def fetch_twstock_institutional(stock_id, start, end, headers):
     return _extend_cache(
         _cache_path('twstock_inst', {'id': stock_id}, start),
         lambda s, e: _fetch_twstock_inst_raw(stock_id, s, e, headers),
+        start, end,
+    )
+
+
+def _fetch_twstock_shareholding_raw(stock_id, start, end, headers):
+    end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
+    r = _retry_get(f'{BASE}/studio/market/twstock/shareholding/{stock_id}',
+                   headers=headers, params={'start': start, 'end': end_str}, timeout=60)
+    data = r.json().get('data', [])
+    if not data:
+        return pd.DataFrame(columns=['shareholders'])
+    df = pd.DataFrame(data)
+    df['date'] = pd.to_datetime(df['date'])
+    total = df[df['level'] == 'total'].set_index('date').sort_index()
+    result = total[['people']].rename(columns={'people': 'shareholders'}).astype(float)
+    return result[~result.index.duplicated(keep='last')]
+
+
+def fetch_twstock_shareholding(stock_id, start, end, headers):
+    """台股週頻股東人數（持股分級表 total）. Returns DataFrame with 'shareholders' column."""
+    return _extend_cache(
+        _cache_path('twstock_shareholding', {'id': stock_id}, start),
+        lambda s, e: _fetch_twstock_shareholding_raw(stock_id, s, e, headers),
         start, end,
     )
