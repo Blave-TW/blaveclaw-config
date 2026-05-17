@@ -257,15 +257,20 @@ def _fetch_db_raw(dataset, symbol, schema, start, end, headers):
 def settlement_signals_from_db(df, signal):
     """Force signal=0.0 on last bar before each instrument_id rollover (contract expiry).
 
-    If instrument_id column is absent (e.g. old cache), returns signal unchanged.
+    Returns (signal, exec_at_close) where exec_at_close is a bool Series marking
+    settlement bars — those bars execute at this-bar close, not next-bar open.
+    If instrument_id column is absent, exec_at_close is all-False.
     """
+    import pandas as pd
+    exec_at_close = pd.Series(False, index=df.index)
     if 'instrument_id' not in df.columns:
-        return signal
+        return signal, exec_at_close
     changes = (df['instrument_id'] != df['instrument_id'].shift(1)).values
     for i, changed in enumerate(changes):
         if changed and i > 0:
-            signal.iloc[i - 1] = 0.0
-    return signal
+            signal.iloc[i - 1]       = 0.0
+            exec_at_close.iloc[i - 1] = True
+    return signal, exec_at_close
 
 
 def fetch_db_kline(dataset, symbol, schema, start, end, headers):

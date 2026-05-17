@@ -17,16 +17,19 @@ CRITICAL: Every Type A strategy MUST be based on `strategies/TEMPLATE.py`. Copy 
 
 ## Signal Contract
 
-`compute_signals(df)` receives the DataFrame returned by `fetch_data` and returns a **pd.Series** (same index as df):
+`compute_signals(df)` receives the DataFrame returned by `fetch_data` and returns either a **pd.Series** or a **(pd.Series, exec_at_close)** tuple:
 
 | Value | Meaning | Execution |
 |-------|---------|-----------|
 | positive float (`1.0`, `0.6`, …) | long, value = position size fraction | next bar **Open** |
-| `0.0` | flat — normal exit | next bar **Open** |
-| `-1.0` | settlement exit — close at expiry | **this bar Close** |
+| `0.0` | flat — exit | next bar **Open** |
 | `nan` | hold — keep current position unchanged | no trade |
 
-`nan` vs `0.0`: use `nan` when you want to stay in the current position (e.g. inside a trend). Use `0.0` only when you explicitly want to exit at next open. Use `-1.0` only for futures settlement or forced close-at-close scenarios.
+**Execution model — two types, must be explicit:**
+- **next-bar open** (default): return plain `pd.Series` — signal at close[t] executes at open[t+1]
+- **this-bar close**: return `(signals, exec_at_close)` where `exec_at_close` is a bool `pd.Series` (True on bars that execute at close). For futures settlement use `settlement_signals_from_db()` which handles this automatically.
+
+`nan` vs `0.0`: use `nan` to hold the current position (e.g. inside a trend). Use `0.0` to exit at next open.
 
 ## Three-Layer Architecture
 
@@ -104,7 +107,7 @@ def compute_signals(df):
 
 ## What You Do NOT Need to Write
 
-- Backtest loop — handled by `lib/runner.py` (vectorbt)
+- Backtest loop — handled by `lib/runner.py`
 - `main()` function — handled by `lib/runner.py`
 - `place_order()` — handled by `strategies/reconciler/reconciler.py`
 - Logging setup — handled by `lib/runner.py`
@@ -154,51 +157,25 @@ Default values: `TARGET_VOL=0.10`, `VOL_CAP=2.0`. For 1h bars: `VOL_LOOKBACK=720
 
 For futures contracts, use `fetch_db_kline(dataset, symbol, schema, start, end, headers)`.
 
-**CRITICAL — always include settlement exit.** Futures contracts expire monthly. Holding through expiry risks forced settlement at an unfavorable price. Always force-exit on the last trading day:
+**CRITICAL — always include settlement exit.** Futures contracts expire monthly. Holding through expiry risks forced settlement at an unfavorable price. Always force-exit on the last trading day using `settlement_signals_from_db()`:
 
 ```python
-# settlement exit: -1.0 on last bar of expiry day → executes at that bar's close
-def _settlement_dates(start, end):
-    """NYMEX WTI CL: 3rd business day before 25th of preceding month."""
-    from datetime import date, timedelta
-    import pandas as pd
-    s_year = pd.Timestamp(start).year
-    e_year = (pd.Timestamp(end) if end else pd.Timestamp.now()).year
-    dates = set()
-    for year in range(s_year - 1, e_year + 2):
-        for month in range(1, 13):
-            anchor = date(year, month, 25)
-            d = anchor
-            while d.weekday() >= 5:
-                d -= timedelta(days=1)
-            count = 0
-            while count < 3:
-                d -= timedelta(days=1)
-                if d.weekday() < 5:
-                    count += 1
-            dates.add(d)
-    return dates
-
 def compute_signals(df):
     import pandas as pd, numpy as np
     signal = pd.Series(np.nan, index=df.index)
     # ... signal logic ...
 
-    # settlement exit
-    settle_dates = _settlement_dates(START, END)
-    idx_dates    = pd.to_datetime(df.index.date)
-    for d in settle_dates:
-        mask = idx_dates == pd.Timestamp(d)
-        if mask.any():
-            signal.loc[df.index[mask][-1]] = -1.0
-    return signal
+    # settlement exit: forces signal=0.0 on last bar before each contract rollover,
+    # marks those bars exec_at_close=True (executes at this-bar close, not next open)
+    from lib.data import settlement_signals_from_db
+    return settlement_signals_from_db(df, signal)
 ```
 
-Each exchange has its own settlement rule — adjust `_settlement_dates` accordingly. See `examples/cl_sma_1h/strategy.py` for a complete working example.
+`settlement_signals_from_db(df, signal)` returns `(signal, exec_at_close)` — return it directly from `compute_signals`. It detects rollover dates automatically from the `instrument_id` column in the df returned by `fetch_db_kline`. See `examples/cl_sma/strategy.py` for a complete working example.
 
 ## Key Rules
 
 - `END = None` always fetches to today — `fetch_kline` handles this automatically
 - Default is always `MODE = "backtest"` — only switch to `"live"` after user confirms
 - NEVER truncate or cap arrays (no `[:N]` slicing)
-- Execution timing: signal fires at Close[t] → executes at Close[t] (MOC)
+- Execution timing: signal fires at Close[t] → executes at Open[t+1] by default (next-bar open); use `exec_at_close` for this-bar close execution (futures settlement only)

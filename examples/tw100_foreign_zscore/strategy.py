@@ -77,10 +77,10 @@ def compute_signals(data):
     roll   = accum.rolling(ZSCORE_WINDOW, min_periods=ZSCORE_WINDOW // 2)
     z_scores = (accum - roll.mean()) / roll.std().replace(0, float('nan'))
 
-    # ── 每月最後一個交易日為調倉日 ─────────────────────────────────────────────
+    # ── 每週最後一個交易日為調倉日 ─────────────────────────────────────────────
     is_rebalance = np.zeros(len(idx), dtype=bool)
     for k in range(len(idx) - 1):
-        if idx[k].month != idx[k + 1].month:
+        if idx[k].isocalendar()[1] != idx[k + 1].isocalendar()[1]:
             is_rebalance[k] = True
     is_rebalance[-1] = True
 
@@ -93,8 +93,9 @@ def compute_signals(data):
         tot = z.sum()
         weights.loc[t] = z / tot if tot > 0 else 0.0
 
-    weights = weights.ffill().fillna(0.0)
-    return weights.values, close_df, open_df
+    weights  = weights.ffill().fillna(0.0)
+    price_df = pd.concat({'close': close_df, 'open': open_df}, axis=1)
+    return weights.values, price_df
 
 
 if __name__ == '__main__':

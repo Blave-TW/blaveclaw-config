@@ -8,17 +8,6 @@ logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
 import matplotlib.pyplot as plt
 
 
-def reconstruct_arrays_vbt(df, pf, signals, vol_lookback=720, periods_per_year=8760):
-    """Reconstruct equity, position, realized vol arrays from a vectorbt Portfolio."""
-    close        = df['Close'].values
-    log_ret      = np.concatenate([[0.0], np.log(close[1:] / close[:-1])])
-    realized_vol = pd.Series(log_ret).rolling(vol_lookback).std().values * np.sqrt(periods_per_year)
-    equity       = pf.value().reindex(df.index, method='ffill')
-    cum          = (equity / equity.iloc[0]).values
-    strat_ret    = equity.pct_change().fillna(0).values
-    position     = (signals.ffill().fillna(0) > 0).astype(float).values
-    return {'strat_ret': strat_ret, 'position': position, 'realized_vol': realized_vol, 'cum': cum}
-
 
 def _build_regimes(strat_ret, close, dates, realized_vol, hours_per_year=8760, vol_lookback=720):
     """Compute per-regime stats. Returns [(group_name, [(label, stats_or_None)])]."""
@@ -222,58 +211,6 @@ def random_bh_benchmark(close_df, strat_total_ret, strat_sharpe, n=1000, seed=42
     }
     return stats, bench_pct
 
-
-def compute_slippage(close_df, open_df, delta_w):
-    """
-    Unified slippage for Type A (1-D delta_w) and Type C (2-D delta_w).
-
-    gap[t]      = (open[t+1] - close[t]) / close[t]
-    slip_pnl[t] = -Σ_s gap[t,s] * delta_w[t,s]
-
-    Args:
-        close_df : pd.Series or pd.DataFrame — close prices, DatetimeIndex
-        open_df  : pd.Series or pd.DataFrame — open prices, same index as close_df
-        delta_w  : np.ndarray shape (n,) for Type A or (n, k) for Type C
-
-    Returns:
-        slip_ret   : pd.Series (same index as close_df) — per-bar slippage return; add to pf_ret
-        stats_dict : {'slippage_n_trades': int, 'slippage_avg_gap_%': float, 'slippage_pnl_%': float}
-    """
-    if isinstance(close_df, pd.Series):
-        close_vals = close_df.values.reshape(-1, 1)
-        open_vals  = open_df.reindex(close_df.index).values.reshape(-1, 1)
-    else:
-        close_vals = close_df.values
-        open_vals  = open_df.reindex(close_df.index).values
-
-    n = len(close_df)
-    open_next      = np.full_like(close_vals, np.nan, dtype=float)
-    open_next[:-1] = open_vals[1:]
-    with np.errstate(invalid='ignore', divide='ignore'):
-        gap = np.where(close_vals != 0, (open_next - close_vals) / close_vals, 0.0)
-    gap = np.nan_to_num(gap, nan=0.0)
-
-    dw       = delta_w.reshape(n, -1).astype(float)
-    slip_pnl = -(gap * dw).sum(axis=1)
-
-    trade_mask = np.abs(dw).sum(axis=1) > 0
-    n_trades   = int(trade_mask.sum())
-
-    total_dw    = np.abs(dw).sum(axis=1)[trade_mask].sum()
-    avg_gap_pct = float((np.abs(gap) * np.abs(dw)).sum(axis=1)[trade_mask].sum() / total_dw) * 100 \
-                  if total_dw > 0 else 0.0
-    slip_pnl_pct = float(slip_pnl.sum()) * 100
-
-    print(f"\n── Slippage ({n_trades} trade bars, next-bar Open vs Close[t]) ──")
-    print(f"  Avg gap (abs, turnover-weighted): {avg_gap_pct:+.3f}%")
-    print(f"  Slippage P&L impact:              {slip_pnl_pct:+.3f}%")
-
-    return (
-        pd.Series(slip_pnl, index=close_df.index),
-        {'slippage_n_trades':  n_trades,
-         'slippage_avg_gap_%': round(avg_gap_pct,  4),
-         'slippage_pnl_%':     round(slip_pnl_pct, 4)},
-    )
 
 
 def plot_pnl_portfolio(pf_ret, close_df, title='Portfolio PnL', output_path='/tmp/pnl.png',

@@ -20,7 +20,7 @@ CRITICAL: Read `references/deployment.md` before deploying any strategy live or 
 - `btc_sma_cross/` — Type A, SMA crossover, includes `scan.py` for parameter search
 - `btc_ti_5min/` — Type A, Taker Intensity threshold (Blave alpha), 5min kline
 - `tw100_foreign_zscore/` — Type C, Taiwan 100-stock portfolio, foreign institutional z-score
-- `cl_sma/` — Type A, WTI crude oil (CL) 1h SMA crossover with NYMEX settlement exit (use 0.0, not -1.0); uses `fetch_db_kline`
+- `cl_sma/` — Type A, WTI crude oil (CL) 1h SMA crossover with NYMEX settlement exit; uses `fetch_db_kline` + `settlement_signals_from_db()`
 
 These are not user strategies. User strategies live in `strategies/`.
 
@@ -37,11 +37,15 @@ Before writing any strategy code, classify the strategy:
 - If the strategy uses any Blave alpha indicator (taker intensity, holder concentration, liquidation, whale hunter, etc.), read the **Alpha Indicators** section in `references/strategy-code.md` for the canonical fetch pattern: use `lib.data` fetchers inside `fetch_data(hdrs)`, join to df index, ffill. Do NOT write your own fetch logic inline.
 - blave-quant-skill provides data reference only — always structure the full strategy as TEMPLATE.py
 - `END` defaults to `None` (latest data) unless the user explicitly specifies an end date
-- Write three functions: **`_add_indicators(df, *params)`** (indicator columns, parameterized), **`fetch_data(hdrs) → df`** (kline + calls `_add_indicators` with module params), and **`compute_signals(df) → pd.Series`** (pure signal logic)
+- Write three functions: **`_add_indicators(df, *params)`** (indicator columns, parameterized), **`fetch_data(hdrs) → df`** (kline + calls `_add_indicators` with module params), and **`compute_signals(df) → pd.Series | (pd.Series, exec_at_close)`** (pure signal logic)
 - `run(locals(), fetch_data, compute_signals, send_telegram_fn=make_sender())` — runner handles everything else
 - `WARMUP` (optional config) — number of bars to trim from the start of the backtest (warm-up period where indicators are not yet stable). Set to the sum of all rolling windows used. Runner automatically trims if present.
 - Signal values: positive float = long (size fraction), negative float = short (size fraction), 0.0 = flat/cover, nan = hold (ffill)
 - Settlement exit for futures: use 0.0 (same as flat) — do NOT use -1.0 (that means short)
+- **Execution model — two types, must declare explicitly:**
+  - **next-bar open** (default): signal at close[t] executes at open[t+1]. Plain `pd.Series` return, no exec_at_close needed.
+  - **this-bar close**: signal at close[t] executes at close[t] (e.g. futures settlement). Return `(signals, exec_at_close)` where `exec_at_close` is a bool `pd.Series` (True on settlement bars).
+  - For futures strategies using `fetch_db_kline`: call `settlement_signals_from_db(df, signal)` which returns `(signal, exec_at_close)` — just `return` that tuple directly from `compute_signals`. It automatically marks settlement bars as this-bar close and normal signals as next-bar open.
 
 **Type B — Everything else** (screener, grid, arbitrage, one-off execution, etc.)
 
@@ -55,10 +59,12 @@ Examples: 「台股外資 Z-Score 選股」「多因子輪動」「跨市場資�
 
 - Allocates capital across a **basket of stocks/assets** using a weight vector
 - Rebalances periodically (daily / weekly / monthly); weight changes drive trades
-- Uses **vectorbt** + vectorized numpy weight matrix — compute weight matrix `(n_days, n_stocks)`, multiply by return matrix, subtract transaction costs
 - Pre-compute signals (e.g. Z-Score DataFrame) externally; build weight matrix from signals
-- **DO NOT pre-shift weights** — runner automatically shift(1) weights (weights[t] from close[t] → earns daily_ret[t+1]), consistent with Type A
-- Run `pip install vectorbt` before backtesting
+- **DO NOT pre-shift weights** — runner handles timing automatically
+- **`compute_signals` must return `(weights_mat, price_df)`** where:
+  - `weights_mat`: numpy array `(n_days, n_stocks)` — target weights decided at each close
+  - `price_df`: MultiIndex DataFrame built with `pd.concat({'close': close_df, 'open': open_df}, axis=1)`; 'open' level is optional but enables accurate execution pricing
+  - Optional 3rd element `exec_at_close`: bool array `(n_days,)` for any bars that execute at close instead of next open
 - **Backtest REQUIRED** before going live — read `references/strategy-code.md` for the canonical multi-asset pattern
 - Still require explicit user confirmation before deploying or setting up cron jobs
 
@@ -66,11 +72,11 @@ Examples: 「台股外資 Z-Score 選股」「多因子輪動」「跨市場資�
 
 ```
 Does the strategy trade ONE fixed symbol (e.g. BTCUSDT) on a fixed interval?
-  → YES → Type A  (vectorbt via lib/runner.py + TEMPLATE.py)
+  → YES → Type A  (lib/runner.py + TEMPLATE.py)
 
 Does the strategy allocate weights across MULTIPLE symbols / a basket of assets,
 rebalancing on a schedule (daily / weekly / monthly)?
-  → YES → Type C  (vectorbt portfolio mode + backtest-twstock example)
+  → YES → Type C  (lib/runner.py, see examples/tw100_foreign_zscore)
 
 Everything else (screener, grid, arbitrage, one-off execution, alert bot)?
   → Type B  (write from scratch, no backtest)
@@ -86,7 +92,7 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 
 `lib/data.py` — all data fetching (chunking + cache built-in):
 - `fetch_db_kline(dataset, symbol, schema, start, end, headers)` → CME/NYMEX/ICE OHLCV + `instrument_id` column; datasets: `GLBX.MDP3` (CL, GC), `IFEU.IMPACT` (BRN); schemas: `ohlcv-1m` / `ohlcv-1h` / `ohlcv-1d`
-- `settlement_signals_from_db(df, signal)` → for any strategy using `fetch_db_kline`, call this at the end of `compute_signals` to force `signal=0.0` on the last bar before each contract rollover (detected via `instrument_id` change). In backtest (TargetPercent), `signal=0.0` exits at that bar's close — NOT the next open. Do NOT use `-1.0` for settlement — that opens a short position.
+- `settlement_signals_from_db(df, signal)` → returns `(signal, exec_at_close)`. For futures strategies using `fetch_db_kline`: call at the end of `compute_signals` and `return` the result directly. Forces `signal=0.0` on the last bar before each contract rollover, and marks those bars `exec_at_close=True` (executed at this-bar close, not next-bar open). Do NOT use `-1.0` for settlement — that opens a short position.
 - `fetch_kline(symbol, interval, start, end, headers)` → OHLCV DataFrame (Open/High/Low/Close/Volume)
 - `fetch_holder_concentration(symbol, interval, start, end, headers)` → DataFrame with `alpha` column
 - `fetch_taker_intensity(symbol, interval, start, end, headers, timeframe='24h')` → DataFrame with `alpha`
@@ -104,7 +110,7 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 - `from lib.execute import update_state, load_state, save_state, bootstrap` — trade execution and state management
 
 `lib/analysis.py`:
-- `from lib.analysis import reconstruct_arrays_vbt, regime_analysis, plot_regime` — performance arrays, regime breakdown, regime chart
+- `from lib.analysis import regime_analysis, plot_regime` — regime breakdown and regime chart
 
 `lib/param_scan.py`:
 - `from lib.param_scan import percentile_thresholds` — use p5/p95 as bounds, linspace n_parts values → returns (entry_vals, exit_vals); prints distribution stats
@@ -134,7 +140,7 @@ Never create a duplicate strategy folder just because you ran a scan.
 - **所有使用風險平價的策略都應透過這兩個函數實作，不要在策略檔案裡自行計算 vol**
 
 `lib/pnl.py`:
-- `from lib.pnl import daily_returns_typeA, daily_returns_typeC` — 從 pf.returns() 或 pf_series 萃取日頻報酬（runner 自動呼叫，無需手動）
+- `from lib.pnl import daily_returns_typeA, daily_returns_typeC` — 從 pf_series 萃取日頻報酬（runner 自動呼叫，無需手動）
 - `from lib.pnl import load_all_stats` — 讀取所有 `strategies/*/stats.json`（含 daily_returns）供 manager 使用
 
 **When writing new reusable logic** (new exchange order helper, new alpha data fetcher, etc.):
@@ -200,10 +206,10 @@ The non-interactive flags (`-a` agent, `-s` skill name, `-y` confirm) skip the e
 IMPORTANT: Do NOT call `bt.plot()` — it generates a heavy interactive HTML file that takes 20-30 seconds and is not useful in Telegram.
 
 After every backtest, `run()` automatically:
-1. Writes `strategies/{name}/stats.json` — includes Sharpe, MDD, daily_returns, slippage
+1. Writes `strategies/{name}/stats.json` — includes Sharpe, MDD, daily_returns
 2. Generates `strategies/{name}/pnl.png` and sends to Telegram
 
-Note: `reconstruct_arrays_vbt` is no longer needed for Type A — the runner builds result_d internally from manual P&L computation.
+Note: the runner builds result_d internally from the precise PnL computation — no manual array reconstruction needed.
 
 ## Strategy Marketplace
 

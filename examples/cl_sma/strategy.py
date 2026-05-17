@@ -47,16 +47,14 @@ def compute_signals(df):
 
     signal = pd.Series(np.nan, index=df.index)
 
-    golden = (df['SMA_F'] > df['SMA_S']) 
-    death  = (df['SMA_F'] < df['SMA_S']) 
+    golden = (df['SMA_F'] > df['SMA_S'])
+    death  = (df['SMA_F'] < df['SMA_S'])
     signal[golden] = 1.0
     signal[death]  = 0.0
 
-    # 結算出場：偵測 instrument_id 換約，換約前最後一根 bar 強制平倉
+    # 結算出場：換約前最後一根 bar 強制平倉（this-bar close），一般訊號為 next-bar open
     from lib.data import settlement_signals_from_db
-    signal = settlement_signals_from_db(df, signal)
-
-    return signal
+    return settlement_signals_from_db(df, signal)
 
 
 if __name__ == '__main__':
