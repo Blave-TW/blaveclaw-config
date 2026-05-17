@@ -52,7 +52,7 @@ def percentile_thresholds(series, n_parts=9):
 
 def scan_grid(df, compute_signals_fn, row_vals, col_vals,
               row_param='entry_th', col_param='exit_th',
-              fee=0.0005, freq='1h', valid_fn=None):
+              fee=0.0005, valid_fn=None, **_):
     """
     Run a 2D parameter scan and return a Sharpe grid.
 
@@ -65,7 +65,6 @@ def scan_grid(df, compute_signals_fn, row_vals, col_vals,
     row_param         : kwarg name for row values (default 'entry_th')
     col_param         : kwarg name for col values (default 'exit_th')
     fee               : per-trade fee rate (default 0.0005)
-    freq              : vectorbt frequency string (default '1h')
     valid_fn          : optional (row_val, col_val) → bool; skips invalid combos
                         defaults to row_val > col_val (entry > exit)
 
@@ -75,10 +74,14 @@ def scan_grid(df, compute_signals_fn, row_vals, col_vals,
     """
     import warnings
     warnings.filterwarnings('ignore', category=FutureWarning)
-    from lib.runner import backtest_signals
+    from lib.analysis import precise_pnl, compute_stats
 
     if valid_fn is None:
         valid_fn = lambda r, c: r > c
+
+    close_v = df['Close'].values
+    open_v  = df['Open'].values
+    n       = len(df)
 
     row_vals = list(row_vals)
     col_vals = list(col_vals)
@@ -88,9 +91,18 @@ def scan_grid(df, compute_signals_fn, row_vals, col_vals,
         for j, cv in enumerate(col_vals):
             if not valid_fn(rv, cv):
                 continue
-            signals = compute_signals_fn(df, **{row_param: rv, col_param: cv})
-            pf = backtest_signals(df['Close'], signals, fee=fee, freq=freq)
-            sharpe = pf.stats()['Sharpe Ratio']
+            sig = compute_signals_fn(df, **{row_param: rv, col_param: cv})
+            if isinstance(sig, tuple):
+                sig = sig[0]
+            pos = sig.ffill().fillna(0).values
+
+            w_curr = np.empty(n); w_curr[0] = 0.0; w_curr[1:] = pos[:-1]
+            w_prev = np.zeros(n)
+            if n >= 2: w_prev[2:] = pos[:-2]
+
+            exec_shifted = np.zeros(n, dtype=bool)
+            pf_ret, *_   = precise_pnl(close_v, open_v, w_curr, w_prev, exec_shifted, fee)
+            sharpe, *_   = compute_stats(pf_ret, df.index)
             if np.isfinite(sharpe):
                 grid[i, j] = sharpe
 

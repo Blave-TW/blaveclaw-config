@@ -3,79 +3,7 @@ import numpy as np
 import pandas as pd
 from dotenv import dotenv_values
 from lib.execute import update_state, load_state, save_state, bootstrap
-from lib.analysis import plot_pnl, plot_pnl_portfolio
-
-def _compute_stats(pf_ret, index):
-    """Annualized performance stats from per-bar returns. Returns (sharpe, sortino, omega, mdd, ann_ret).
-
-    ppy is derived from the actual date range so it works correctly for any market
-    (crypto 24/7, stocks 252d, futures 250d, intraday, weekly, etc.).
-    """
-    r = np.nan_to_num(np.asarray(pf_ret, dtype=float), nan=0.0)
-    n = len(r)
-
-    # periods-per-year from actual data, not hardcoded
-    if n > 1 and hasattr(index, '__getitem__'):
-        span_days = (index[-1] - index[0]).days
-        ppy = n / (span_days / 365.25) if span_days > 0 else n
-    else:
-        ppy = n
-
-    mean_r   = r.mean()
-    std_r    = r.std(ddof=1) if n > 1 else 0.0
-    sharpe   = mean_r / std_r * math.sqrt(ppy) if std_r > 0 else 0.0
-
-    neg      = r[r < 0]
-    std_down = neg.std(ddof=1) if len(neg) > 1 else 0.0
-    sortino  = mean_r / std_down * math.sqrt(ppy) if std_down > 0 else 0.0
-
-    gains  = r[r > 0].sum()
-    losses = (-r[r < 0]).sum()
-    omega  = gains / losses if losses > 0 else float('inf')
-
-    equity  = np.cumprod(1 + r)
-    mdd     = float(np.min(equity / np.maximum.accumulate(equity)) - 1)  # negative fraction
-    ann_ret = float(equity[-1] ** (ppy / n) - 1) if n > 0 else 0.0
-
-    return sharpe, sortino, omega, mdd, ann_ret
-
-
-def _precise_pnl(close_v, open_v, w_curr, w_prev, exec_shifted, fee):
-    """
-    Unified precise PnL for Type A (1-D) and Type C (2-D).
-
-    overnight[t] = (open[t] - close[t-1]) / close[t-1]   held by w_prev (or w_curr if exec_at_close)
-    intraday[t]  = (close[t] - open[t])   / open[t]       held by w_curr
-
-    exec_shifted[t] = True  → this-bar close execution: overnight uses w_curr
-                    = False → next-bar open execution:  overnight uses w_prev
-    """
-    prev_close     = np.empty_like(close_v)
-    prev_close[0]  = close_v[0]
-    prev_close[1:] = close_v[:-1]
-
-    with np.errstate(invalid='ignore', divide='ignore'):
-        overnight = np.where(prev_close != 0, (open_v - prev_close) / prev_close, 0.0)
-        intraday  = np.where(open_v  != 0, (close_v - open_v)  / open_v,  0.0)
-    overnight = np.nan_to_num(overnight, nan=0.0)
-    intraday  = np.nan_to_num(intraday,  nan=0.0)
-
-    delta_w  = w_curr - w_prev
-    if w_curr.ndim > 1:
-        tc_daily = np.abs(delta_w).sum(axis=1) * fee
-        mask2d   = exec_shifted[:, None]
-    else:
-        tc_daily = np.abs(delta_w) * fee
-        mask2d   = exec_shifted
-
-    w_overnight = np.where(mask2d, w_curr, w_prev)
-
-    if w_curr.ndim > 1:
-        pf_ret = (w_overnight * overnight + w_curr * intraday).sum(axis=1) - tc_daily
-    else:
-        pf_ret = w_overnight * overnight + w_curr * intraday - tc_daily
-
-    return pf_ret, overnight, delta_w, tc_daily
+from lib.analysis import plot_pnl, plot_pnl_portfolio, precise_pnl, compute_stats
 
 
 def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
@@ -162,12 +90,12 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
             close_v = df['Close'].values
             open_v  = df['Open'].values
 
-            pf_ret, overnight, delta_w, tc_daily = _precise_pnl(
+            pf_ret, overnight, delta_w, tc_daily = precise_pnl(
                 close_v, open_v, w_curr, w_prev, exec_shifted, fee
             )
 
             pf_series = pd.Series(pf_ret, index=df.index)
-            sharpe, sortino, omega, mdd_raw, _ = _compute_stats(pf_ret, df.index)
+            sharpe, sortino, omega, mdd_raw, _ = compute_stats(pf_ret, df.index)
 
             total_ret  = float(np.prod(1 + np.nan_to_num(pf_ret)) - 1) * 100
             mdd        = abs(mdd_raw) * 100   # positive convention for Type A
@@ -286,7 +214,7 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         close_v = close_df.values
         open_v  = open_df.values if open_df is not None else close_v
 
-        pf_ret, overnight, delta_w, tc_daily = _precise_pnl(
+        pf_ret, overnight, delta_w, tc_daily = precise_pnl(
             close_v, open_v, w_curr, w_prev, exec_shifted_c, fee
         )
 
@@ -295,7 +223,7 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         pf_equity = np.cumprod(1 + pf_ret)
         pf_series = pd.Series(pf_ret, index=close_df.index)
         total_ret = pf_equity[-1] - 1
-        sharpe, _, _, mdd, ann_ret = _compute_stats(pf_ret, close_df.index)
+        sharpe, _, _, mdd, ann_ret = compute_stats(pf_ret, close_df.index)
 
         print(f"  Total Return:  {total_ret:.1%}")
         print(f"  Ann. Return:   {ann_ret:.1%}")

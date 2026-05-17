@@ -114,8 +114,9 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 
 `lib/param_scan.py`:
 - `from lib.param_scan import percentile_thresholds` — use p5/p95 as bounds, linspace n_parts values → returns (entry_vals, exit_vals); prints distribution stats
-- `from lib.param_scan import scan_grid` — run 2D param scan, returns Sharpe grid; accepts compute_signals_fn with row_param/col_param kwargs, fee, freq
+- `from lib.param_scan import scan_grid` — run 2D param scan, returns Sharpe grid; accepts compute_signals_fn with row_param/col_param kwargs, fee. Use for threshold-based strategies (e.g. TI entry/exit). For SMA or other indicator-param scans, build a custom loop using `precise_pnl` + `compute_stats` from `lib.analysis` directly (see `examples/btc_sma_cross/scan.py`)
 - `from lib.param_scan import find_plateau, plot_heatmap` — plateau detection and heatmap chart
+- `from lib.analysis import precise_pnl, compute_stats` — use in custom scan loops for full PnL accuracy (same formula as runner)
 
 **Parameter scan workflow:**
 1. Run `scan.py` to find the best parameters

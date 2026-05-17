@@ -5,7 +5,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import numpy as np
 from dotenv import dotenv_values
-from lib.data import fetch_kline
 from lib.analysis import precise_pnl, compute_stats
 from lib.param_scan import find_plateau, plot_heatmap
 import strategy as s
@@ -15,12 +14,12 @@ hdrs = {'api-key': env.get('blave_api_key', ''), 'secret-key': env.get('blave_se
 
 # ── 資料一次 ──────────────────────────────────────────────────────────────────
 t0 = time.time()
-base_df = fetch_kline(s.SYMBOL, s.INTERVAL, s.START, s.END, hdrs)
+base_df = s.fetch_data(hdrs)
 print(f"資料載入: {time.time()-t0:.1f}s  ({len(base_df):,} bars)\n")
 
-# ── 掃描範圍（線性均分）───────────────────────────────────────────────────────
-fast_vals = list(range(5,  105, 10))   # 5, 15, 25, ..., 95
-slow_vals = list(range(20, 220, 20))   # 20, 40, 60, ..., 200
+# ── 掃描範圍 ──────────────────────────────────────────────────────────────────
+fast_vals = list(range(4,  52, 4))    #  4, 8, 12, ..., 48
+slow_vals = list(range(24, 240, 24))  # 24, 48, 72, ..., 216
 grid      = np.full((len(fast_vals), len(slow_vals)), np.nan)
 total     = len(fast_vals) * len(slow_vals)
 
@@ -31,21 +30,28 @@ for i, fast in enumerate(fast_vals):
         if fast >= slow:
             continue
 
-        df      = s._add_indicators(base_df, fast, slow)
-        signals = s.compute_signals(df)
+        df  = s._add_indicators(base_df, fast, slow)
+        sig = s.compute_signals(df)
+        if isinstance(sig, tuple):
+            sig = sig[0]   # unwrap (signals, exec_at_close)
 
-        # warmup = slow（最長的 rolling window）
-        df      = df.iloc[slow:]
-        signals = signals.iloc[slow:]
+        df  = df.iloc[slow:]
+        sig = sig.iloc[slow:]
 
-        pos    = signals.ffill().fillna(0).values
+        pos    = sig.ffill().fillna(0).values
         n      = len(df)
         w_curr = np.empty(n); w_curr[0] = 0.0; w_curr[1:] = pos[:-1]
         w_prev = np.zeros(n)
         if n >= 2: w_prev[2:] = pos[:-2]
 
+        # settlement bars: exec_at_close（不算 gap，但這裡掃描只比 Sharpe 相對值，影響極小）
+        exec_shifted = np.zeros(n, dtype=bool)
+        if 'instrument_id' in df.columns:
+            ea = (df['instrument_id'] != df['instrument_id'].shift(-1)).fillna(False).values
+            exec_shifted[1:] = ea[:-1]
+
         pf_ret, *_ = precise_pnl(df['Close'].values, df['Open'].values,
-                                  w_curr, w_prev, np.zeros(n, dtype=bool), s.FEE)
+                                  w_curr, w_prev, exec_shifted, s.FEE)
         sharpe, *_ = compute_stats(pf_ret, df.index)
         if np.isfinite(sharpe):
             grid[i, j] = sharpe
@@ -62,5 +68,5 @@ plot_heatmap(
     best_idx=best_idx,
     row_label='SMA Fast', col_label='SMA Slow',
     title=f'{s.STRATEGY_NAME} — Sharpe Grid',
-    output_path='strategies/btc_sma_cross/heatmap.png',
+    output_path='strategies/cl_sma/heatmap.png',
 )

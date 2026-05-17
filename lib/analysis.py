@@ -1,3 +1,4 @@
+import math
 import numpy as np
 import pandas as pd
 import logging
@@ -7,6 +8,81 @@ matplotlib.rcParams['font.family'] = ['Noto Sans CJK TC', 'Noto Sans CJK SC', 'W
 logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
 import matplotlib.pyplot as plt
 
+
+def precise_pnl(close_v, open_v, w_curr, w_prev, exec_shifted, fee):
+    """
+    Unified precise PnL for Type A (1-D) and Type C (2-D).
+
+    overnight[t] = (open[t] - close[t-1]) / close[t-1]  — held by w_prev (or w_curr if exec_at_close)
+    intraday[t]  = (close[t] - open[t])   / open[t]      — held by w_curr
+
+    exec_shifted[t] = True  → this-bar close execution: overnight uses w_curr
+                    = False → next-bar open execution:  overnight uses w_prev
+
+    Returns (pf_ret, overnight, delta_w, tc_daily)
+    """
+    prev_close     = np.empty_like(close_v)
+    prev_close[0]  = close_v[0]
+    prev_close[1:] = close_v[:-1]
+
+    with np.errstate(invalid='ignore', divide='ignore'):
+        overnight = np.where(prev_close != 0, (open_v - prev_close) / prev_close, 0.0)
+        intraday  = np.where(open_v != 0,     (close_v - open_v)    / open_v,     0.0)
+    overnight = np.nan_to_num(overnight, nan=0.0)
+    intraday  = np.nan_to_num(intraday,  nan=0.0)
+
+    delta_w  = w_curr - w_prev
+    if w_curr.ndim > 1:
+        tc_daily = np.abs(delta_w).sum(axis=1) * fee
+        mask2d   = exec_shifted[:, None]
+    else:
+        tc_daily = np.abs(delta_w) * fee
+        mask2d   = exec_shifted
+
+    w_overnight = np.where(mask2d, w_curr, w_prev)
+
+    if w_curr.ndim > 1:
+        pf_ret = (w_overnight * overnight + w_curr * intraday).sum(axis=1) - tc_daily
+    else:
+        pf_ret = w_overnight * overnight + w_curr * intraday - tc_daily
+
+    return pf_ret, overnight, delta_w, tc_daily
+
+
+def compute_stats(pf_ret, index):
+    """
+    Annualized performance stats from per-bar returns.
+    Returns (sharpe, sortino, omega, mdd, ann_ret).
+
+    ppy is derived from the actual date range — works for any market
+    (crypto 24/7, stocks 252d, futures ~250d, intraday, weekly, etc.).
+    """
+    r = np.nan_to_num(np.asarray(pf_ret, dtype=float), nan=0.0)
+    n = len(r)
+
+    if n > 1 and hasattr(index, '__getitem__'):
+        span_days = (index[-1] - index[0]).days
+        ppy = n / (span_days / 365.25) if span_days > 0 else n
+    else:
+        ppy = n
+
+    mean_r   = r.mean()
+    std_r    = r.std(ddof=1) if n > 1 else 0.0
+    sharpe   = mean_r / std_r * math.sqrt(ppy) if std_r > 0 else 0.0
+
+    neg      = r[r < 0]
+    std_down = neg.std(ddof=1) if len(neg) > 1 else 0.0
+    sortino  = mean_r / std_down * math.sqrt(ppy) if std_down > 0 else 0.0
+
+    gains  = r[r > 0].sum()
+    losses = (-r[r < 0]).sum()
+    omega  = gains / losses if losses > 0 else float('inf')
+
+    equity  = np.cumprod(1 + r)
+    mdd     = float(np.min(equity / np.maximum.accumulate(equity)) - 1)
+    ann_ret = float(equity[-1] ** (ppy / n) - 1) if n > 0 else 0.0
+
+    return sharpe, sortino, omega, mdd, ann_ret
 
 
 def _build_regimes(strat_ret, close, dates, realized_vol, hours_per_year=8760, vol_lookback=720):
@@ -171,17 +247,22 @@ def plot_pnl(df, result, title='Strategy PnL', output_path='/tmp/pnl.png', extra
 def random_bh_benchmark(close_df, strat_total_ret, strat_sharpe, n=1000, seed=42):
     """
     Compare strategy against n random B&H portfolios (Dirichlet weights).
-    Uses vectorbt returns accessor for consistent stats.
     """
-    import vectorbt as vbt
     daily_ret = close_df.pct_change().fillna(0).values
     rng       = np.random.default_rng(seed)
     W         = rng.dirichlet(np.ones(daily_ret.shape[1]), size=n)  # (n, S)
     all_daily = pd.DataFrame(daily_ret @ W.T, index=close_df.index) # (T, n)
 
-    rets      = all_daily.vbt.returns(freq='1D')
-    all_ret   = rets.total() * 100
-    all_sharpe = rets.sharpe_ratio()
+    # compute total return and Sharpe for each portfolio using compute_stats
+    all_ret_list    = []
+    all_sharpe_list = []
+    for col in all_daily.columns:
+        s, _, _, _, _ = compute_stats(all_daily[col].values, close_df.index)
+        equity = np.cumprod(1 + np.nan_to_num(all_daily[col].values))
+        all_ret_list.append((equity[-1] - 1) * 100)
+        all_sharpe_list.append(s)
+    all_ret    = pd.Series(all_ret_list)
+    all_sharpe = pd.Series(all_sharpe_list)
 
     all_equity = np.cumprod(1 + all_daily.values, axis=0)  # (T, n)
     bench_pct  = pd.DataFrame({
