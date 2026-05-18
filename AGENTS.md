@@ -85,6 +85,22 @@ Everything else (screener, grid, arbitrage, one-off execution, alert bot)?
 
 If unsure between Type A and C: Type A has ONE symbol and ONE position (long/short/flat). Type C has N symbols and a weight vector that sums to ≤ 1.
 
+## Blave API Headers
+
+All `lib/data.py` functions accept a `headers` dict. **Always construct it as:**
+
+```python
+from dotenv import load_dotenv; load_dotenv()
+import os
+hdrs = {'api-key': os.environ['blave_api_key'], 'secret-key': os.environ['blave_secret_key']}
+```
+
+The runner builds this automatically — only needed when calling lib functions outside of `run()`.
+
+**NEVER use** `X-API-KEY`, `X-SECRET-KEY`, or `Authorization: Bearer ...` — those are wrong formats and will return 403.
+
+---
+
 ## Shared Library (lib/)
 
 The workspace has a shared library at `lib/`. Use it to avoid duplicating code across strategies.
