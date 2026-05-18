@@ -67,6 +67,7 @@ Examples: 「台股外資 Z-Score 選股」「多因子輪動」「跨市場資�
   - Optional 3rd element `exec_at_close`: bool array `(n_days,)` for any bars that execute at close instead of next open
 - **Backtest REQUIRED** before going live — read `references/strategy-code.md` for the canonical multi-asset pattern
 - Still require explicit user confirmation before deploying or setting up cron jobs
+- **Candidate pool — NO lookahead bias**: the universe of stocks passed to `fetch_data` must be derived only from information available at the start of the backtest. NEVER filter candidates using full-period aggregates (e.g. `nlargest(N)` on cumulative net buy over the entire history) — that leaks future data. Instead use ALL stocks that ever appear in the data source (e.g. all stock_ids in trader flows), and let `compute_signals` do the per-rebalance ranking using only the lookback window available at that date.
 
 **Decision tree — classify BEFORE writing any code:**
 
@@ -105,6 +106,7 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 - `fetch_top_trader_exposure(interval, start, end, headers)` → DataFrame with `alpha` (BTC only, no symbol)
 - `fetch_twstock_price_adj(stock_id, start, end, headers)` → DataFrame with Open/Close
 - `fetch_twstock_institutional(stock_id, start, end, headers)` → DataFrame with foreign_net and raw fields
+- `fetch_twstock_trader_flows(trader_id, start, end, headers)` → long-format DataFrame indexed by (date, stock_id) with `net` column (buy - sell in shares); trader_id is the securities_trader_id e.g. `'9217'` for 凱基-松山
 
 `lib/execute.py`:
 - `from lib.execute import update_state, load_state, save_state, bootstrap` — trade execution and state management

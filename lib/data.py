@@ -1,8 +1,31 @@
 import time
+import threading
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+class _RateLimiter:
+    """Token bucket: allows max_calls requests per period seconds."""
+    def __init__(self, max_calls, period):
+        self._max   = max_calls
+        self._period = period
+        self._calls  = []
+        self._lock   = threading.Lock()
+
+    def acquire(self):
+        with self._lock:
+            now = time.time()
+            self._calls = [t for t in self._calls if now - t < self._period]
+            if len(self._calls) >= self._max:
+                wait = self._period - (now - self._calls[0])
+                if wait > 0:
+                    time.sleep(wait)
+                    now = time.time()
+                    self._calls = [t for t in self._calls if now - t < self._period]
+            self._calls.append(time.time())
 
 BASE      = 'https://api.blave.org'
 _CACHE_DIR = Path('cache')
@@ -348,43 +371,190 @@ def fetch_twstock_shareholding(stock_id, start, end, headers):
     )
 
 
-def fetch_twstock_broker_net(stock_id, broker_id, start, end, headers):
+def _broker_day_cache_path(stock_id, date_str):
+    """cache/twstock_broker_stock_<stock_id>/<date>.parquet"""
+    d = _CACHE_DIR / f'twstock_broker_stock_{stock_id}'
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f'{date_str}.parquet'
+
+
+def fetch_twstock_broker_net(stock_id, broker_id, start, end, headers,
+                             max_workers=10, rate_limit=270, period=300,
+                             max_retries=5):
     """台股特定分點每日淨買賣超 (buy - sell 股數).
 
     broker_id: securities_trader_id, e.g. '9217' for 凱基-松山.
-    Use GET /studio/market/twstock/broker/search?name= to look up broker_id.
-    Returns DataFrame indexed by date with single column 'net'.
-    Calls /broker/stock/<stock_id>?date=<date> once per weekday in range.
-    Server parquet cache keeps repeated calls fast.
+    Local cache: cache/twstock_broker_stock_<stock_id>/<YYYY-MM-DD>.parquet
+    每天存全部分點完整資料，任何 broker_id 都可直接從 local cache 過濾，無需重抓。
+    只 fetch 尚未 cache 的日期；concurrent requests + token bucket rate limit。
     """
-    from datetime import date as _date, timedelta
-    end_dt  = _date.fromisoformat(end)  if end  else _date.today()
+    from datetime import date as _date
+
+    end_dt   = _date.fromisoformat(end)   if end   else _date.today()
     start_dt = _date.fromisoformat(start)
 
+    weekdays = [start_dt + timedelta(days=i)
+                for i in range((end_dt - start_dt).days + 1)
+                if (start_dt + timedelta(days=i)).weekday() < 5]
+
+    missing = [d for d in weekdays if not _broker_day_cache_path(stock_id, d.isoformat()).exists()]
+
+    # ── fetch missing dates ───────────────────────────────────────────────────
+    if missing:
+        total   = len(missing)
+        limiter = _RateLimiter(rate_limit, period)
+        counter = {'done': 0}
+        _lock   = threading.Lock()
+
+        def fetch_one(cur):
+            date_str = cur.isoformat()
+            for attempt in range(max_retries):
+                try:
+                    limiter.acquire()
+                    r = requests.get(
+                        f'{BASE}/studio/market/twstock/broker/stock/{stock_id}',
+                        headers=headers,
+                        params={'date': date_str},
+                        timeout=30,
+                    )
+                    if r.status_code == 429:
+                        time.sleep(2 ** (attempt + 1))
+                        continue
+                    if r.status_code >= 500:
+                        time.sleep(2 ** (attempt + 1))
+                        continue
+                    r.raise_for_status()
+                    data = r.json().get('data', [])
+                    path = _broker_day_cache_path(stock_id, date_str)
+                    df_day = pd.DataFrame(data) if data else pd.DataFrame(columns=['date','stock_id','broker_id','broker_name','price','buy','sell'])
+                    df_day['date'] = date_str
+                    df_day.to_parquet(path, index=False, compression='snappy')
+                    return date_str
+                except requests.exceptions.Timeout:
+                    time.sleep(2 ** (attempt + 1))
+                except Exception as e:
+                    print(f"  [broker_net] error {date_str}: {e}")
+                    return date_str
+            return date_str
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(fetch_one, d): d for d in missing}
+            for future in as_completed(futures):
+                future.result()
+                with _lock:
+                    counter['done'] += 1
+                    done = counter['done']
+                if done % 50 == 0 or done == total:
+                    print(f"  [broker_net] {done}/{total} fetched", flush=True)
+
+    # ── read from local cache and filter ─────────────────────────────────────
     frames = []
-    cur = start_dt
-    while cur <= end_dt:
-        if cur.weekday() < 5:
-            try:
-                r = _retry_get(
-                    f'{BASE}/studio/market/twstock/broker/stock/{stock_id}',
-                    headers=headers,
-                    params={'date': cur.isoformat()},
-                    timeout=30,
-                )
-                data = r.json().get('data', [])
-                if data:
-                    df_day = pd.DataFrame(data)
-                    row = df_day[df_day['broker_id'] == broker_id]
-                    if not row.empty:
-                        net = float(row['buy'].sum() - row['sell'].sum())
-                        frames.append({'date': cur.isoformat(), 'net': net})
-            except Exception as e:
-                print(f"  broker_net fetch error {cur}: {e}")
-        cur += timedelta(days=1)
+    for d in weekdays:
+        path = _broker_day_cache_path(stock_id, d.isoformat())
+        if not path.exists():
+            continue
+        df_day = pd.read_parquet(path)
+        row = df_day[df_day['broker_id'] == broker_id]
+        if not row.empty:
+            net = float(row['buy'].sum() - row['sell'].sum())
+            frames.append({'date': d.isoformat(), 'net': net})
 
     if not frames:
         return pd.DataFrame(columns=['net'])
     result = pd.DataFrame(frames)
     result['date'] = pd.to_datetime(result['date'])
     return result.set_index('date').sort_index()
+
+
+def _trader_day_cache_path(trader_id, date_str):
+    """cache/twstock_broker_trader_<trader_id>/<date>.parquet"""
+    d = _CACHE_DIR / f'twstock_broker_trader_{trader_id}'
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f'{date_str}.parquet'
+
+
+def fetch_twstock_trader_flows(trader_id, start, end, headers,
+                               max_workers=10, rate_limit=270, period=300, max_retries=5):
+    """分點對所有股票每日淨買賣超 (buy - sell).
+
+    trader_id: securities_trader_id, e.g. '9217' for 凱基-松山.
+    Local cache: cache/twstock_broker_trader_<trader_id>/<YYYY-MM-DD>.parquet
+    每天存全部股票完整資料，只 fetch 沒有的日期。
+    Returns long-format DataFrame indexed by (date, stock_id) with 'net' column.
+    """
+    from datetime import date as _date
+
+    end_dt   = _date.fromisoformat(end)   if end   else _date.today()
+    start_dt = _date.fromisoformat(start)
+
+    weekdays = [start_dt + timedelta(days=i)
+                for i in range((end_dt - start_dt).days + 1)
+                if (start_dt + timedelta(days=i)).weekday() < 5]
+
+    missing = [d for d in weekdays if not _trader_day_cache_path(trader_id, d.isoformat()).exists()]
+
+    if missing:
+        total   = len(missing)
+        limiter = _RateLimiter(rate_limit, period)
+        counter = {'done': 0}
+        _lock   = threading.Lock()
+
+        def fetch_one(cur):
+            date_str = cur.isoformat()
+            for attempt in range(max_retries):
+                try:
+                    limiter.acquire()
+                    r = requests.get(
+                        f'{BASE}/studio/market/twstock/broker/trader/{trader_id}',
+                        headers=headers,
+                        params={'date': date_str},
+                        timeout=30,
+                    )
+                    if r.status_code == 429:
+                        time.sleep(2 ** (attempt + 1))
+                        continue
+                    if r.status_code >= 500:
+                        time.sleep(2 ** (attempt + 1))
+                        continue
+                    r.raise_for_status()
+                    data = r.json().get('data', [])
+                    path = _trader_day_cache_path(trader_id, date_str)
+                    df_day = pd.DataFrame(data) if data else pd.DataFrame(
+                        columns=['date', 'broker_id', 'broker_name', 'stock_id', 'price', 'buy', 'sell'])
+                    df_day['date'] = date_str
+                    df_day.to_parquet(path, index=False, compression='snappy')
+                    return date_str
+                except requests.exceptions.Timeout:
+                    time.sleep(2 ** (attempt + 1))
+                except Exception as e:
+                    print(f"  [trader_flows] error {date_str}: {e}")
+                    return date_str
+            return date_str
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(fetch_one, d): d for d in missing}
+            for future in as_completed(futures):
+                future.result()
+                with _lock:
+                    counter['done'] += 1
+                    done = counter['done']
+                if done % 50 == 0 or done == total:
+                    print(f"  [trader_flows] {done}/{total} fetched", flush=True)
+
+    frames = []
+    for d in weekdays:
+        path = _trader_day_cache_path(trader_id, d.isoformat())
+        if not path.exists():
+            continue
+        df_day = pd.read_parquet(path)
+        if df_day.empty or 'stock_id' not in df_day.columns:
+            continue
+        df_day = df_day.copy()
+        df_day['net'] = df_day['buy'].astype(float) - df_day['sell'].astype(float)
+        df_day['date'] = pd.to_datetime(d.isoformat())
+        frames.append(df_day[['date', 'stock_id', 'net']])
+
+    if not frames:
+        return pd.DataFrame(columns=['date', 'stock_id', 'net']).set_index(['date', 'stock_id'])
+    result = pd.concat(frames, ignore_index=True)
+    return result.groupby(['date', 'stock_id'])['net'].sum().to_frame()
