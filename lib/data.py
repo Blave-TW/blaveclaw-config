@@ -346,3 +346,45 @@ def fetch_twstock_shareholding(stock_id, start, end, headers):
         lambda s, e: _fetch_twstock_shareholding_raw(stock_id, s, e, headers),
         start, end,
     )
+
+
+def fetch_twstock_broker_net(stock_id, broker_id, start, end, headers):
+    """台股特定分點每日淨買賣超 (buy - sell 股數).
+
+    broker_id: securities_trader_id, e.g. '9217' for 凱基-松山.
+    Use GET /studio/market/twstock/broker/search?name= to look up broker_id.
+    Returns DataFrame indexed by date with single column 'net'.
+    Calls /broker/stock/<stock_id>?date=<date> once per weekday in range.
+    Server parquet cache keeps repeated calls fast.
+    """
+    from datetime import date as _date, timedelta
+    end_dt  = _date.fromisoformat(end)  if end  else _date.today()
+    start_dt = _date.fromisoformat(start)
+
+    frames = []
+    cur = start_dt
+    while cur <= end_dt:
+        if cur.weekday() < 5:
+            try:
+                r = _retry_get(
+                    f'{BASE}/studio/market/twstock/broker/stock/{stock_id}',
+                    headers=headers,
+                    params={'date': cur.isoformat()},
+                    timeout=30,
+                )
+                data = r.json().get('data', [])
+                if data:
+                    df_day = pd.DataFrame(data)
+                    row = df_day[df_day['broker_id'] == broker_id]
+                    if not row.empty:
+                        net = float(row['buy'].sum() - row['sell'].sum())
+                        frames.append({'date': cur.isoformat(), 'net': net})
+            except Exception as e:
+                print(f"  broker_net fetch error {cur}: {e}")
+        cur += timedelta(days=1)
+
+    if not frames:
+        return pd.DataFrame(columns=['net'])
+    result = pd.DataFrame(frames)
+    result['date'] = pd.to_datetime(result['date'])
+    return result.set_index('date').sort_index()
