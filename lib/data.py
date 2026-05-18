@@ -54,23 +54,30 @@ def _cache_path(prefix, params, start):
 def _extend_cache(path, fetch_raw_fn, start, end):
     """Load cache, fetch only missing delta, save, return trimmed df."""
     e = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d')
+    end_ts = pd.Timestamp(end) + pd.Timedelta(days=1) if end else None  # tz-naive cutoff
 
     if path.exists():
         cached = pd.read_parquet(path)
-        last   = cached.index[-1].to_pydatetime().replace(tzinfo=None)
+        # normalize index to tz-naive to avoid tz-aware vs tz-naive TypeError
+        if cached.index.tz is not None:
+            cached.index = cached.index.tz_convert('UTC').tz_localize(None)
+        last = cached.index[-1].to_pydatetime()
         if end and last >= e - timedelta(days=1):
-            return cached[cached.index < pd.Timestamp(end, tz='UTC') + pd.Timedelta(days=1)]
+            return cached[cached.index < end_ts]
         new_df = fetch_raw_fn(last.strftime('%Y-%m-%d'), None)
         df     = pd.concat([cached, new_df])
     else:
         df = fetch_raw_fn(start, end)
 
+    # normalize before saving so cache is always tz-naive
+    if df.index.tz is not None:
+        df.index = df.index.tz_convert('UTC').tz_localize(None)
     df = df[~df.index.duplicated(keep='last')].sort_index()
     path.parent.mkdir(exist_ok=True)
     df.to_parquet(path)
 
-    if end:
-        return df[df.index < pd.Timestamp(end, tz='UTC') + pd.Timedelta(days=1)]
+    if end_ts is not None:
+        return df[df.index < end_ts]
     return df
 
 

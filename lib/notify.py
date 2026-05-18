@@ -64,6 +64,10 @@ def send_text(msg: str) -> None:
     make_sender()(msg)
 
 
-def send_photo(path: str) -> None:
-    """Convenience: send a photo without constructing a sender."""
+def send_photo(path: str, caption: str = None) -> None:
+    """Convenience: send a photo without constructing a sender.
+    If caption is provided, sends it as a follow-up text message.
+    """
     make_sender(photo=True)(path)
+    if caption:
+        send_text(caption)
