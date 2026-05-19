@@ -259,6 +259,15 @@ NEVER purchase a strategy on behalf of the user — purchasing involves credit c
 
 `manager/` contains the portfolio management system — do NOT delete any file in it when removing strategies.
 
+**CRITICAL — never create files or subdirectories inside `manager/`.** All output (portfolio_config.json, pnl.png, stats.json) is written there by the scripts themselves. Never create a `manager/manager/` or any nested folder — it breaks path resolution in all three scripts.
+
+**`manager/management_backtest.py`** — portfolio walk-forward backtest:
+- Simulates the manager's dynamic allocation day by day (strictly out-of-sample)
+- Compares against random static portfolios as benchmark
+- Run BEFORE going live to validate the combined portfolio performance
+- Run: `python3 manager/management_backtest.py [--lookback 365] [--random-n 500]`
+- When the user asks to backtest the portfolio / combined strategies, use THIS script — not individual strategy backtests
+
 **`manager/manager.py`** — portfolio optimizer:
 - Reads all `strategies/*/stats.json` (daily_returns)
 - Maximizes `slope/std` of the combined portfolio equity curve (365-day lookback)
