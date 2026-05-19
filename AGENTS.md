@@ -202,23 +202,13 @@ Token and chat_id are read automatically from `/root/.openclaw/openclaw.json`.
 
 ## Skill Install / Update
 
-When the user asks to install or update a skill (e.g. "更新 blave-quant skill", "install blave skill"), you MUST use the full non-interactive form of `skills add`:
-
-```
-npx -y skills add <github-url> -a openclaw -s <skill-name> -y
-```
-
-For the Blave skill specifically:
+Always use non-interactive flags (bare `npx skills add <url>` triggers a TUI that fails in tmux):
 
 ```
 npx -y skills add https://github.com/Blave-TW/blave-quant-skill -a openclaw -s blave-quant -y
 ```
 
-DO NOT run the bare `npx skills add <url>` — it triggers a multi-step interactive TUI (agent picker, skill picker, scope, copy/symlink, confirm) which cannot be reliably driven via tmux send-keys. Specifically:
-- Arrow keys fail with `cursor key mode is not known yet`
-- Space gets eaten by the search input box and filters the list to "No matches found"
-
-The non-interactive flags (`-a` agent, `-s` skill name, `-y` confirm) skip the entire TUI. The skill name comes from the skill's `clawhub.json` `name` field.
+For other skills: `npx -y skills add <github-url> -a openclaw -s <skill-name> -y`
 
 ## Backtest Output
 
@@ -232,59 +222,21 @@ Note: the runner builds result_d internally from the precise PnL computation —
 
 ## Strategy Marketplace
 
-When the user asks about marketplace strategies, wants to load a purchased/shared strategy, wants to upload a private strategy, or wants to submit their own strategy for sale, read `references/marketplace.md` for the full API spec.
+For all marketplace operations (browse, upload private, submit, share, backup/restore, download), read `references/marketplace.md`.
 
-- **Upload private strategy**: `POST /openclaw/marketplace/strategies/private` — no review needed, immediately accessible
-- **Share with specific users**: `POST /openclaw/marketplace/strategies/{id}/share` with `{"user_ids": [...]}` — this is a supported operation; execute it when the user asks to share a strategy with a UID
-- **View strategies shared with you**: `GET /openclaw/marketplace/my/shared-with-me` — list strategies others have shared with this user
-- **Download code**: `GET /openclaw/marketplace/strategies/{id}/code` — works for owned, purchased, or shared strategies; save to `.py` and run with `python3`
-
-**When uploading any strategy to marketplace** (private or submit), always write a structured description — see `references/marketplace.md` for the required format.
-
-**Strategy backup & restore** — use marketplace private as personal cloud storage:
-- **Backup**: `POST /openclaw/marketplace/strategies/private` with `{"title": "<name>", "code": "<file content>", "description": "...", "category": "backup"}` — no review, instantly saved, price=0
-- **List backups**: `GET /openclaw/marketplace/my/submissions` — filter by `visibility=private`
-- **Restore**: `GET /openclaw/marketplace/strategies/<id>/code` → write to `strategies/<name>/strategy.py`
-- **Delete**: `DELETE /openclaw/marketplace/strategies/<id>` — owner only; private strategies only (public cannot be deleted)
-- When user asks to backup all strategies, upload each `strategies/*/strategy.py` as a separate private entry
-- When user switches to a new machine and asks to restore, list their private submissions and restore the ones they want
-
-**When downloading a strategy**, save to `strategies/{name}/strategy.py` (create the subfolder) and run with `python3 strategies/{name}/strategy.py`. If `ImportError` for a custom lib, read the description's "Custom lib dependencies" section and recreate the missing file in `lib/`.
-
-**When a user says someone shared a strategy with them, or asks what strategies are available to them**, always call `GET /openclaw/marketplace/my/shared-with-me` to check.
-
-NEVER purchase a strategy on behalf of the user — purchasing involves credit charges and must be done by the user on the website.
+- NEVER purchase a strategy on behalf of the user.
+- When user asks about shared strategies or what strategies are available: call `GET /openclaw/marketplace/my/shared-with-me`.
+- When downloading: save to `strategies/{name}/strategy.py`; if `ImportError` on custom lib, reconstruct from the description's "Custom lib dependencies" section.
 
 ## Manager & Reconciler
 
-`manager/` contains the portfolio management system — do NOT delete any file in it when removing strategies.
+For full workflow, read `references/manager.md`.
 
-**CRITICAL — never create files or subdirectories inside `manager/`.** All output (portfolio_config.json, pnl.png, stats.json) is written there by the scripts themselves. Never create a `manager/manager/` or any nested folder — it breaks path resolution in all three scripts.
-
-**`manager/management_backtest.py`** — portfolio walk-forward backtest:
-- Simulates the manager's dynamic allocation day by day (strictly out-of-sample)
-- Compares against random static portfolios as benchmark
-- Run BEFORE going live to validate the combined portfolio performance
-- Run: `python3 manager/management_backtest.py [--lookback 365] [--random-n 500]`
-- When the user asks to backtest the portfolio / combined strategies, use THIS script — not individual strategy backtests
-
-**`manager/manager.py`** — portfolio optimizer:
-- Reads all `strategies/*/stats.json` (daily_returns)
-- Maximizes `slope/std` of the combined portfolio equity curve (365-day lookback)
-- Writes optimal weights + leverage to `manager/portfolio_config.json`
-- Run: `python3 manager/manager.py [--lookback 365] [--account 10000] [--target-vol 0.30]`
-- `--target-vol`: sets target annual volatility; computes `leverage = target_vol / ann_vol`
-
-**`manager/reconciler.py`** — position reconciler (polling loop):
-- Polls every 5 seconds; only reconciles when a strategy's `state.json` mtime changes
-- `get_positions()` and `place_order()` are exchange-specific stubs to fill in once
-- `lib/portfolio.py` contains `reconcile()` logic; applies `leverage` from portfolio_config
-- Run: `python3 manager/reconciler.py` (keeps running)
-- **Before starting the reconciler (or triggering a manual reconcile), always show the user the pending order summary from `aggregate_portfolio()` + `compute_diff()` and ask for explicit confirmation. Only proceed if the user confirms.**
-
-**`manager/portfolio_config.json`** — gitignored; written by manager.py
-
-When the user asks to delete a strategy, delete only its own directory (e.g. `strategies/btc_kd_long/`). Never touch `manager/`.
+**CRITICAL:**
+- Never create files or subdirectories inside `manager/`. Never delete any file in it when removing strategies.
+- Before any reconcile: show pending order summary and ask for explicit user confirmation.
+- When user asks to backtest the portfolio: use `manager/management_backtest.py`, not individual strategy backtests.
+- When user asks to delete a strategy, delete only its own directory (e.g. `strategies/btc_kd_long/`). Never touch `manager/`.
 
 ---
 
