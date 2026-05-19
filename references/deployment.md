@@ -8,7 +8,6 @@ CRITICAL: You MUST NEVER deploy a live strategy or set up a cron job without exp
 2. Ask the user to confirm deployment: "Do you want to deploy this live? Reply YES to confirm."
 3. After YES, ask the following **in a single message** before writing any code:
    - **現貨 or 合約？** Spot or futures/perpetual? (affects which order API and position sizing to use)
-   - **槓桿倍數？** If futures: what leverage? (default 1x)
    - **對齊部位？** Do you want to reconcile current open positions before the first live run? If YES, fetch current positions from the exchange and align them with what the strategy's bootstrap state expects — place orders for any difference. If NO, the strategy will align naturally over the next few signals.
 4. After all three are answered, confirm portfolio_config.json settings with the user:
    - **`account_value`**: total USDT capital allocated to the portfolio
