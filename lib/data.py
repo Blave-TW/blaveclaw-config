@@ -65,6 +65,8 @@ def _extend_cache(path, fetch_raw_fn, start, end):
         if end and last >= e - timedelta(days=1):
             return cached[cached.index < end_ts]
         new_df = fetch_raw_fn(last.strftime('%Y-%m-%d'), None)
+        if new_df.index.tz is not None:
+            new_df.index = new_df.index.tz_convert('UTC').tz_localize(None)
         df     = pd.concat([cached, new_df])
     else:
         df = fetch_raw_fn(start, end)
