@@ -43,6 +43,22 @@ UNIVERSE = [
 ]
 
 
+# ── helpers ───────────────────────────────────────────────────────────────────
+def _compute_zscore(foreign_df):
+    """外資累積買賣超 → time-series z-score（用 module-level 視窗參數）"""
+    import pandas as pd
+    foreign_accum = foreign_df.rolling(ACCUM_WINDOW, min_periods=1).sum()
+    rolling_stats = foreign_accum.rolling(ZSCORE_WINDOW, min_periods=ZSCORE_WINDOW // 2)
+    return (foreign_accum - rolling_stats.mean()) / rolling_stats.std().replace(0, float('nan'))
+
+
+def _rebalance_mask(idx):
+    """每週最後一個交易日為 True（ISO week 切換處；最後一天自動為 True）"""
+    import pandas as pd
+    iso_week = pd.Series(idx.isocalendar().week.values, index=idx)
+    return (iso_week != iso_week.shift(-1)).fillna(True).to_numpy()
+
+
 # ── fetch_data ────────────────────────────────────────────────────────────────
 def fetch_data(hdrs):
     import pandas as pd
@@ -72,30 +88,17 @@ def compute_signals(data):
     close_df, foreign_df, open_df = data
     idx = close_df.index
 
-    # ── 累積 1 個月買賣超，再以 1 年視窗 time-series 標準化 ──────────────────
-    accum  = foreign_df.rolling(ACCUM_WINDOW, min_periods=1).sum()
-    roll   = accum.rolling(ZSCORE_WINDOW, min_periods=ZSCORE_WINDOW // 2)
-    z_scores = (accum - roll.mean()) / roll.std().replace(0, float('nan'))
+    z_scores     = _compute_zscore(foreign_df)
+    is_rebalance = _rebalance_mask(idx)
 
-    # ── 每週最後一個交易日為調倉日 ─────────────────────────────────────────────
-    is_rebalance = np.zeros(len(idx), dtype=bool)
-    for k in range(len(idx) - 1):
-        if idx[k].isocalendar()[1] != idx[k + 1].isocalendar()[1]:
-            is_rebalance[k] = True
-    is_rebalance[-1] = True
-
-    # ── 建立權重矩陣（調倉日以正 z-score 等比分配，其餘持倉不動）──────────────
-    weights = pd.DataFrame(np.nan, index=idx, columns=close_df.columns)
-    for k, t in enumerate(idx):
-        if not is_rebalance[k]:
-            continue
-        z   = z_scores.loc[t].clip(lower=0).fillna(0)
-        tot = z.sum()
-        weights.loc[t] = z / tot if tot > 0 else 0.0
-
-    weights  = weights.ffill().fillna(0.0)
+    # 算出每天的正規化權重 → 只保留調倉日 → ffill 補齊其餘日
+    pos_z   = z_scores.clip(lower=0).fillna(0)              # 負 z → 0（不做空）
+    z_total = pos_z.sum(axis=1)
+    weights = pos_z.div(z_total.where(z_total > 0), axis=0).fillna(0.0)
+    weights[~is_rebalance] = np.nan
+    weights = weights.ffill().fillna(0.0)
     price_df = pd.concat({'close': close_df, 'open': open_df}, axis=1)
-    return weights.values, price_df
+    return weights.values, price_df   # weights 必須是 numpy array（runner Type C 介面要求）
 
 
 if __name__ == '__main__':
