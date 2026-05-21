@@ -51,6 +51,7 @@ Before writing any strategy code, classify the strategy:
 
 - Write code from scratch based on the user's requirements — no template
 - **No backtest** — skip it entirely
+- **BEFORE writing any exchange API call** (order placement, cancel, balance, position query): read the relevant skill reference file under `skills/blave-quant/references/` (e.g. `binance-skill.md`, `bybit-skill.md`, `bitmart-futures-skill.md`) — wrong endpoints, missing broker headers, and wrong parameter names cause silent failures and lost attribution
 - Still require explicit user confirmation before deploying or setting up cron jobs
 
 **Type C — Portfolio Strategy** (multi-stock, periodic rebalancing, weight-based)
