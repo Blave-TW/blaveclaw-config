@@ -8,12 +8,12 @@ then applies those weights to the next day's strategy returns.
 Compares against N random static Dirichlet-weighted portfolios.
 
 Usage:
-    python3 manager/management_backtest.py [--lookback 365] [--random-n 500] [--output manager]
+    python3 manager/management_backtest.py [--lookback 365] [--random-n 1000] [--output manager]
     # outputs: manager/pnl.png + manager/stats.json
 """
 # ── Config ────────────────────────────────────────────────────────────────────
 LOOKBACK  = 365   # days of history used to optimize weights each step
-RANDOM_N  = 500   # number of random portfolios for benchmark comparison
+RANDOM_N  = 1000  # number of random portfolios for benchmark comparison
 OUTPUT    = 'manager'  # output folder (saves pnl.png + report.json inside)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -199,15 +199,16 @@ def main():
     m_sharpe = _sharpe(m_ret)
     m_mdd   = _max_drawdown(m_ret)
 
-    bench_totals = np.array([_total_return(bench_rets[i]) for i in range(args.random_n)])
-    managed_beats_pct = float((bench_totals < m_total).mean() * 100)
+    bench_totals  = np.array([_total_return(bench_rets[i]) for i in range(args.random_n)])
+    bench_sharpes = np.array([_sharpe(bench_rets[i])       for i in range(args.random_n)])
+    managed_beats_pct = float((bench_sharpes < m_sharpe).mean() * 100)
 
     print(f'\n{"":─<60}')
     print(f'  Managed   Return: {m_total:+.1f}%  Sharpe: {m_sharpe:.2f}  MDD: {m_mdd:.1f}%')
-    print(f'  Random    Median: {np.median(bench_totals):+.1f}%  '
-          f'p5: {np.percentile(bench_totals, 5):+.1f}%  '
-          f'p95: {np.percentile(bench_totals, 95):+.1f}%')
-    print(f'  Managed beats {managed_beats_pct:.1f}% of {args.random_n} random portfolios')
+    print(f'  Random    Sharpe  median={np.median(bench_sharpes):.2f}  '
+          f'p5={np.percentile(bench_sharpes, 5):.2f}  '
+          f'p95={np.percentile(bench_sharpes, 95):.2f}')
+    print(f'  Managed beats {managed_beats_pct:.1f}% of {args.random_n} random portfolios on Sharpe')
     print(f'{"":─<60}')
 
     result = {
@@ -220,11 +221,14 @@ def main():
             'max_drawdown_%': round(m_mdd, 4),
         },
         'random_benchmark': {
-            'n':                      args.random_n,
-            'median_total_return_%':  round(float(np.median(bench_totals)), 4),
-            'p5_total_return_%':      round(float(np.percentile(bench_totals, 5)), 4),
-            'p95_total_return_%':     round(float(np.percentile(bench_totals, 95)), 4),
-            'managed_beats_pct':      round(managed_beats_pct, 2),
+            'n':                          args.random_n,
+            'median_sharpe':              round(float(np.median(bench_sharpes)),           4),
+            'p5_sharpe':                  round(float(np.percentile(bench_sharpes, 5)),    4),
+            'p95_sharpe':                 round(float(np.percentile(bench_sharpes, 95)),   4),
+            'managed_beats_pct_sharpe':   round(managed_beats_pct,                         2),
+            'median_total_return_%':      round(float(np.median(bench_totals)),             4),
+            'p5_total_return_%':          round(float(np.percentile(bench_totals, 5)),      4),
+            'p95_total_return_%':         round(float(np.percentile(bench_totals, 95)),     4),
         },
         'daily_dates':     [d.strftime('%Y-%m-%d') for d in oos_index],
         'managed_returns': [round(float(v), 6) for v in m_ret],
