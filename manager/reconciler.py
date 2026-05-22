@@ -73,14 +73,19 @@ if __name__ == '__main__':
 
         if changed:
             logging.info(f"State changed: {changed} — running reconciliation")
-            orders = reconcile(
-                get_positions_fn=get_positions,
-                place_order_fn=place_order,
-                threshold_usdt=THRESHOLD_USDT,
-                send_telegram_fn=send_telegram,
-            )
-            if not orders:
-                logging.info("No orders needed (within threshold)")
-            last_mtimes = current_mtimes
+            try:
+                orders = reconcile(
+                    get_positions_fn=get_positions,
+                    place_order_fn=place_order,
+                    threshold_usdt=THRESHOLD_USDT,
+                    send_telegram_fn=send_telegram,
+                )
+                if not orders:
+                    logging.info("No orders needed (within threshold)")
+                last_mtimes = current_mtimes
+            except Exception as e:
+                err_msg = f"[reconciler] ERROR: {e}"
+                logging.error(err_msg)
+                send_telegram(err_msg)
 
         time.sleep(POLL_INTERVAL)

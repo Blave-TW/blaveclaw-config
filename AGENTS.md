@@ -239,6 +239,7 @@ For full workflow, read `references/manager.md`.
 - When user asks to backtest the portfolio: use `manager/management_backtest.py`, not individual strategy backtests.
 - When user asks to delete a strategy, delete only its own directory (e.g. `strategies/btc_kd_long/`). Never touch `manager/`.
 - **Order library → reconciler is one atomic task:** Whenever you write or update any `lib/order_*.py` file (e.g. `lib/order_okx.py`), you MUST in the same session also update `manager/reconciler.py` to import from it and replace the `get_positions()` / `place_order()` stubs with real calls. Writing the library without wiring `reconciler.py` leaves automated trading permanently broken.
+- **Always start the reconciler via the watchdog wrapper**, not directly: `bash manager/start_reconciler.sh`. The wrapper restarts on crash and sends a Telegram alert on each exit.
 
 ---
 

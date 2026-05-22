@@ -36,7 +36,9 @@ Polls every 5 seconds; only reconciles when a strategy's `state.json` mtime chan
 **Wiring exchange order libraries (required, not optional):** `get_positions()` and `place_order()` must call into a `lib/order_*.py` helper — never remain as `raise NotImplementedError`. When writing a new order library, immediately update `reconciler.py` to import and call it in the same session.
 
 ```
-python3 manager/reconciler.py
+bash manager/start_reconciler.sh
 ```
+
+Run via `start_reconciler.sh`, not `reconciler.py` directly — the wrapper restarts on crash and sends a Telegram alert on each exit.
 
 **Before starting the reconciler (or triggering a manual reconcile):** always show the user the pending order summary from `aggregate_portfolio()` + `compute_diff()` and ask for explicit confirmation. Only proceed if the user confirms.

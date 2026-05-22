@@ -135,7 +135,14 @@ def reconcile(get_positions_fn, place_order_fn, threshold_usdt=10, send_telegram
     for order in orders:
         symbol = order['symbol']
         diff   = order['signed_diff_usdt']
-        place_order_fn(symbol, diff)
+        try:
+            place_order_fn(symbol, diff)
+        except Exception as e:
+            err_msg = f"[reconciler] ERROR {symbol}: {e}"
+            logging.error(err_msg)
+            if send_telegram_fn:
+                send_telegram_fn(err_msg)
+            continue
         direction = 'BUY' if diff > 0 else 'SELL'
         msg = f"[reconciler] {direction} {symbol} ${abs(diff):.0f}"
         logging.info(msg)
