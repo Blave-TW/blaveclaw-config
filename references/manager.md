@@ -33,6 +33,8 @@ python3 manager/manager.py [--lookback 365] [--account 10000] [--target-vol 0.30
 
 Polls every 5 seconds; only reconciles when a strategy's `state.json` mtime changes. `get_positions()` and `place_order()` are exchange-specific stubs to fill in once. `lib/portfolio.py` contains `reconcile()` logic; applies `leverage` from portfolio_config.
 
+**Wiring exchange order libraries (required, not optional):** `get_positions()` and `place_order()` must call into a `lib/order_*.py` helper — never remain as `raise NotImplementedError`. When writing a new order library, immediately update `reconciler.py` to import and call it in the same session.
+
 ```
 python3 manager/reconciler.py
 ```
