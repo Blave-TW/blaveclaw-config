@@ -241,6 +241,7 @@ For full workflow, read `references/manager.md`.
 - **Order library → reconciler is one atomic task:** Whenever you write or update any `lib/order_*.py` file (e.g. `lib/order_okx.py`), you MUST in the same session also update `manager/reconciler.py` to import from it and replace the `get_positions()` / `place_order()` stubs with real calls. Writing the library without wiring `reconciler.py` leaves automated trading permanently broken.
 - **Instrument sizing via `asset_spec`:** If a strategy requires lot-constrained sizing (futures contracts, forex lots, etc.), set `asset_spec` in its `state.json`. The reconciler passes it unchanged to `place_order(symbol, signed_diff, asset_spec)`. `place_order` is responsible for converting `signed_diff` (account currency) into native qty using `asset_spec`. Omit `asset_spec` for fractional sizing (default: `qty = abs(signed_diff) / price`).
 - **Always start the reconciler via the watchdog wrapper**, not directly: `bash manager/start_reconciler.sh`. The wrapper restarts on crash and sends a Telegram alert on each exit.
+- **Trace the full calculation chain before flagging an inconsistency.** If `state.json` shows a non-zero position but a field in `portfolio_config.json` (e.g. `weight=0`) seems contradictory, read `lib/portfolio.py` first. `contribution = account_value * leverage * weight * position` — a zero weight zeroes out the contribution by design. Do not report a bug until you have followed every variable through the aggregation logic.
 
 ---
 
