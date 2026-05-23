@@ -12,7 +12,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 MODE          = "backtest"
 STRATEGY_NAME = "btc_sma_cross"
 SYMBOL        = "BTCUSDT"
-EXCHANGE      = "binance"
 INTERVAL      = "1h"
 START         = "2022-01-01"
 END           = None

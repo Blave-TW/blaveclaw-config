@@ -13,7 +13,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 MODE          = "backtest"        # "backtest" | "paper" | "live"
 STRATEGY_NAME = "cl_sma"
 SYMBOL        = "CL"
-EXCHANGE      = "nymex"
 INTERVAL      = "1h"
 START         = "2015-01-01"
 END           = None
