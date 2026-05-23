@@ -234,6 +234,7 @@ For all marketplace operations (browse, upload private, submit, share, backup/re
 For full workflow, read `references/manager.md`.
 
 **CRITICAL:**
+- **Exchange routing lives in `portfolio_config.json` (`"exchanges"` dict), not in strategy files** — see `references/manager.md`.
 - Never create files or subdirectories inside `manager/`. Never delete any file in it when removing strategies.
 - Before any reconcile: show pending order summary and ask for explicit user confirmation.
 - When user asks to backtest the portfolio: use `manager/management_backtest.py`, not individual strategy backtests.

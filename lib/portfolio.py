@@ -13,7 +13,7 @@ def load_portfolio_config():
     """Load portfolio_config.json from manager/ directory."""
     path = 'manager/portfolio_config.json'
     if not os.path.exists(path):
-        return {'account_value': 0, 'weights': {}}
+        return {'account_value': 0, 'weights': {}, 'exchanges': {}}
     with open(path) as f:
         return json.load(f)
 
@@ -40,23 +40,25 @@ def aggregate_portfolio():
     Returns {symbol: {'side': 'long'|'short'|None, 'size': float,
                        'exchange': str, 'asset_spec': dict|None}}
 
+    exchange is taken from portfolio_config["exchanges"][strategy_name].
     asset_spec is taken from state.json and passed through to place_order unchanged.
     None means default: qty = abs(signed_diff) / price (fractional, no lot constraint). Example for futures:
       {"type": "futures_contracts", "contract_value": 200,
        "currency": "TWD", "lot_size": 1}
 
-    Strategies not listed in weights or missing symbol/exchange are skipped.
+    Strategies not listed in weights, missing symbol, or missing exchange in config are skipped.
     """
     config        = load_portfolio_config()
     account_value = float(config.get('account_value', 0))
     leverage      = float(config.get('leverage', 1.0))
     weights       = config.get('weights', {})
+    exchanges     = config.get('exchanges', {})
     states        = load_all_states()
     totals        = {}
 
     for name, state in states.items():
         symbol     = state.get('symbol')
-        exchange   = state.get('exchange')
+        exchange   = exchanges.get(name)
         position   = float(state.get('position', 0))
         weight     = float(weights.get(name, 0))
         asset_spec = state.get('asset_spec')
