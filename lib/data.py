@@ -475,6 +475,63 @@ def fetch_twstock_broker_net(stock_id, broker_id, start, end, headers,
     return result.set_index('date').sort_index()
 
 
+# ── Taiwan futures data ───────────────────────────────────────────────────────
+
+_TW_FUTURES_CHUNK_DAYS = {'1d': 3650, '1m': 28, '5m': 28, '15m': 28, '30m': 28, '60m': 28}
+
+
+def _fetch_twfutures_raw(symbol, schema, start, end, headers):
+    s = datetime.strptime(start, '%Y-%m-%d')
+    e = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d')
+    chunk_days = _TW_FUTURES_CHUNK_DAYS.get(schema, 28)
+
+    chunks, cursor = [], s
+    while cursor < e:
+        chunk_end = min(cursor + timedelta(days=chunk_days), e)
+        chunks.append((cursor.strftime('%Y-%m-%d'), chunk_end.strftime('%Y-%m-%d')))
+        cursor = chunk_end
+
+    def _fetch_one(cs, ce):
+        r = requests.get(
+            f'{BASE}/studio/market/twfutures/ohlcv/{symbol}/{schema}',
+            headers=headers,
+            params={'start': cs, 'end': ce},
+            timeout=60,
+        )
+        r.raise_for_status()
+        return r.json().get('data', [])
+
+    rows = []
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {pool.submit(_fetch_one, cs, ce): (cs, ce) for cs, ce in chunks}
+        for future in as_completed(futures):
+            rows.extend(future.result())
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df['time'] = pd.to_datetime(df['ts'], utc=True)
+    df = df.set_index('time').sort_index()
+    df = df[~df.index.duplicated(keep='first')]
+    df = df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low',
+                             'close': 'Close', 'volume': 'Volume'})
+    return df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float)
+
+
+def fetch_twfutures_ohlcv(symbol, schema, start, end, headers):
+    """台灣期貨 OHLCV. Returns DataFrame with Open/High/Low/Close/Volume/Amount columns.
+
+    symbol: 'TXF'
+    schema: '1d' | '1m' | '5m' | '15m' | '30m' | '60m'
+    Volume is in contracts (口數).
+    """
+    return _extend_cache(
+        _cache_path(f'twfutures_{schema}', {'symbol': symbol}, start),
+        lambda s, e: _fetch_twfutures_raw(symbol, schema, s, e, headers),
+        start, end,
+    )
+
+
 def _trader_day_cache_path(trader_id, date_str):
     """cache/twstock_broker_trader_<trader_id>/<date>.parquet"""
     d = _CACHE_DIR / f'twstock_broker_trader_{trader_id}'
