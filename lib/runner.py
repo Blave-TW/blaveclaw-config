@@ -167,7 +167,6 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
 
         update_state(candle, signal, state, mode,
                      symbol=config.get('SYMBOL', ''),
-                     exchange=config.get('EXCHANGE', ''),
                      send_telegram_fn=send_telegram_fn)
         save_state(strategy_name, state)
 

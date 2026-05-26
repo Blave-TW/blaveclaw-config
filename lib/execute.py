@@ -10,14 +10,13 @@ def save_state(strategy_name, state):
     json.dump(state, open(f'strategies/{strategy_name}/state.json', 'w'), indent=2)
 
 
-def update_state(candle, signal, state, mode, symbol=None, exchange=None,
+def update_state(candle, signal, state, mode, symbol=None,
                  send_telegram_fn=None):
     """Process one candle: update position state only. Orders are placed by the reconciler."""
     price    = candle['close']
     prev_pos = float(state.get('position', 0))
     new_pos  = float(signal)
-    if symbol:   state['symbol']   = symbol
-    if exchange: state['exchange'] = exchange
+    if symbol: state['symbol'] = symbol
     if math.isnan(new_pos):
         return                       # nan = hold: keep current position unchanged
 
