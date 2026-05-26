@@ -20,11 +20,14 @@ Even if the user says "deploy it" or "run it", always confirm with one message b
 Once deployed live, send a confirmation message with the strategy name, cron schedule, account_value, and target_vol_pct.
 
 ## Cron Job Format
-Always use this exact format — the `cd` is mandatory; without it the script runs from an unknown directory and fails silently:
+**The `cd` is mandatory in every cron entry.** Cron runs from `/root` by default. All scripts in this repo use relative paths (`manager/`, `strategies/`, `lib/`, `cache/`). Without `cd`, every relative path resolves from `/root` → `FileNotFoundError` → the script crashes silently before sending any Telegram notification.
+
+Always use this exact format:
 ```
 5 * * * * cd /root/.openclaw/workspace && python3 strategies/<name>/strategy.py
+0 8 * * * cd /root/.openclaw/workspace && python3 manager/snapshot.py
 ```
-Never write `python3 strategies/<name>/strategy.py` alone without the `cd` prefix.
+Never write `python3 strategies/<name>/strategy.py` alone — the `cd &&` prefix is not optional.
 
 ## Type B (Everything else) — mandatory flow:
 1. Skip backtest entirely
