@@ -80,7 +80,8 @@ def compute_stats(pf_ret, index):
 
     equity  = np.cumprod(1 + r)
     mdd     = float(np.min(equity / np.maximum.accumulate(equity)) - 1)
-    ann_ret = float(equity[-1] ** (ppy / n) - 1) if n > 0 else 0.0
+    eq_end  = equity[-1] if n > 0 else 1.0
+    ann_ret = float(eq_end ** (ppy / n) - 1) if (n > 0 and eq_end > 0) else float('nan')
 
     return sharpe, sortino, omega, mdd, ann_ret
 

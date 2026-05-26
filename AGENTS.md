@@ -37,7 +37,10 @@ Before writing any strategy code, classify the strategy:
 - If the strategy uses any Blave alpha indicator (taker intensity, holder concentration, liquidation, whale hunter, etc.), read the **Alpha Indicators** section in `references/strategy-code.md` for the canonical fetch pattern: use `lib.data` fetchers inside `fetch_data(hdrs)`, join to df index, ffill. Do NOT write your own fetch logic inline.
 - blave-quant-skill provides data reference only — always structure the full strategy as TEMPLATE.py
 - `END` defaults to `None` (latest data) unless the user explicitly specifies an end date
-- Write three functions: **`_add_indicators(df, *params)`** (indicator columns, parameterized), **`fetch_data(hdrs) → df`** (kline + calls `_add_indicators` with module params), and **`compute_signals(df) → pd.Series | (pd.Series, exec_at_close)`** (pure signal logic)
+- Write three functions:
+  - **`_add_indicators(df, param1=DEFAULT1, ...)`**: adds indicator columns to a copy of df; params default to module-level constants
+  - **`fetch_data(hdrs) → df`**: fetches kline + auxiliary data (realized_vol, alpha indicators). Does NOT call `_add_indicators` — `compute_signals` handles that
+  - **`compute_signals(df, param1=DEFAULT1, param2=DEFAULT2, ...) → pd.Series | (pd.Series, exec_at_close)`**: accepts scan params as kwargs (defaults = module constants); calls `_add_indicators(df, param1, param2)` as first step; returns signal or `(signal, settle)` tuple. This signature lets `scan_grid` drive the parameter scan without any custom loop code
 - `run(locals(), fetch_data, compute_signals, send_telegram_fn=make_sender())` — runner handles everything else
 - `WARMUP` (optional config) — number of bars to trim from the start of the backtest (warm-up period where indicators are not yet stable). Set to the sum of all rolling windows used. Runner automatically trims if present.
 - Signal values: positive float = long (size fraction), negative float = short (size fraction), 0.0 = flat/cover, nan = hold (ffill)
@@ -136,9 +139,14 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 
 `lib/param_scan.py`:
 - `from lib.param_scan import percentile_thresholds` — use p5/p95 as bounds, linspace n_parts values → returns (entry_vals, exit_vals); prints distribution stats
-- `from lib.param_scan import scan_grid` — run 2D param scan, returns Sharpe grid; accepts compute_signals_fn with row_param/col_param kwargs, fee. Use for threshold-based strategies (e.g. TI entry/exit). For SMA or other indicator-param scans, build a custom loop using `precise_pnl` + `compute_stats` from `lib.analysis` directly (see `examples/btc_sma_cross/scan.py`)
+- `from lib.param_scan import scan_grid` — run 2D param scan, returns Sharpe grid. Supports all strategy types:
+  - `row_param`/`col_param`: kwarg names forwarded to `compute_signals_fn` (default `'entry_th'`/`'exit_th'`)
+  - `warmup`: leading bars to skip from PnL (rolling window warm-up); `compute_signals_fn` receives the FULL df for accurate rolling, PnL computed on `df.iloc[warmup:]`
+  - `valid_fn`: `(row_val, col_val) → bool` to skip invalid combos (default: `row > col`; for SMA use `lambda f, sl: f < sl`)
+  - If `compute_signals_fn` returns a tuple `(signal, settle)`, `settle` is automatically used as `exec_shifted` (bar t settle → execute at open of t+1)
+  - **All strategy types use the same `scan_grid` call** — see `examples/btc_sma_cross/scan.py` for the canonical SMA-scan pattern and `examples/btc_ti_5min/scan.py` for the threshold-scan pattern
 - `from lib.param_scan import find_plateau, plot_heatmap` — plateau detection and heatmap chart
-- `from lib.analysis import precise_pnl, compute_stats` — use in custom scan loops for full PnL accuracy (same formula as runner)
+- `from lib.analysis import precise_pnl, compute_stats` — available if you need a custom loop (rare)
 
 **Parameter scan workflow:**
 1. Run `scan.py` to find the best parameters

@@ -36,24 +36,23 @@ def fetch_data(hdrs):
     from lib.data import fetch_twfutures_ohlcv
     from lib.strategy import add_realized_vol
     df = fetch_twfutures_ohlcv(SYMBOL, '1m', START, END, hdrs)
-    df = _add_indicators(df, SMA_FAST, SMA_SLOW)
     add_realized_vol(df, lookback=VOL_WINDOW, periods_per_year=252000)
     return df
 
 
 # ── compute_signals ───────────────────────────────────────────────────────────
-def compute_signals(df):
+def compute_signals(df, fast=SMA_FAST, slow=SMA_SLOW):
     import pandas as pd, numpy as np
     from lib.data import txf_settlement_mask
     from lib.strategy import apply_vol_scaling
 
+    df     = _add_indicators(df, fast, slow)
     signal = pd.Series(np.nan, index=df.index)
     signal[df['SMA_F'] > df['SMA_S']] = 1.0
     signal[df['SMA_F'] < df['SMA_S']] = 0.0
 
     settle = txf_settlement_mask(df.index)
     signal[settle] = 0.0
-
     signal = apply_vol_scaling(signal, df)
 
     return signal, settle

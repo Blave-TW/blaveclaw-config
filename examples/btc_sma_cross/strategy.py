@@ -33,22 +33,24 @@ def _add_indicators(df, fast=SMA_FAST, slow=SMA_SLOW):
 # ── fetch_data ────────────────────────────────────────────────────────────────
 def fetch_data(hdrs):
     from lib.data import fetch_kline
-    df = fetch_kline(SYMBOL, INTERVAL, START, END, hdrs)
-    return _add_indicators(df)
+    return fetch_kline(SYMBOL, INTERVAL, START, END, hdrs)
 
 
 # ── compute_signals ───────────────────────────────────────────────────────────
-def compute_signals(df):
+def compute_signals(df, fast=SMA_FAST, slow=SMA_SLOW):
     import pandas as pd, numpy as np
+    df     = _add_indicators(df, fast, slow)
     signal = pd.Series(np.nan, index=df.index)
-    golden = (df['SMA_F'] > df['SMA_S'])
-    death  = (df['SMA_F'] < df['SMA_S']) 
-    signal[golden] = 1.0
-    signal[death]  = 0.0
+    signal[df['SMA_F'] > df['SMA_S']] = 1.0
+    signal[df['SMA_F'] < df['SMA_S']] = 0.0
     return signal
 
 
 if __name__ == '__main__':
     from lib.runner import run
-    from lib.notify import make_sender
-    run(locals(), fetch_data, compute_signals, make_sender())
+    try:
+        from lib.notify import make_sender
+        sender = make_sender()
+    except Exception:
+        sender = None
+    run(locals(), fetch_data, compute_signals, sender)

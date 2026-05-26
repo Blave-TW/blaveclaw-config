@@ -103,5 +103,9 @@ def compute_signals(data):
 
 if __name__ == '__main__':
     from lib.runner import run
-    from lib.notify import make_sender
-    run(locals(), fetch_data, compute_signals, make_sender())
+    try:
+        from lib.notify import make_sender
+        sender = make_sender()
+    except Exception:
+        sender = None
+    run(locals(), fetch_data, compute_signals, sender)

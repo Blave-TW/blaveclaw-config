@@ -40,19 +40,19 @@ def fetch_data(hdrs):
 
 
 # ── compute_signals ───────────────────────────────────────────────────────────
-# entry_th / exit_th 可由 scan.py 傳入；正常執行用 module-level 預設值
-def compute_signals(df, entry_th=None, exit_th=None):
+def compute_signals(df, entry_th=ENTRY_TH, exit_th=EXIT_TH):
     import pandas as pd, numpy as np
-    eth    = entry_th if entry_th is not None else ENTRY_TH
-    xth    = exit_th  if exit_th  is not None else EXIT_TH
-    ti     = df['TI']
     signal = pd.Series(np.nan, index=df.index)
-    signal[ti > eth] = 1.0
-    signal[ti < xth] = 0.0
+    signal[df['TI'] > entry_th] = 1.0
+    signal[df['TI'] < exit_th]  = 0.0
     return signal
 
 
 if __name__ == '__main__':
     from lib.runner import run
-    from lib.notify import make_sender
-    run(locals(), fetch_data, compute_signals, make_sender())
+    try:
+        from lib.notify import make_sender
+        sender = make_sender()
+    except Exception:
+        sender = None
+    run(locals(), fetch_data, compute_signals, sender)

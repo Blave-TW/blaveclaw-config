@@ -3,11 +3,9 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-import numpy as np
 from dotenv import dotenv_values
 from lib.data import fetch_kline
-from lib.analysis import precise_pnl, compute_stats
-from lib.param_scan import find_plateau, plot_heatmap
+from lib.param_scan import scan_grid, find_plateau, plot_heatmap
 import strategy as s
 
 env  = dotenv_values()
@@ -18,40 +16,20 @@ t0 = time.time()
 base_df = fetch_kline(s.SYMBOL, s.INTERVAL, s.START, s.END, hdrs)
 print(f"資料載入: {time.time()-t0:.1f}s  ({len(base_df):,} bars)\n")
 
-# ── 掃描範圍（線性均分）───────────────────────────────────────────────────────
+# ── 掃描範圍 ──────────────────────────────────────────────────────────────────
 fast_vals = list(range(5,  105, 10))   # 5, 15, 25, ..., 95
 slow_vals = list(range(20, 220, 20))   # 20, 40, 60, ..., 200
-grid      = np.full((len(fast_vals), len(slow_vals)), np.nan)
-total     = len(fast_vals) * len(slow_vals)
+warmup    = max(slow_vals)
 
-# ── 掃描迴圈 ─────────────────────────────────────────────────────────────────
-t1 = time.time()
-for i, fast in enumerate(fast_vals):
-    for j, slow in enumerate(slow_vals):
-        if fast >= slow:
-            continue
-
-        df      = s._add_indicators(base_df, fast, slow)
-        signals = s.compute_signals(df)
-
-        # warmup = slow（最長的 rolling window）
-        df      = df.iloc[slow:]
-        signals = signals.iloc[slow:]
-
-        pos    = signals.ffill().fillna(0).values
-        n      = len(df)
-        w_curr = np.empty(n); w_curr[0] = 0.0; w_curr[1:] = pos[:-1]
-        w_prev = np.zeros(n)
-        if n >= 2: w_prev[2:] = pos[:-2]
-
-        pf_ret, *_ = precise_pnl(df['Close'].values, df['Open'].values,
-                                  w_curr, w_prev, np.zeros(n, dtype=bool), s.FEE)
-        sharpe, *_ = compute_stats(pf_ret, df.index)
-        if np.isfinite(sharpe):
-            grid[i, j] = sharpe
-
-scan_time = time.time() - t1
-print(f"掃描耗時: {scan_time:.1f}s  (平均 {scan_time/total*1000:.0f}ms / 組合)")
+# ── 參數掃描 ──────────────────────────────────────────────────────────────────
+t1   = time.time()
+grid = scan_grid(
+    base_df, s.compute_signals, fast_vals, slow_vals,
+    row_param='fast', col_param='slow',
+    fee=s.FEE, warmup=warmup,
+    valid_fn=lambda f, sl: f < sl,
+)
+print(f"掃描耗時: {time.time()-t1:.1f}s")
 
 # ── 最佳參數 ──────────────────────────────────────────────────────────────────
 best_idx, _, best_fast, best_slow = find_plateau(grid, fast_vals, slow_vals)
