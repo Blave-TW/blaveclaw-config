@@ -128,6 +128,7 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 
 `lib/execute.py`:
 - `from lib.execute import update_state, load_state, save_state` — trade execution and state management
+- `state.json` schema: `{"position": float, "symbol": str, "exchange": str, "asset_spec": dict|null}` — `position` is the current signal value (positive=long, negative=short, 0=flat); `asset_spec` is optional, omit for fractional sizing
 
 `lib/analysis.py`:
 - `from lib.analysis import regime_analysis, plot_regime` — regime breakdown and regime chart
