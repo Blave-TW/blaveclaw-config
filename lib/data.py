@@ -532,6 +532,53 @@ def fetch_twfutures_ohlcv(symbol, schema, start, end, headers):
     )
 
 
+def txf_settlement_mask(index):
+    """Return a boolean Series (same index) that is True on the last 1-min bar
+    before TXF monthly settlement (3rd Wednesday of each month, 13:30 TWN).
+
+    Usage in compute_signals:
+        settle = txf_settlement_mask(df.index)
+        signal[settle] = 0.0
+        return signal, settle   # exec_at_close
+    """
+    import datetime
+    import pytz
+
+    twn = pytz.timezone('Asia/Taipei')
+
+    def _third_wed(year, month):
+        d, count = datetime.date(year, month, 1), 0
+        while True:
+            if d.weekday() == 2:
+                count += 1
+                if count == 3:
+                    return d
+            d = d + datetime.timedelta(days=1)
+
+    settlement_bars = set()
+    start = index.min().to_pydatetime()
+    end   = index.max().to_pydatetime()
+    year, month = start.year, start.month
+    while True:
+        wed = _third_wed(year, month)
+        ts_settle = twn.localize(
+            datetime.datetime(wed.year, wed.month, wed.day, 13, 30)
+        ).astimezone(datetime.timezone.utc).replace(tzinfo=None)
+        if ts_settle > end:
+            break
+        last_bar = ts_settle - datetime.timedelta(minutes=1)
+        settlement_bars.add(last_bar)
+        month += 1
+        if month > 12:
+            month, year = 1, year + 1
+
+    mask = pd.Series(False, index=index)
+    for ts in settlement_bars:
+        if ts in index:
+            mask[ts] = True
+    return mask
+
+
 def _trader_day_cache_path(trader_id, date_str):
     """cache/twstock_broker_trader_<trader_id>/<date>.parquet"""
     d = _CACHE_DIR / f'twstock_broker_trader_{trader_id}'

@@ -125,6 +125,7 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 - `fetch_twstock_institutional(stock_id, start, end, headers)` → DataFrame with foreign_net and raw fields
 - `fetch_twstock_trader_flows(trader_id, start, end, headers)` → long-format DataFrame indexed by (date, stock_id) with `net` column (buy - sell in shares); trader_id is the securities_trader_id e.g. `'9217'` for 凱基-松山
 - `fetch_twfutures_ohlcv(symbol, schema, start, end, headers)` → Taiwan futures OHLCV DataFrame (Open/High/Low/Close/Volume); symbol: `'TXF'`; schema: `'1d'`/`'1m'`/`'5m'`/`'15m'`/`'30m'`/`'60m'`; Volume in contracts; data from 2020-03-22
+- `txf_settlement_mask(index)` → boolean Series, True on the last 1-min bar before TXF monthly settlement (3rd Wednesday of each month, 13:30 TWN). Use with intraday TXF strategies: `settle = txf_settlement_mask(df.index); signal[settle] = 0.0; return signal, settle`
 
 `lib/execute.py`:
 - `from lib.execute import update_state, load_state, save_state` — trade execution and state management
