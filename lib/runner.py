@@ -2,7 +2,7 @@ import json, logging, math, os
 import numpy as np
 import pandas as pd
 from dotenv import dotenv_values
-from lib.execute import update_state, load_state, save_state, bootstrap
+from lib.execute import update_state, load_state, save_state
 from lib.analysis import plot_pnl, plot_pnl_portfolio, precise_pnl, compute_stats
 
 
@@ -50,98 +50,98 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         df      = data
         signals = result
 
-        if mode == 'backtest':
-            warmup = config.get('WARMUP', 0)
-            if warmup > 0:
-                df      = df.iloc[warmup:]
-                signals = signals.iloc[warmup:]
+        # ── Full PnL computation (always) ──────────────────────────────────────
+        warmup = config.get('WARMUP', 0)
+        if warmup > 0:
+            df      = df.iloc[warmup:]
+            signals = signals.iloc[warmup:]
 
-            # Drop bars with invalid prices (e.g. futures overnight gaps)
-            valid = df['Close'].notna() & (df['Close'] > 0)
-            if not valid.all():
-                df      = df[valid]
-                signals = signals.reindex(df.index).ffill()
+        # Drop bars with invalid prices (e.g. futures overnight gaps)
+        valid = df['Close'].notna() & (df['Close'] > 0)
+        if not valid.all():
+            df      = df[valid]
+            signals = signals.reindex(df.index).ffill()
 
-            n   = len(df)
-            pos = signals.ffill().fillna(0).values  # shape (n,)
+        n   = len(df)
+        pos = signals.ffill().fillna(0).values  # shape (n,)
 
-            # 2-lag weight arrays
-            w_curr      = np.empty(n)
-            w_curr[0]   = 0.0
-            w_curr[1:]  = pos[:-1]
-            w_prev      = np.zeros(n)
-            if n >= 2:
-                w_prev[2:] = pos[:-2]
+        # 2-lag weight arrays
+        w_curr      = np.empty(n)
+        w_curr[0]   = 0.0
+        w_curr[1:]  = pos[:-1]
+        w_prev      = np.zeros(n)
+        if n >= 2:
+            w_prev[2:] = pos[:-2]
 
-            # exec_at_close mask (original space → shift +1 to align with w_curr/w_prev)
-            if exec_at_close_orig is not None:
-                if hasattr(exec_at_close_orig, 'reindex'):
-                    ea = exec_at_close_orig.reindex(df.index).fillna(False).values.astype(bool)
-                else:
-                    ea = np.asarray(exec_at_close_orig, dtype=bool)[-n:]
-            elif 'instrument_id' in df.columns:
-                ea = (df['instrument_id'] != df['instrument_id'].shift(-1)).fillna(False).values.astype(bool)
+        # exec_at_close mask (original space → shift +1 to align with w_curr/w_prev)
+        if exec_at_close_orig is not None:
+            if hasattr(exec_at_close_orig, 'reindex'):
+                ea = exec_at_close_orig.reindex(df.index).fillna(False).values.astype(bool)
             else:
-                ea = np.zeros(n, dtype=bool)
+                ea = np.asarray(exec_at_close_orig, dtype=bool)[-n:]
+        elif 'instrument_id' in df.columns:
+            ea = (df['instrument_id'] != df['instrument_id'].shift(-1)).fillna(False).values.astype(bool)
+        else:
+            ea = np.zeros(n, dtype=bool)
 
-            exec_shifted      = np.zeros(n, dtype=bool)
-            exec_shifted[1:]  = ea[:-1]
+        exec_shifted      = np.zeros(n, dtype=bool)
+        exec_shifted[1:]  = ea[:-1]
 
-            close_v = df['Close'].values
-            open_v  = df['Open'].values
+        close_v = df['Close'].values
+        open_v  = df['Open'].values
 
-            pf_ret, overnight, delta_w, tc_daily = precise_pnl(
-                close_v, open_v, w_curr, w_prev, exec_shifted, fee
-            )
+        pf_ret, overnight, delta_w, tc_daily = precise_pnl(
+            close_v, open_v, w_curr, w_prev, exec_shifted, fee
+        )
 
-            pf_series = pd.Series(pf_ret, index=df.index)
-            sharpe, sortino, omega, mdd_raw, _ = compute_stats(pf_ret, df.index)
+        pf_series = pd.Series(pf_ret, index=df.index)
+        sharpe, sortino, omega, mdd_raw, _ = compute_stats(pf_ret, df.index)
 
-            total_ret  = float(np.prod(1 + np.nan_to_num(pf_ret)) - 1) * 100
-            mdd        = abs(mdd_raw) * 100   # positive convention for Type A
-            bench_ret  = (close_v[-1] / close_v[0] - 1) * 100
-            total_fees = float(tc_daily.sum()) * 100
+        total_ret  = float(np.prod(1 + np.nan_to_num(pf_ret)) - 1) * 100
+        mdd        = abs(mdd_raw) * 100
+        bench_ret  = (close_v[-1] / close_v[0] - 1) * 100
+        total_fees = float(tc_daily.sum()) * 100
 
-            def _v(x):
-                if x is None: return None
-                if isinstance(x, float) and (math.isnan(x) or math.isinf(x)): return None
-                return round(float(x), 4)
+        def _v(x):
+            if x is None: return None
+            if isinstance(x, float) and (math.isnan(x) or math.isinf(x)): return None
+            return round(float(x), 4)
 
-            print(f"  Total Return: {total_ret:.2f}%  Sharpe: {sharpe:.2f}  MDD: {mdd:.2f}%")
-            print(f"  Fee Rate: {fee*100:.4f}%  Total Fees: {total_fees:.2f}%")
+        print(f"  Total Return: {total_ret:.2f}%  Sharpe: {sharpe:.2f}  MDD: {mdd:.2f}%")
+        print(f"  Fee Rate: {fee*100:.4f}%  Total Fees: {total_fees:.2f}%")
 
-            equity   = np.cumprod(1 + np.nan_to_num(pf_ret))
-            result_d = {
-                'strat_ret':    pf_ret,
-                'position':     w_curr,
-                'realized_vol': df['realized_vol'].values if 'realized_vol' in df.columns
-                                else np.full(n, np.nan),
-                'cum':          equity / equity[0],
-            }
+        equity   = np.cumprod(1 + np.nan_to_num(pf_ret))
+        result_d = {
+            'strat_ret':    pf_ret,
+            'position':     w_curr,
+            'realized_vol': df['realized_vol'].values if 'realized_vol' in df.columns
+                            else np.full(n, np.nan),
+            'cum':          equity / equity[0],
+        }
 
-            from lib.pnl import daily_returns_typeA
-            d_dates, d_rets = daily_returns_typeA(pf_series)
+        from lib.pnl import daily_returns_typeA
+        d_dates, d_rets = daily_returns_typeA(pf_series)
 
-            json.dump(
-                {'strategy': strategy_name, 'symbol': config.get('SYMBOL'), 'interval': interval,
-                 'start': config.get('START'), 'end': df.index[-1].strftime('%Y-%m-%d'),
-                 'fee [%]': round(fee * 100, 4),
-                 'Total Return [%]':     _v(total_ret),
-                 'Benchmark Return [%]': _v(bench_ret),
-                 'Max Drawdown [%]':     _v(mdd),
-                 'Sharpe Ratio':         _v(sharpe),
-                 'Sortino Ratio':        _v(sortino),
-                 'Omega Ratio':          _v(omega),
-                 'Total Fees Paid [%]':  round(total_fees, 4),
-                 'daily_dates': d_dates, 'daily_returns': d_rets,
-                 'order_params': {'symbol': config.get('SYMBOL'), 'exchange': config.get('EXCHANGE'),
-                                  'interval': interval, 'current_position': 0.0}},
-                open(f'strategies/{strategy_name}/stats.json', 'w'), indent=2
-            )
+        json.dump(
+            {'strategy': strategy_name, 'symbol': config.get('SYMBOL'), 'interval': interval,
+             'start': config.get('START'), 'end': df.index[-1].strftime('%Y-%m-%d'),
+             'fee [%]': round(fee * 100, 4),
+             'Total Return [%]':     _v(total_ret),
+             'Benchmark Return [%]': _v(bench_ret),
+             'Max Drawdown [%]':     _v(mdd),
+             'Sharpe Ratio':         _v(sharpe),
+             'Sortino Ratio':        _v(sortino),
+             'Omega Ratio':          _v(omega),
+             'Total Fees Paid [%]':  round(total_fees, 4),
+             'daily_dates': d_dates, 'daily_returns': d_rets,
+             },
+            open(f'strategies/{strategy_name}/stats.json', 'w'), indent=2
+        )
 
-            plot_pnl(df, result_d, title=strategy_name,
-                     output_path=f'strategies/{strategy_name}/pnl.png')
+        plot_pnl(df, result_d, title=strategy_name,
+                 output_path=f'strategies/{strategy_name}/pnl.png')
 
+        if mode == 'backtest':
             if send_telegram_fn:
                 from lib.notify import send_photo
                 send_photo(f'strategies/{strategy_name}/pnl.png')
@@ -153,35 +153,25 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
                 )
             return
 
-        # ── Live / paper mode ──────────────────────────────────────────────────
-        all_signals = signals
-
-        def _row_signal(row):
-            return float(all_signals.loc[row.name]) if row.name in all_signals.index else float('nan')
-
+        # ── Live mode ──────────────────────────────────────────────────────────
         candles = [{'time': int(t.timestamp()), 'close': float(r['Close']),
                     'open': float(r['Open']), 'high': float(r['High']), 'low': float(r['Low'])}
                    for t, r in df.iterrows()]
 
-        state  = load_state(strategy_name) or bootstrap(df, _row_signal)
+        state  = load_state(strategy_name) or {
+            'position': float(signals.ffill().fillna(0).iloc[-1]),
+            'entry':    None,
+        }
         candle = candles[-1]
-        signal = float(all_signals.iloc[-1])
+        signal = float(signals.iloc[-1])
         logging.info(f"signal={signal:.4f} close={candle['close']}")
-
-        _ohlcv = {'Open', 'High', 'Low', 'Close', 'Volume', 'instrument_id'}
-        ctx = {k: round(float(v), 6) for k, v in df.iloc[-1].items()
-               if k not in _ohlcv and not (isinstance(v, float) and math.isnan(v))}
 
         update_state(candle, signal, state, mode,
                      symbol=config.get('SYMBOL', ''),
                      exchange=config.get('EXCHANGE', ''),
-                     send_telegram_fn=send_telegram_fn,
-                     strategy_name=strategy_name,
-                     context=ctx)
+                     send_telegram_fn=send_telegram_fn)
         save_state(strategy_name, state)
 
-        from lib.pnl import update_stats_live
-        update_stats_live(strategy_name, state, config)
 
     # ── Type C: portfolio strategy ────────────────────────────────────────────
     elif isinstance(result, tuple) and isinstance(result[0], np.ndarray):
@@ -254,7 +244,7 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
              'Total Fees Paid [%]': round(float(tc_daily.sum()) * 100, 4),
              **bench_stats,
              'daily_dates': d_dates, 'daily_returns': d_rets,
-             'order_params': None},
+             },
             open(f'strategies/{strategy_name}/stats.json', 'w'), indent=2
         )
 

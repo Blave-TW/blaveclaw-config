@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # ── Config ────────────────────────────────────────────────────────────────────
-MODE          = "backtest"        # "backtest" | "paper" | "live"
+MODE          = "backtest"        # "backtest" | "live"
 STRATEGY_NAME = "[strategy_name]"
 SYMBOL        = "BTCUSDT"
 INTERVAL      = "1h"

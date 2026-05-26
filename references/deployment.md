@@ -8,7 +8,7 @@ CRITICAL: You MUST NEVER deploy a live strategy or set up a cron job without exp
 2. Ask the user to confirm deployment: "Do you want to deploy this live? Reply YES to confirm."
 3. After YES, ask the following **in a single message** before writing any code:
    - **Spot or futures/perpetual?** This determines which order API and position sizing logic to use.
-   - **Align positions?** Do you want to reconcile current open positions before the first live run? If YES, fetch current positions from the exchange and align them with what the strategy's bootstrap state expects — place orders for any difference. If NO, the strategy will align naturally over the next few signals.
+   - **Align positions?** Do you want to reconcile current open positions before the first live run? If YES, fetch current positions from the exchange and align them with what the strategy's initial state expects — place orders for any difference. If NO, the strategy will align naturally over the next few signals.
 4. After all three are answered, confirm portfolio_config.json settings with the user:
    - **`account_value`**: total USDT capital allocated to the portfolio
    - **`target_vol_pct`**: target annual volatility % (default 30%). If the user prefers to think in terms of acceptable MDD, use the approximation `target_vol ≈ MDD / 2` (e.g. willing to lose 20% → target_vol ≈ 10%). Show both the vol and the implied MDD so the user can decide.
@@ -33,10 +33,7 @@ Never write `python3 strategies/<name>/strategy.py` alone without the `cd` prefi
 4. Only after all confirmations: set up the cron job
 
 ## Live vs Backtest
-Live/paper trading uses the SAME script as backtest — only `MODE` changes. Keep `START` the same long date range as backtest so the website report shows full history. `END` is ignored in live mode (code always fetches to today).
+Live trading uses the SAME script as backtest — only `MODE` changes. Keep `START` the same long date range as backtest so the website report shows full history. Always keep `END = None` for live — setting it to a specific date will cap data fetch at that date and break live operation.
 
-## State Bootstrap (First Live Run)
-When switching to live for the first time, the script bootstraps state from history automatically (already in TEMPLATE.py):
-- Replays `compute_signal` through all historical candles without placing orders
-- Finds the correct current position before the first live cron tick
-This ensures `in_position` and `trades_log` reflect reality from day one, even if the entry signal fired weeks ago.
+## State Initialisation (First Live Run)
+On the first live cron tick there is no `state.json` yet. The runner initialises state from the last signal: `signals.ffill().fillna(0).iloc[-1]`. This correctly reflects the current intended position without replaying history.

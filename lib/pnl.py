@@ -18,23 +18,6 @@ def daily_returns_typeC(pf_series):
     return dates, rets
 
 
-def update_stats_live(strategy_name, state, config):
-    """Update order_params in stats.json after a live/paper signal."""
-    path = f'strategies/{strategy_name}/stats.json'
-    if not os.path.exists(path):
-        return
-    with open(path) as f:
-        data = json.load(f)
-    data['order_params'] = {
-        'symbol':           state.get('symbol', config.get('SYMBOL')),
-        'exchange':         state.get('exchange', config.get('EXCHANGE')),
-        'interval':         config.get('INTERVAL', '1h'),
-        'current_position': float(state.get('position', 0.0)),
-    }
-    with open(path, 'w') as f:
-        json.dump(data, f, indent=2)
-
-
 def load_all_stats():
     """Load all strategy stats.json files that contain daily_returns.
     Returns {strategy_name: dict}.

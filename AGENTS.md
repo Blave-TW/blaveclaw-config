@@ -127,7 +127,7 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 - `fetch_twfutures_ohlcv(symbol, schema, start, end, headers)` → Taiwan futures OHLCV DataFrame (Open/High/Low/Close/Volume); symbol: `'TXF'`; schema: `'1d'`/`'1m'`/`'5m'`/`'15m'`/`'30m'`/`'60m'`; Volume in contracts; data from 2020-03-22
 
 `lib/execute.py`:
-- `from lib.execute import update_state, load_state, save_state, bootstrap` — trade execution and state management
+- `from lib.execute import update_state, load_state, save_state` — trade execution and state management
 
 `lib/analysis.py`:
 - `from lib.analysis import regime_analysis, plot_regime` — regime breakdown and regime chart
