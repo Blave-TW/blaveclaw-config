@@ -236,6 +236,7 @@ For all marketplace operations (browse, upload private, submit, share, backup/re
 For full workflow, read `references/manager.md`.
 
 **CRITICAL:**
+- **NEVER manually edit `portfolio_config.json["weights"]`.** Weights must always be set by running `python3 manager/manager.py`. Manual weights bypass the optimiser and will be overwritten on the next manager run. If the user asks to adjust allocation, run manager.py with `--account` or `--target-vol` flags — do not hand-edit weights.
 - **Exchange routing lives in `portfolio_config.json` (`"exchanges"` dict), not in strategy files** — see `references/manager.md`.
 - Never create files or subdirectories inside `manager/`. Never delete any file in it when removing strategies.
 - Before any reconcile: show pending order summary and ask for explicit user confirmation.
