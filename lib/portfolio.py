@@ -151,6 +151,12 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
 
     Returns list of orders placed.
     """
+    config  = load_portfolio_config()
+    msgs    = config.get('messages', {})
+
+    def _msg(key, default, **kw):
+        return msgs.get(key, default).format(**kw)
+
     target = aggregate_portfolio()
     actual = get_positions_fn()
     orders = compute_diff(target, actual, threshold)
@@ -185,18 +191,25 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
             try:
                 _call_place(symbol, sub_diff, asset_spec, reduce_only)
             except Exception as e:
-                err_msg = f"[reconciler] ERROR {symbol}: {e}"
-                logging.error(err_msg)
+                log_msg = f"order error {symbol}: {e}"
+                logging.error(log_msg)
                 if send_telegram_fn:
-                    send_telegram_fn(err_msg)
+                    send_telegram_fn(_msg('order_error', '⚠️ Order failed {symbol}: {error}',
+                                         symbol=symbol, error=e))
                 failed = True
                 break
-            direction = 'BUY' if sub_diff > 0 else 'SELL'
-            suffix    = '(reduce)' if reduce_only else ''
-            msg = f"[reconciler] {direction}{suffix} {symbol} {abs(sub_diff):.2f}"
-            logging.info(msg)
+
+            if reduce_only:
+                key     = 'order_close_long'  if sub_diff < 0 else 'order_close_short'
+                default = '📉 Closed long {symbol} ${amount:.2f}' if sub_diff < 0 else '📈 Closed short {symbol} ${amount:.2f}'
+            else:
+                key     = 'order_buy' if sub_diff > 0 else 'order_sell'
+                default = '📈 Bought {symbol} ${amount:.2f}' if sub_diff > 0 else '📉 Sold {symbol} ${amount:.2f}'
+
+            log_dir = 'BUY' if sub_diff > 0 else 'SELL'
+            logging.info(f"{log_dir}{'(reduce)' if reduce_only else ''} {symbol} {abs(sub_diff):.2f}")
             if send_telegram_fn:
-                send_telegram_fn(msg)
+                send_telegram_fn(_msg(key, default, symbol=symbol, amount=abs(sub_diff)))
 
         if not failed:
             direction = 'BUY' if diff > 0 else 'SELL'
