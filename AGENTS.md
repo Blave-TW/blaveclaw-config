@@ -247,7 +247,11 @@ For full workflow, read `references/manager.md`.
 - **`portfolio_config.json["messages"]`** — Telegram message templates for reconciler and watchdog. Keys: `order_buy`, `order_sell`, `order_close_long`, `order_close_short`, `order_error`, `watchdog_started`, `watchdog_restart`. Placeholders: `{symbol}`, `{amount}`, `{error}`, `{code}`. Edit these to match the user's preferred language when deploying.
 - **`manager/snapshot.py`** — daily account equity snapshot. Reads unique exchanges from `portfolio_config.json["exchanges"]`, calls `get_account_equity()` per exchange, records to `manager/snapshots.jsonl`, sends Telegram report. Cron: `0 8 * * * cd /root/.openclaw/workspace && python3 manager/snapshot.py`. The `get_account_equity()` function is a stub until a `lib/account_*.py` is wired in.
 - **Instrument sizing via `asset_spec`:** If a strategy requires lot-constrained sizing (futures contracts, forex lots, etc.), set `asset_specs` in `portfolio_config.json` (same pattern as `exchanges`): `{"asset_specs": {"strategy_name": {"type": "futures_contracts", "contract_value": 200, "currency": "TWD", "lot_size": 1}}}`. The reconciler passes it unchanged to `place_order(symbol, signed_diff, asset_spec)`. Omit for fractional sizing (default: `qty = abs(signed_diff) / price`).
-- **Always start the reconciler via the watchdog wrapper**, not directly: `bash manager/start_reconciler.sh`. The wrapper restarts on crash and sends a Telegram alert on each exit.
+- **Always start the reconciler via the watchdog wrapper in a tmux session**, not directly and never with `nohup &`. `nohup &` background processes are killed when the shell session ends. Use tmux so the process survives across sessions:
+  ```
+  tmux new-session -d -s reconciler 'cd /root/.openclaw/workspace && bash manager/start_reconciler.sh'
+  ```
+  To check status: `tmux attach -t reconciler`. To stop: `tmux kill-session -t reconciler`.
 - **Trace the full calculation chain before flagging an inconsistency.** If `state.json` shows a non-zero position but a field in `portfolio_config.json` (e.g. `weight=0`) seems contradictory, read `lib/portfolio.py` first. `contribution = account_value * leverage * weight * position` — a zero weight zeroes out the contribution by design. Do not report a bug until you have followed every variable through the aggregation logic.
 
 ---
