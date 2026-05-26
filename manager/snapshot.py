@@ -67,6 +67,22 @@ def get_account_equity(exchange: str, env: dict) -> dict:
     raise NotImplementedError(f"get_account_equity not implemented for {exchange}")
 
 
+def get_positions(exchange: str, env: dict) -> list:
+    """
+    Query exchange for open positions.
+    Returns list of dicts, one per open position:
+      {'symbol': str, 'side': str, 'size': float, 'mark_price': float}
+    Return [] if no open positions (flat).
+
+    Implement by importing from lib/account_{exchange}.py:
+      from lib.account_okx import get_positions as _get
+      if exchange == 'okx': return _get(env)
+
+    Before implementing, read skills/blave-quant/references/<exchange>-skill.md.
+    """
+    raise NotImplementedError(f"get_positions not implemented for {exchange}")
+
+
 def _load_portfolio_config():
     path = 'manager/portfolio_config.json'
     if not os.path.exists(path):
@@ -120,23 +136,23 @@ def run_snapshot():
     ts_label = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')
     last     = _load_last_snapshots(exchanges)
 
-    lines        = []
-    first_run    = []
-    errors       = []
-    any_snapshot = False
+    equity_lines   = []
+    position_lines = []
+    errors         = []
+    any_snapshot   = False
 
     for exchange in exchanges:
+        # ── Equity ────────────────────────────────────────────────────────────
         try:
-            result = get_account_equity(exchange, env)
+            result   = get_account_equity(exchange, env)
             equity   = float(result['equity'])
             currency = result['currency']
         except NotImplementedError:
             logging.warning(f'[snapshot] {exchange}: get_account_equity not implemented — skipping')
             continue
         except Exception as e:
-            msg = f'[snapshot] {exchange}: equity query failed — {e}'
-            logging.error(msg)
-            errors.append(f'{exchange.upper()}: {e}')
+            logging.error(f'[snapshot] {exchange}: equity query failed — {e}')
+            errors.append(f'{exchange.upper()} equity: {e}')
             continue
 
         prev      = last.get(exchange)
@@ -150,37 +166,52 @@ def run_snapshot():
                 daily_pnl = round(equity - prev_equity, 4)
                 daily_pct = round(daily_pnl / prev_equity, 6)
 
-        record = {
-            'ts':           ts_now,
-            'exchange':     exchange,
-            'equity':       equity,
-            'currency':     currency,
-            'daily_pnl':    daily_pnl,
-            'daily_pnl_pct': daily_pct,
-        }
-        _append_snapshot(record)
+        _append_snapshot({
+            'ts': ts_now, 'exchange': exchange,
+            'equity': equity, 'currency': currency,
+            'daily_pnl': daily_pnl, 'daily_pnl_pct': daily_pct,
+        })
         any_snapshot = True
 
         eq_str = f'{equity:,.2f} {currency}'
-        if is_first:
-            first_run.append(exchange)
-            lines.append(f'  {exchange.upper():<10} {eq_str}')
+        if daily_pnl is not None:
+            sign = '+' if daily_pnl >= 0 else ''
+            equity_lines.append(
+                f'  {exchange.upper():<8} {eq_str:<22} ({sign}{daily_pnl:,.2f} / {sign}{daily_pct*100:.2f}%)'
+            )
         else:
-            sign   = '+' if daily_pnl >= 0 else ''
-            pnl_s  = f'{sign}{daily_pnl:,.2f}'
-            pct_s  = f'{sign}{daily_pct*100:.2f}%'
-            lines.append(f'  {exchange.upper():<10} {eq_str:<22} ({pnl_s} / {pct_s})')
+            equity_lines.append(f'  {exchange.upper():<8} {eq_str}')
 
         logging.info(f'[snapshot] {exchange}: {equity} {currency}  daily_pnl={daily_pnl}')
+
+        # ── Positions ─────────────────────────────────────────────────────────
+        try:
+            positions = get_positions(exchange, env)
+            if positions:
+                for p in positions:
+                    side  = p.get('side', '').capitalize()
+                    sym   = p.get('symbol', '')
+                    size  = p.get('size', 0)
+                    price = p.get('mark_price', 0)
+                    position_lines.append(
+                        f'  {exchange.upper():<8} {sym:<12} {side:<6} {size} @ {price:,.2f}'
+                    )
+            else:
+                position_lines.append(f'  {exchange.upper():<8} (flat)')
+        except NotImplementedError:
+            pass  # positions not wired yet — silently skip
+        except Exception as e:
+            logging.warning(f'[snapshot] {exchange}: positions query failed — {e}')
+            errors.append(f'{exchange.upper()} positions: {e}')
 
     # ── Build Telegram message ─────────────────────────────────────────────────
     msg_parts = [f'📊 Daily Snapshot — {ts_label}', '']
 
-    if lines:
-        msg_parts += ['💰 Account Equity:'] + lines
+    if equity_lines:
+        msg_parts += ['💰 Account Equity:'] + equity_lines
 
-    if first_run:
-        msg_parts += ['', f'📌 First snapshot for: {", ".join(first_run)} — no prior day to compare']
+    if position_lines:
+        msg_parts += ['', '📋 Positions:'] + position_lines
 
     if errors:
         msg_parts += ['', '⚠️ Errors:'] + [f'  {e}' for e in errors]
