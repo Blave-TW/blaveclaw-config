@@ -136,11 +136,18 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
       2. get_positions_fn()    → actual exchange positions (in account currency)
       3. compute_diff()        → place orders
 
-    place_order_fn(symbol, signed_diff, asset_spec):
+    place_order_fn(symbol, signed_diff, asset_spec, reduce_only=False):
       signed_diff > 0 → buy  (increase long / reduce short)
       signed_diff < 0 → sell (increase short / reduce long)
+      reduce_only=True → close-only leg of a position flip; pass to exchange reduce-only flag.
       asset_spec: dict from portfolio_config["asset_specs"], or None for default (fractional qty, no lot constraint).
         Use it to convert signed_diff → native qty/contracts/lots.
+
+    Position flips (long→short or short→long) are split into two calls:
+      1. place_order_fn(symbol, -actual, asset_spec, reduce_only=True)   ← close existing
+      2. place_order_fn(symbol, target,  asset_spec, reduce_only=False)  ← open new
+    This prevents simultaneous long+short on hedge-mode exchanges (OKX 兩倉模式, etc.).
+    If place_order_fn does not accept reduce_only, the kwarg is silently dropped.
 
     Returns list of orders placed.
     """
@@ -148,30 +155,58 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
     actual = get_positions_fn()
     orders = compute_diff(target, actual, threshold)
 
+    def _call_place(symbol, sub_diff, asset_spec, reduce_only):
+        try:
+            place_order_fn(symbol, sub_diff, asset_spec, reduce_only=reduce_only)
+        except TypeError:
+            place_order_fn(symbol, sub_diff, asset_spec)
+
     for order in orders:
         symbol     = order['symbol']
         diff       = order['signed_diff']
         asset_spec = order.get('asset_spec')
-        try:
-            place_order_fn(symbol, diff, asset_spec)
-        except Exception as e:
-            err_msg = f"[reconciler] ERROR {symbol}: {e}"
-            logging.error(err_msg)
+
+        # Detect position flip: split into reduce-only close + directional open
+        # to avoid simultaneous long+short on hedge-mode exchanges.
+        a        = actual.get(symbol, {})
+        a_signed = (a.get('size', 0)  if a.get('side') == 'long'  else
+                    -a.get('size', 0) if a.get('side') == 'short' else 0)
+        t_signed = a_signed + diff
+
+        if a_signed != 0 and t_signed != 0 and t_signed * a_signed < 0:
+            sub_orders = [(-a_signed, True), (t_signed, False)]
+        else:
+            sub_orders = [(diff, False)]
+
+        failed = False
+        for sub_diff, reduce_only in sub_orders:
+            if abs(sub_diff) < threshold:
+                continue
+            try:
+                _call_place(symbol, sub_diff, asset_spec, reduce_only)
+            except Exception as e:
+                err_msg = f"[reconciler] ERROR {symbol}: {e}"
+                logging.error(err_msg)
+                if send_telegram_fn:
+                    send_telegram_fn(err_msg)
+                failed = True
+                break
+            direction = 'BUY' if sub_diff > 0 else 'SELL'
+            suffix    = '(reduce)' if reduce_only else ''
+            msg = f"[reconciler] {direction}{suffix} {symbol} {abs(sub_diff):.2f}"
+            logging.info(msg)
             if send_telegram_fn:
-                send_telegram_fn(err_msg)
-            continue
-        direction = 'BUY' if diff > 0 else 'SELL'
-        msg = f"[reconciler] {direction} {symbol} {abs(diff):.2f}"
-        logging.info(msg)
-        if send_telegram_fn:
-            send_telegram_fn(msg)
-        _append_reconciler_log({
-            'action':           direction,
-            'symbol':           symbol,
-            'signed_diff': diff,
-            'exchange':         order.get('exchange'),
-            'asset_spec':       asset_spec,
-            'contributors':     order.get('contributors', []),
-        })
+                send_telegram_fn(msg)
+
+        if not failed:
+            direction = 'BUY' if diff > 0 else 'SELL'
+            _append_reconciler_log({
+                'action':      direction,
+                'symbol':      symbol,
+                'signed_diff': diff,
+                'exchange':    order.get('exchange'),
+                'asset_spec':  asset_spec,
+                'contributors': order.get('contributors', []),
+            })
 
     return orders

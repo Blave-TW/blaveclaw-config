@@ -139,7 +139,11 @@ def main():
         with open(CONFIG_PATH) as f:
             cfg = json.load(f)
     else:
-        cfg = {'account_value': 10000, 'weights': {}}
+        cfg = {'account_value': 10000}
+
+    # Preserve deployment fields that manager must never overwrite
+    cfg.setdefault('exchanges', {})
+    cfg.setdefault('asset_specs', {})
 
     if args.account is not None:
         cfg['account_value'] = args.account
