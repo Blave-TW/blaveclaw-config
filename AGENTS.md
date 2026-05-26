@@ -128,7 +128,7 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 
 `lib/execute.py`:
 - `from lib.execute import update_state, load_state, save_state` — trade execution and state management
-- `state.json` schema: `{"position": float, "symbol": str, "asset_spec": dict|null}` — `position` is the current signal value (positive=long, negative=short, 0=flat); exchange is configured in `portfolio_config.json["exchanges"]`, not in state; `asset_spec` is optional, omit for fractional sizing
+- `state.json` schema: `{"position": float, "symbol": str}` — `position` is the current signal value (positive=long, negative=short, 0=flat); all deployment config (exchange, asset_spec) lives in `portfolio_config.json`, not in state
 
 `lib/analysis.py`:
 - `from lib.analysis import regime_analysis, plot_regime` — regime breakdown and regime chart
@@ -242,7 +242,7 @@ For full workflow, read `references/manager.md`.
 - When user asks to backtest the portfolio: use `manager/management_backtest.py`, not individual strategy backtests.
 - When user asks to delete a strategy, delete only its own directory (e.g. `strategies/btc_kd_long/`). Never touch `manager/`.
 - **Order library → reconciler is one atomic task:** Whenever you write or update any `lib/order_*.py` file (e.g. `lib/order_okx.py`), you MUST in the same session also update `manager/reconciler.py` to import from it and replace the `get_positions()` / `place_order()` stubs with real calls. Writing the library without wiring `reconciler.py` leaves automated trading permanently broken.
-- **Instrument sizing via `asset_spec`:** If a strategy requires lot-constrained sizing (futures contracts, forex lots, etc.), set `asset_spec` in its `state.json`. The reconciler passes it unchanged to `place_order(symbol, signed_diff, asset_spec)`. `place_order` is responsible for converting `signed_diff` (account currency) into native qty using `asset_spec`. Omit `asset_spec` for fractional sizing (default: `qty = abs(signed_diff) / price`).
+- **Instrument sizing via `asset_spec`:** If a strategy requires lot-constrained sizing (futures contracts, forex lots, etc.), set `asset_specs` in `portfolio_config.json` (same pattern as `exchanges`): `{"asset_specs": {"strategy_name": {"type": "futures_contracts", "contract_value": 200, "currency": "TWD", "lot_size": 1}}}`. The reconciler passes it unchanged to `place_order(symbol, signed_diff, asset_spec)`. Omit for fractional sizing (default: `qty = abs(signed_diff) / price`).
 - **Always start the reconciler via the watchdog wrapper**, not directly: `bash manager/start_reconciler.sh`. The wrapper restarts on crash and sends a Telegram alert on each exit.
 - **Trace the full calculation chain before flagging an inconsistency.** If `state.json` shows a non-zero position but a field in `portfolio_config.json` (e.g. `weight=0`) seems contradictory, read `lib/portfolio.py` first. `contribution = account_value * leverage * weight * position` — a zero weight zeroes out the contribution by design. Do not report a bug until you have followed every variable through the aggregation logic.
 

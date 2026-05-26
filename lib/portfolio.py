@@ -13,7 +13,7 @@ def load_portfolio_config():
     """Load portfolio_config.json from manager/ directory."""
     path = 'manager/portfolio_config.json'
     if not os.path.exists(path):
-        return {'account_value': 0, 'weights': {}, 'exchanges': {}}
+        return {'account_value': 0, 'weights': {}, 'exchanges': {}, 'asset_specs': {}}
     with open(path) as f:
         return json.load(f)
 
@@ -40,9 +40,8 @@ def aggregate_portfolio():
     Returns {symbol: {'side': 'long'|'short'|None, 'size': float,
                        'exchange': str, 'asset_spec': dict|None}}
 
-    exchange is taken from portfolio_config["exchanges"][strategy_name].
-    asset_spec is taken from state.json and passed through to place_order unchanged.
-    None means default: qty = abs(signed_diff) / price (fractional, no lot constraint). Example for futures:
+    exchange and asset_spec are taken from portfolio_config — not from state.json.
+    asset_spec: None = fractional sizing (qty = abs(signed_diff) / price). Example for futures:
       {"type": "futures_contracts", "contract_value": 200,
        "currency": "TWD", "lot_size": 1}
 
@@ -53,6 +52,7 @@ def aggregate_portfolio():
     leverage      = float(config.get('leverage', 1.0))
     weights       = config.get('weights', {})
     exchanges     = config.get('exchanges', {})
+    asset_specs   = config.get('asset_specs', {})
     states        = load_all_states()
     totals        = {}
 
@@ -61,7 +61,7 @@ def aggregate_portfolio():
         exchange   = exchanges.get(name)
         position   = float(state.get('position', 0))
         weight     = float(weights.get(name, 0))
-        asset_spec = state.get('asset_spec')
+        asset_spec = asset_specs.get(name)
 
         if not symbol or not exchange or weight == 0:
             continue
@@ -100,7 +100,7 @@ def compute_diff(target, actual, threshold=10):
     Returns: list of {symbol, signed_diff, exchange, asset_spec}
       signed_diff > 0 → need to buy
       signed_diff < 0 → need to sell/short
-      asset_spec → passed through from state.json for place_order to use
+      asset_spec → passed through from portfolio_config for place_order to use
     """
     orders = []
     all_symbols = set(target) | set(actual)
@@ -139,7 +139,7 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
     place_order_fn(symbol, signed_diff, asset_spec):
       signed_diff > 0 → buy  (increase long / reduce short)
       signed_diff < 0 → sell (increase short / reduce long)
-      asset_spec: dict from state.json, or None for default (fractional qty, no lot constraint).
+      asset_spec: dict from portfolio_config["asset_specs"], or None for default (fractional qty, no lot constraint).
         Use it to convert signed_diff → native qty/contracts/lots.
 
     Returns list of orders placed.
