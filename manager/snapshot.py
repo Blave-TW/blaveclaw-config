@@ -3,6 +3,52 @@ from datetime import datetime, timezone
 from dotenv import dotenv_values
 
 
+def _plot_equity(path='manager/snapshot_equity.png'):
+    """Draw equity curve from snapshots.jsonl. Returns path if successful, None if < 2 points."""
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+        from collections import defaultdict
+
+        records = defaultdict(list)
+        with open('manager/snapshots.jsonl') as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                    if r.get('equity') is not None:
+                        records[f"{r['exchange']} ({r['currency']})"].append(
+                            (datetime.fromisoformat(r['ts']), float(r['equity']))
+                        )
+                except Exception:
+                    pass
+
+        series = {k: sorted(v) for k, v in records.items() if len(v) >= 2}
+        if not series:
+            return None
+
+        fig, ax = plt.subplots(figsize=(10, 4))
+        for label, pts in series.items():
+            xs, ys = zip(*pts)
+            ax.plot(xs, ys, marker='o', markersize=3, label=label)
+
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+        fig.autofmt_xdate()
+        ax.set_title('Account Equity')
+        ax.set_ylabel('Equity')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(path, dpi=130)
+        plt.close(fig)
+        return path
+    except Exception as e:
+        logging.warning(f'[snapshot] chart failed: {e}')
+        return None
+
+
 def get_account_equity(exchange: str, env: dict) -> dict:
     """
     Query exchange for total account equity.
@@ -145,6 +191,13 @@ def run_snapshot():
 
     send = _make_sender()
     if send:
+        chart = _plot_equity()
+        if chart:
+            try:
+                from lib.notify import send_photo
+                send_photo(chart)
+            except Exception as e:
+                logging.warning(f'[snapshot] send_photo failed: {e}')
         send(msg)
 
 
