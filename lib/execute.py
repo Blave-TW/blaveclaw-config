@@ -29,14 +29,14 @@ def update_state(candle, signal, state, mode, symbol=None, exchange=None,
     # Close or flip
     if prev_pos != 0 and (new_pos == 0 or new_pos * prev_pos < 0):
         action = 'SELL' if prev_pos > 0 else 'COVER'
-        state.update({'position': 0.0, 'entry': None})
+        state['position'] = 0.0
         _log(action)
 
     # Open or scale
     if new_pos != 0:
         if state['position'] == 0:
             action = 'BUY' if new_pos > 0 else 'SHORT'
-            state.update({'position': new_pos, 'entry': price})
+            state['position'] = new_pos
             _log(action)
         elif new_pos != prev_pos:
             state['position'] = new_pos

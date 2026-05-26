@@ -160,7 +160,6 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
 
         state  = load_state(strategy_name) or {
             'position': float(signals.ffill().fillna(0).iloc[-1]),
-            'entry':    None,
         }
         candle = candles[-1]
         signal = float(signals.iloc[-1])
