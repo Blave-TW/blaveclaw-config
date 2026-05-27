@@ -25,8 +25,15 @@ def _load_config():
         raise FileNotFoundError(f"openclaw config not found: {_CONFIG_PATH}")
     with open(_CONFIG_PATH) as f:
         cfg = json.load(f)
-    token   = cfg["channels"]["telegram"]["botToken"]
-    chat_id = cfg["channels"]["telegram"]["chatId"]
+    tg = cfg["channels"]["telegram"]
+    token = tg["botToken"]
+    if "chatId" not in tg:
+        raise KeyError(
+            "Telegram chatId not found in openclaw.json — "
+            "the bot is not paired yet. Ask the user to send /start to the bot "
+            "and complete the pairing flow."
+        )
+    chat_id = tg["chatId"]
     return token, chat_id
 
 

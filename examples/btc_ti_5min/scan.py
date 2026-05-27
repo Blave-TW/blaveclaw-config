@@ -26,7 +26,7 @@ total = len(entry_vals) * len(exit_vals)
 print(f"掃描耗時: {time.time()-t1:.1f}s  (平均 {(time.time()-t1)/total*1000:.0f}ms / 組合)")
 
 # ── 最佳參數 ──────────────────────────────────────────────────────────────────
-best_idx, _, best_entry, best_exit = find_plateau(grid, list(entry_vals), list(exit_vals))
+best_idx, _, best_entry, best_exit, best_sharpe = find_plateau(grid, list(entry_vals), list(exit_vals))
 print(f"最佳參數: ENTRY_TH={best_entry}, EXIT_TH={best_exit}  Sharpe={grid[best_idx]:.3f}")
 
 plot_heatmap(

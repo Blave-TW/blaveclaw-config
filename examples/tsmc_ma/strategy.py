@@ -51,9 +51,5 @@ def compute_signals(df, fast=SMA_FAST, slow=SMA_SLOW):
 
 if __name__ == '__main__':
     from lib.runner import run
-    try:
-        from lib.notify import make_sender
-        sender = make_sender()
-    except Exception:
-        sender = None
-    run(locals(), fetch_data, compute_signals, sender)
+    from lib.notify import make_sender
+    run(locals(), fetch_data, compute_signals, make_sender())

@@ -28,7 +28,7 @@ grid = scan_grid(
     fee=FEE, warmup=max(ACCUM_VALS) + max(ZSCORE_VALS),
 )
 
-best_idx, _, best_accum, best_zscore = find_plateau(grid, ACCUM_VALS, ZSCORE_VALS)
+best_idx, _, best_accum, best_zscore, best_sharpe = find_plateau(grid, ACCUM_VALS, ZSCORE_VALS)
 print(f"\n最佳 plateau: ACCUM_WINDOW={best_accum}  ZSCORE_WINDOW={best_zscore}  Sharpe={grid[best_idx]:.3f}")
 
 plot_heatmap(

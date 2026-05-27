@@ -29,7 +29,7 @@ grid = scan_grid(
     valid_fn=lambda f, s: f < s,
 )
 
-best_idx, _, best_fast, best_slow = find_plateau(grid, FAST_VALS, SLOW_VALS)
+best_idx, _, best_fast, best_slow, best_sharpe = find_plateau(grid, FAST_VALS, SLOW_VALS)
 print(f"\n最佳 plateau: SMA_FAST={best_fast}  SMA_SLOW={best_slow}  Sharpe={grid[best_idx]:.3f}")
 
 plot_heatmap(

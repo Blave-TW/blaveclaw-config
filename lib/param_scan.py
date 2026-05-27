@@ -157,10 +157,15 @@ def find_plateau(grid, row_vals=None, col_vals=None, window=1):
 
     Returns
     -------
-    best_idx  : (row, col) tuple of best plateau cell
-    nbr_mean  : 2D array of neighbourhood-average Sharpe
-    best_row  : row_vals[best_idx[0]] if row_vals provided, else None
-    best_col  : col_vals[best_idx[1]] if col_vals provided, else None
+    best_idx   : (row, col) tuple of best plateau cell
+    nbr_mean   : 2D array of neighbourhood-average Sharpe  ← array, NOT a scalar
+    best_row   : row_vals[best_idx[0]] if row_vals provided, else None
+    best_col   : col_vals[best_idx[1]] if col_vals provided, else None
+    best_sharpe: float — neighbourhood-average Sharpe at the best cell (use this for printing)
+
+    Typical usage:
+        best_idx, _, best_row, best_col, best_sharpe = find_plateau(grid, ROW_VALS, COL_VALS)
+        print(f"Best: row={best_row}  col={best_col}  plateau_sharpe={best_sharpe:.3f}")
     """
     rows, cols = grid.shape
     nbr_mean   = np.full((rows, cols), np.nan)
@@ -179,10 +184,11 @@ def find_plateau(grid, row_vals=None, col_vals=None, window=1):
             if nb:
                 nbr_mean[i, j] = np.mean(nb)
 
-    best_idx = np.unravel_index(np.nanargmax(nbr_mean), nbr_mean.shape)
-    best_row = row_vals[best_idx[0]] if row_vals is not None else None
-    best_col = col_vals[best_idx[1]] if col_vals is not None else None
-    return best_idx, nbr_mean, best_row, best_col
+    best_idx    = np.unravel_index(np.nanargmax(nbr_mean), nbr_mean.shape)
+    best_row    = row_vals[best_idx[0]] if row_vals is not None else None
+    best_col    = col_vals[best_idx[1]] if col_vals is not None else None
+    best_sharpe = float(nbr_mean[best_idx])
+    return best_idx, nbr_mean, best_row, best_col, best_sharpe
 
 
 def plot_heatmap(

@@ -28,7 +28,7 @@ grid = scan_grid(
     fee=FEE, warmup=max(MOM_VALS),  # trim to the longest window for fair comparison
 )
 
-best_idx, _, best_mw, best_tn = find_plateau(grid, MOM_VALS, TOP_VALS)
+best_idx, _, best_mw, best_tn, best_sharpe = find_plateau(grid, MOM_VALS, TOP_VALS)
 print(f"\n最佳 plateau: MOM_WINDOW={best_mw}  TOP_N={best_tn}  Sharpe={grid[best_idx]:.3f}")
 
 plot_heatmap(

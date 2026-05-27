@@ -150,7 +150,10 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
   - `valid_fn`: `(row_val, col_val) → bool` to skip invalid combos (default: `row > col`; for SMA use `lambda f, sl: f < sl`)
   - If `compute_signals_fn` returns a tuple `(signal, settle)`, `settle` is automatically used as `exec_shifted` (bar t settle → execute at open of t+1)
   - **All strategy types use the same `scan_grid` call** — see `examples/btc_sma_cross/scan.py` for the canonical SMA-scan pattern and `examples/btc_ti_5min/scan.py` for the threshold-scan pattern
-- `from lib.param_scan import find_plateau, plot_heatmap` — plateau detection and heatmap chart; `output_path` is **required** — always pass `output_path='strategies/{strategy_name}/heatmap.png'`, never `/tmp/`
+- `from lib.param_scan import find_plateau, plot_heatmap` — plateau detection and heatmap chart
+  - `find_plateau` returns 5 values: `best_idx, nbr_mean, best_row, best_col, best_sharpe` — use `best_row`, `best_col`, `best_sharpe` directly; `nbr_mean` is a **2D array** (do NOT format it as a scalar)
+  - Canonical usage: `best_idx, _, best_row, best_col, best_sharpe = find_plateau(grid, ROW_VALS, COL_VALS)`
+  - `plot_heatmap` `output_path` is **required** — always pass `output_path='strategies/{strategy_name}/heatmap.png'`, never `/tmp/`
 - `from lib.analysis import precise_pnl, compute_stats` — available if you need a custom loop (rare)
 
 **Parameter scan workflow:**

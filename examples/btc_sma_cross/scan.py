@@ -32,7 +32,7 @@ grid = scan_grid(
 print(f"掃描耗時: {time.time()-t1:.1f}s")
 
 # ── 最佳參數 ──────────────────────────────────────────────────────────────────
-best_idx, _, best_fast, best_slow = find_plateau(grid, fast_vals, slow_vals)
+best_idx, _, best_fast, best_slow, best_sharpe = find_plateau(grid, fast_vals, slow_vals)
 print(f"最佳參數: SMA_FAST={best_fast}, SMA_SLOW={best_slow}  Sharpe={grid[best_idx]:.3f}")
 
 plot_heatmap(
