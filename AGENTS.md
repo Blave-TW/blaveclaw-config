@@ -150,7 +150,7 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
   - `valid_fn`: `(row_val, col_val) → bool` to skip invalid combos (default: `row > col`; for SMA use `lambda f, sl: f < sl`)
   - If `compute_signals_fn` returns a tuple `(signal, settle)`, `settle` is automatically used as `exec_shifted` (bar t settle → execute at open of t+1)
   - **All strategy types use the same `scan_grid` call** — see `examples/btc_sma_cross/scan.py` for the canonical SMA-scan pattern and `examples/btc_ti_5min/scan.py` for the threshold-scan pattern
-- `from lib.param_scan import find_plateau, plot_heatmap` — plateau detection and heatmap chart
+- `from lib.param_scan import find_plateau, plot_heatmap` — plateau detection and heatmap chart; `output_path` is **required** — always pass `output_path='strategies/{strategy_name}/heatmap.png'`, never `/tmp/`
 - `from lib.analysis import precise_pnl, compute_stats` — available if you need a custom loop (rare)
 
 **Parameter scan workflow:**
@@ -210,6 +210,7 @@ Token and chat_id are read automatically from `/root/.openclaw/openclaw.json`.
 
 ## Shell Commands
 
+- **NEVER write `except Exception: pass`** — silent failures hide all errors. Always at minimum `except Exception as e: print(f"Error: {e}")`. This applies everywhere: scan.py, strategy.py, notify calls, exchange API calls.
 - NEVER chain commands with && or || or ; — run ONE command at a time
 - Use `python3 file.py [args]` or `node file.js` directly — passing arguments is fine, but never chain with && or || or ;
 - If you need to install a package, run `pip install x` as a separate command first, then run your script

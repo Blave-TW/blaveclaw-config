@@ -193,7 +193,7 @@ def plot_heatmap(
     row_label="ENTRY_TH",
     col_label="EXIT_TH",
     title="Sharpe Heatmap",
-    output_path="/tmp/heatmap.png",
+    output_path=None,
 ):
     """
     Plot a Sharpe heatmap with the plateau cell highlighted.
@@ -207,12 +207,17 @@ def plot_heatmap(
     row_label  : y-axis label (default 'ENTRY_TH')
     col_label  : x-axis label (default 'EXIT_TH')
     title      : chart title
-    output_path: save path
+    output_path: REQUIRED — use 'strategies/{strategy_name}/heatmap.png'
 
     Returns
     -------
     output_path
     """
+    if output_path is None:
+        raise ValueError(
+            "plot_heatmap() requires output_path — "
+            "use output_path='strategies/{strategy_name}/heatmap.png'"
+        )
     n_rows, n_cols = len(row_vals), len(col_vals)
     bi, bj         = best_idx
 
