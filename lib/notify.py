@@ -1,12 +1,13 @@
 """
 Telegram notification helper.
 
-Reads bot token and chat_id from /root/.openclaw/openclaw.json.
+Reads bot token from /root/.openclaw/openclaw.json.
+Reads paired chat IDs from /root/.openclaw/credentials/telegram-default-allowFrom.json.
 
 Usage:
     from lib.notify import make_sender
 
-    send = make_sender()          # reads token+chat_id from openclaw.json
+    send = make_sender()          # broadcasts to all paired chat IDs
     send("Strategy started")      # text message
     send_photo = make_sender(photo=True)
     send_photo("/tmp/pnl.png")    # send image file
@@ -18,6 +19,7 @@ import requests
 
 
 _CONFIG_PATH = "/root/.openclaw/openclaw.json"
+_ALLOW_FROM_PATH = "/root/.openclaw/credentials/telegram-default-allowFrom.json"
 
 
 def _load_config():
@@ -25,44 +27,53 @@ def _load_config():
         raise FileNotFoundError(f"openclaw config not found: {_CONFIG_PATH}")
     with open(_CONFIG_PATH) as f:
         cfg = json.load(f)
-    tg = cfg["channels"]["telegram"]
-    token = tg["botToken"]
-    if "chatId" not in tg:
-        raise KeyError(
-            "Telegram chatId not found in openclaw.json — "
-            "the bot is not paired yet. Ask the user to send /start to the bot "
-            "and complete the pairing flow."
+    token = cfg["channels"]["telegram"]["botToken"]
+
+    if not os.path.exists(_ALLOW_FROM_PATH):
+        raise FileNotFoundError(
+            "Telegram not paired — allowFrom file not found: "
+            f"{_ALLOW_FROM_PATH}"
         )
-    chat_id = tg["chatId"]
-    return token, chat_id
+    with open(_ALLOW_FROM_PATH) as f:
+        allow = json.load(f)
+    chat_ids = allow.get("allowFrom", [])
+    if not chat_ids:
+        raise KeyError(
+            "Telegram not paired — allowFrom list is empty in "
+            f"{_ALLOW_FROM_PATH}"
+        )
+    return token, chat_ids
 
 
 def make_sender(photo=False):
     """
-    Returns a callable that sends a Telegram message or photo.
+    Returns a callable that broadcasts a Telegram message or photo
+    to all paired chat IDs.
 
     photo=False → sender(text: str)
     photo=True  → sender(path: str)  (sends the image file at path)
     """
-    token, chat_id = _load_config()
+    token, chat_ids = _load_config()
 
     if photo:
         def _send_photo(path: str) -> None:
-            with open(path, "rb") as f:
-                requests.post(
-                    f"https://api.telegram.org/bot{token}/sendPhoto",
-                    data={"chat_id": chat_id},
-                    files={"photo": f},
-                    timeout=30,
-                )
+            for chat_id in chat_ids:
+                with open(path, "rb") as f:
+                    requests.post(
+                        f"https://api.telegram.org/bot{token}/sendPhoto",
+                        data={"chat_id": chat_id},
+                        files={"photo": f},
+                        timeout=30,
+                    )
         return _send_photo
     else:
         def _send_text(msg: str) -> None:
-            requests.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat_id, "text": msg},
-                timeout=30,
-            )
+            for chat_id in chat_ids:
+                requests.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": msg},
+                    timeout=30,
+                )
         return _send_text
 
 
