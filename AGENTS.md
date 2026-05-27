@@ -62,7 +62,7 @@ Before writing any strategy code, classify the strategy:
 
 **Type C — Portfolio Strategy** (multi-stock, periodic rebalancing, weight-based)
 
-Examples: 「台股外資 Z-Score 選股」「多因子輪動」「跨市場資金分配」「ETF 週期調倉」
+Examples: foreign institutional z-score stock selection, multi-factor rotation, cross-market capital allocation, ETF periodic rebalancing
 
 - Read `strategies/TEMPLATE_C.py` — copy it to `strategies/[name]/strategy.py` and fill in the sections. Do NOT write from scratch.
 - Read `examples/tw100_foreign_zscore/strategy.py` as a complete working reference before writing any code.
@@ -131,7 +131,7 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 - `fetch_top_trader_exposure(interval, start, end, headers)` → DataFrame with `alpha` (BTC only, no symbol)
 - `fetch_twstock_price_adj(stock_id, start, end, headers)` → DataFrame with Open/Close
 - `fetch_twstock_institutional(stock_id, start, end, headers)` → DataFrame with foreign_net and raw fields
-- `fetch_twstock_trader_flows(trader_id, start, end, headers)` → long-format DataFrame indexed by (date, stock_id) with `net` column (buy - sell in shares); trader_id is the securities_trader_id e.g. `'9217'` for 凱基-松山
+- `fetch_twstock_trader_flows(trader_id, start, end, headers)` → long-format DataFrame indexed by (date, stock_id) with `net` column (buy - sell in shares); trader_id is the securities_trader_id e.g. `'9217'` for KGI Securities Songshan branch
 - `fetch_twfutures_ohlcv(symbol, schema, start, end, headers)` → Taiwan futures OHLCV DataFrame (Open/High/Low/Close/Volume); symbol: `'TXF'`; schema: `'1d'`/`'1m'`/`'5m'`/`'15m'`/`'30m'`/`'60m'`; Volume in contracts; data from 2020-03-22
 - `txf_settlement_mask(index)` → boolean Series, True on the last 1-min bar before TXF monthly settlement (3rd Wednesday of each month, 13:30 TWN). Use with intraday TXF strategies: `settle = txf_settlement_mask(df.index); signal[settle] = 0.0; return signal, settle`
 
@@ -170,17 +170,25 @@ Never create a duplicate strategy folder just because you ran a scan.
 - `make_sender()` → text sender function (reads token+chat_id from openclaw.json)
 - `make_sender(photo=True)` → photo sender function
 - Use `send_telegram_fn=make_sender()` when calling `run()`
+- **Pairing check (run at session start):** Telegram pairing happens in a separate session — do NOT assume it is done. Always verify at the start of a new conversation:
+  ```python
+  import json
+  with open('/root/.openclaw/openclaw.json') as f:
+      cfg = json.load(f)
+  paired = 'chatId' in cfg['channels']['telegram']
+  ```
+  If `paired` is False: tell the user "Telegram is not paired yet. Please send `/start` to the bot and share the pairing code with me." Once the user provides the code, run `openclaw pairing approve telegram <code>`, then re-read the file to confirm `chatId` was written. Do not proceed with any strategy run or notification until pairing is confirmed.
 
 `lib/strategy.py`:
-- `from lib.strategy import add_realized_vol` — 計算 realized_vol in-place。**標準窗格為 30 天**，根據策略 interval 換算對應的 bar 數（例如 1d→30、1h→720、5min→8640）
-- `from lib.strategy import apply_vol_scaling` — `signal × (target_vol / realized_vol).clip(vol_cap)`，多空都支援；在 `compute_signals` 最後呼叫
-  - 標準預設：`target_vol=0.30`、`vol_cap=2.0`
-  - 必須先呼叫 `add_realized_vol` 讓 df 有 `realized_vol` 欄位
-- **所有使用風險平價的策略都應透過這兩個函數實作，不要在策略檔案裡自行計算 vol**
+- `from lib.strategy import add_realized_vol` — computes realized_vol in-place. **Standard window is 30 days** — convert to bars based on strategy interval (e.g. 1d→30, 1h→720, 5min→8640)
+- `from lib.strategy import apply_vol_scaling` — scales signal by `(target_vol / realized_vol).clip(vol_cap)`; works for both long and short; call at the end of `compute_signals`
+  - Standard defaults: `target_vol=0.30`, `vol_cap=2.0`
+  - Must call `add_realized_vol` first so df has a `realized_vol` column
+- **All risk-parity strategies must use these two functions — do NOT compute vol inline in the strategy file**
 
 `lib/pnl.py`:
-- `from lib.pnl import daily_returns_typeA, daily_returns_typeC` — 從 pf_series 萃取日頻報酬（runner 自動呼叫，無需手動）
-- `from lib.pnl import load_all_stats` — 讀取所有 `strategies/*/stats.json`（含 daily_returns）供 manager 使用
+- `from lib.pnl import daily_returns_typeA, daily_returns_typeC` — extracts daily returns from pf_series (called automatically by runner, no manual use needed)
+- `from lib.pnl import load_all_stats` — reads all `strategies/*/stats.json` (including daily_returns) for use by manager
 
 **When writing new reusable logic** (new exchange order helper, new alpha data fetcher, etc.):
 - Add it to the appropriate `lib/` file first (or create a new one, e.g. `lib/orders_binance.py`)
