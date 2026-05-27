@@ -170,7 +170,7 @@ Never create a duplicate strategy folder just because you ran a scan.
 - `make_sender()` → text sender function (reads token+chat_id from openclaw.json)
 - `make_sender(photo=True)` → photo sender function
 - Use `send_telegram_fn=make_sender()` when calling `run()`
-- **Pairing check (run at session start):** Telegram pairing happens in a separate session — do NOT assume it is done. Always verify at the start of a new conversation:
+- **CRITICAL — Pairing check (run at session start, before any other action):** Telegram pairing happens in a separate Telegram session — you cannot infer its state from conversation context. Always check the file first:
   ```python
   import json
   with open('/root/.openclaw/openclaw.json') as f:
@@ -178,6 +178,7 @@ Never create a duplicate strategy folder just because you ran a scan.
   paired = 'chatId' in cfg['channels']['telegram']
   ```
   If `paired` is False: tell the user "Telegram is not paired yet. Please send `/start` to the bot and share the pairing code with me." Once the user provides the code, run `openclaw pairing approve telegram <code>`, then re-read the file to confirm `chatId` was written. Do not proceed with any strategy run or notification until pairing is confirmed.
+  **NEVER write `chatId` directly to `openclaw.json`** — always use `openclaw pairing approve telegram <code>`. The pairing code is visible in the `/start` bot reply; if the user has already sent `/start`, ask them to copy the code from that reply.
 
 `lib/strategy.py`:
 - `from lib.strategy import add_realized_vol` — computes realized_vol in-place. **Standard window is 30 days** — convert to bars based on strategy interval (e.g. 1d→30, 1h→720, 5min→8640)
