@@ -4,7 +4,8 @@ __pycache__/
 *.pyc
 *.pyo
 strategies/*
-!strategies/TEMPLATE.py
+!strategies/TEMPLATE_A.py
+!strategies/TEMPLATE_C.py
 manager/portfolio_config.json
 manager/orders.jsonl
 examples/**/strategy.log

@@ -1,7 +1,7 @@
 # Strategy: Taiwan 100 Foreign Institutional Z-Score Portfolio
 # Type:     C (multi-asset, weight-based)
 # Universe: Taiwan 100 stocks across sectors
-# Signal:   外資買超 time-series z-score → positive z → long weight
+# Signal:   外資買超 time-series z-score → positive z → proportional weight
 # Rebalance: weekly (last trading day of each ISO week)
 
 import sys
@@ -15,7 +15,7 @@ START         = "2010-01-01"
 END           = None
 FEE           = 0.003        # ~0.3% 證交稅 + 手續費（賣方含稅）
 
-ACCUM_WINDOW  = 20           # 累積買賣超：1 個月（交易日）
+ACCUM_WINDOW  = 40
 ZSCORE_WINDOW = 252          # 標準化視窗：1 年
 WARMUP        = ACCUM_WINDOW + ZSCORE_WINDOW
 
@@ -44,19 +44,30 @@ UNIVERSE = [
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
-def _compute_zscore(foreign_df):
-    """外資累積買賣超 → time-series z-score（用 module-level 視窗參數）"""
-    import pandas as pd
-    foreign_accum = foreign_df.rolling(ACCUM_WINDOW, min_periods=1).sum()
-    rolling_stats = foreign_accum.rolling(ZSCORE_WINDOW, min_periods=ZSCORE_WINDOW // 2)
+def _compute_signal(foreign_df, accum_window=ACCUM_WINDOW, zscore_window=ZSCORE_WINDOW):
+    """外資累積買賣超 → time-series z-score"""
+    foreign_accum = foreign_df.rolling(accum_window, min_periods=1).sum()
+    rolling_stats = foreign_accum.rolling(zscore_window, min_periods=zscore_window // 2)
     return (foreign_accum - rolling_stats.mean()) / rolling_stats.std().replace(0, float('nan'))
 
 
-def _rebalance_mask(idx):
-    """每週最後一個交易日為 True（ISO week 切換處；最後一天自動為 True）"""
+def _compute_weights(signal_df, is_rebalance):
+    """Z-score → proportional weight (clip negatives, sum-normalize, rebalance mask, ffill)."""
+    pos   = signal_df.clip(lower=0).fillna(0)
+    total = pos.sum(axis=1)
+    w     = pos.div(total.where(total > 0), axis=0).fillna(0.0)
+    w[~is_rebalance] = float('nan')
+    return w.ffill().fillna(0.0)
+
+
+def _rebalance_mask(idx, freq='W'):
+    """Return bool numpy array — True on rebalance bars (last bar of each period)."""
     import pandas as pd
-    iso_week = pd.Series(idx.isocalendar().week.values, index=idx)
-    return (iso_week != iso_week.shift(-1)).fillna(True).to_numpy()
+    import numpy as np
+    if freq == 'D':
+        return np.ones(len(idx), dtype=bool)
+    s = pd.Series(idx.to_period(freq), index=idx)
+    return (s != s.shift(-1)).fillna(True).to_numpy()
 
 
 # ── fetch_data ────────────────────────────────────────────────────────────────
@@ -77,28 +88,21 @@ def fetch_data(hdrs):
     close_df   = pd.DataFrame(closes).sort_index().dropna(how='all')
     open_df    = pd.DataFrame(opens).reindex(close_df.index)
     foreign_df = pd.DataFrame(foreign_nets).reindex(close_df.index).fillna(0)
-    return close_df, foreign_df, open_df
+    return close_df, open_df, foreign_df
 
 
 # ── compute_signals ───────────────────────────────────────────────────────────
-def compute_signals(data):
-    import numpy as np
+def compute_signals(data, accum_window=ACCUM_WINDOW, zscore_window=ZSCORE_WINDOW):
     import pandas as pd
 
-    close_df, foreign_df, open_df = data
-    idx = close_df.index
+    close_df, open_df, foreign_df = data
 
-    z_scores     = _compute_zscore(foreign_df)
-    is_rebalance = _rebalance_mask(idx)
+    signal       = _compute_signal(foreign_df, accum_window, zscore_window)
+    is_rebalance = _rebalance_mask(close_df.index, freq='W')
+    weights      = _compute_weights(signal, is_rebalance)
 
-    # 算出每天的正規化權重 → 只保留調倉日 → ffill 補齊其餘日
-    pos_z   = z_scores.clip(lower=0).fillna(0)              # 負 z → 0（不做空）
-    z_total = pos_z.sum(axis=1)
-    weights = pos_z.div(z_total.where(z_total > 0), axis=0).fillna(0.0)
-    weights[~is_rebalance] = np.nan
-    weights = weights.ffill().fillna(0.0)
     price_df = pd.concat({'close': close_df, 'open': open_df}, axis=1)
-    return weights.values, price_df   # weights 必須是 numpy array（runner Type C 介面要求）
+    return weights.values, price_df   # weights MUST be numpy array
 
 
 if __name__ == '__main__':

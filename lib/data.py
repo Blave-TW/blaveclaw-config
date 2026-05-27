@@ -28,7 +28,7 @@ class _RateLimiter:
             self._calls.append(time.time())
 
 BASE      = 'https://api.blave.org'
-_CACHE_DIR = Path('cache')
+_CACHE_DIR = Path(__file__).parent.parent / 'cache'
 
 
 def _retry_get(url, max_retries=6, **kwargs):

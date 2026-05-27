@@ -19,10 +19,13 @@ cp /tmp/oc-config/CLAUDE.md /root/.openclaw/workspace/CLAUDE.md
 cp -r /tmp/oc-config/references/ /root/.openclaw/workspace/references/
 ```
 ```bash
-cp /tmp/oc-config/strategies/TEMPLATE.py /root/.openclaw/workspace/strategies/TEMPLATE.py
+cp /tmp/oc-config/strategies/TEMPLATE_A.py /root/.openclaw/workspace/strategies/TEMPLATE_A.py
 ```
 ```bash
-cp -r /tmp/oc-config/lib/ /root/.openclaw/workspace/lib/
+cp /tmp/oc-config/strategies/TEMPLATE_C.py /root/.openclaw/workspace/strategies/TEMPLATE_C.py
+```
+```bash
+rsync -a --exclude 'account_*.py' /tmp/oc-config/lib/ /root/.openclaw/workspace/lib/
 ```
 ```bash
 cp -r /tmp/oc-config/manager/ /root/.openclaw/workspace/manager/
@@ -38,8 +41,10 @@ rm -rf /tmp/oc-config
 
 - `AGENTS.md` — agent instructions
 - `CLAUDE.md` — Claude Code context (points to AGENTS.md)
-- `strategies/TEMPLATE.py` — base template for all Type A strategies
+- `strategies/TEMPLATE_A.py` — base template for all Type A strategies
+- `strategies/TEMPLATE_C.py` — base template for all Type C portfolio strategies
 - `lib/` — shared library (runner, data, execute, pnl, portfolio, strategy, analysis, param_scan, validation, notify)
+- `lib/account_TEMPLATE.py` — template for exchange account libraries (copy to `lib/account_{exchange}.py`)
 - `manager/` — portfolio management system (optimizer, reconciler)
 - `examples/` — reference strategy implementations
 - `references/` — deployment flow, strategy code rules

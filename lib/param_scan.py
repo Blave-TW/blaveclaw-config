@@ -50,33 +50,33 @@ def percentile_thresholds(series, n_parts=9):
     return entry_vals, exit_vals
 
 
-def scan_grid(df, compute_signals_fn, row_vals, col_vals,
+def scan_grid(data, compute_signals_fn, row_vals, col_vals,
               row_param='entry_th', col_param='exit_th',
               fee=0.0005, valid_fn=None, warmup=0, **_):
     """
     Run a 2D parameter scan and return a Sharpe grid.
+    Supports both Type A (single-symbol) and Type C (portfolio) strategies —
+    auto-detected from compute_signals_fn's return type.
 
     Parameters
     ----------
-    df                : DataFrame with OHLCV + any pre-computed auxiliary data
-                        (e.g. realized_vol). compute_signals_fn is called on the
-                        FULL df so rolling windows are accurate; PnL is computed
-                        on df.iloc[warmup:] to skip the warm-up period.
-    compute_signals_fn: strategy's compute_signals(df, **kwargs).
-                        Must accept row_param and col_param as keyword arguments.
-                        May return a plain pd.Series or a tuple (signal, settle):
-                        - plain Series → next-bar open execution
-                        - tuple        → settle (bool Series) is used as exec_shifted
-                          (True on bar t means execute at open of bar t+1)
+    data              : Type A → DataFrame (OHLCV); Type C → tuple from fetch_data().
+                        compute_signals_fn is called on the FULL data so rolling
+                        windows are accurate; warmup trims the PnL only.
+    compute_signals_fn: compute_signals(data, **kwargs) — must accept row_param and
+                        col_param as keyword arguments.
+                        Type A: returns pd.Series or (pd.Series, exec_at_close)
+                        Type C: returns (weights_mat np.ndarray, price_df[, exec_at_close])
     row_vals          : iterable of row parameter values
     col_vals          : iterable of col parameter values
     row_param         : kwarg name for row values (default 'entry_th')
     col_param         : kwarg name for col values (default 'exit_th')
     fee               : per-trade fee rate (default 0.0005)
-    valid_fn          : optional (row_val, col_val) → bool; skips invalid combos
-                        defaults to row_val > col_val (entry > exit)
-    warmup            : int, number of leading bars to skip from PnL computation
-                        (set to max rolling window; default 0)
+    valid_fn          : (row_val, col_val) → bool; skips invalid combos.
+                        Type A threshold default: row > col (entry > exit).
+                        Type C default: all combos valid (lambda r, c: True).
+                        Pass explicitly to override.
+    warmup            : leading bars to skip from PnL (= longest rolling window)
 
     Returns
     -------
@@ -84,15 +84,8 @@ def scan_grid(df, compute_signals_fn, row_vals, col_vals,
     """
     import warnings
     warnings.filterwarnings('ignore', category=FutureWarning)
+    import pandas as pd
     from lib.analysis import precise_pnl, compute_stats
-
-    if valid_fn is None:
-        valid_fn = lambda r, c: r > c
-
-    df_scan = df.iloc[warmup:] if warmup else df
-    close_v = df_scan['Close'].values
-    open_v  = df_scan['Open'].values
-    n       = len(df_scan)
 
     row_vals = list(row_vals)
     col_vals = list(col_vals)
@@ -100,25 +93,51 @@ def scan_grid(df, compute_signals_fn, row_vals, col_vals,
 
     for i, rv in enumerate(row_vals):
         for j, cv in enumerate(col_vals):
-            if not valid_fn(rv, cv):
-                continue
-            result = compute_signals_fn(df, **{row_param: rv, col_param: cv})
-            if isinstance(result, tuple):
-                sig    = result[0].iloc[warmup:] if warmup else result[0]
-                settle = result[1].iloc[warmup:] if warmup else result[1]
-                exec_shifted     = np.zeros(n, dtype=bool)
-                exec_shifted[1:] = settle.values.astype(bool)[:-1]
+            result = compute_signals_fn(data, **{row_param: rv, col_param: cv})
+
+            # ── Type C: (weights_mat, price_df[, exec_at_close]) ──────────────
+            if isinstance(result, tuple) and isinstance(result[0], np.ndarray):
+                if valid_fn is not None and not valid_fn(rv, cv):
+                    continue
+                weights_orig, price_df, *_opt = result
+                w_orig = weights_orig[warmup:]
+                pf     = price_df.iloc[warmup:]
+                cl     = pf['close'].values
+                op     = pf['open'].values
+                n, k   = w_orig.shape
+                w_curr = np.vstack([np.zeros((1, k)), w_orig[:-1]])
+                w_prev = np.vstack([np.zeros((2, k)), w_orig[:-2]])
+                exec_s = np.zeros(n, dtype=bool)
+                pf_ret, *_ = precise_pnl(cl, op, w_curr, w_prev, exec_s, fee)
+                sharpe, *_ = compute_stats(pf_ret, pf['close'].index)
+
+            # ── Type A: pd.Series or (pd.Series, exec_at_close) ──────────────
             else:
-                sig          = result.iloc[warmup:] if warmup else result
-                exec_shifted = np.zeros(n, dtype=bool)
+                _valid_fn = valid_fn if valid_fn is not None else (lambda r, c: r > c)
+                if not _valid_fn(rv, cv):
+                    continue
+                if isinstance(result, tuple):
+                    sig, settle = result[0], result[1]
+                else:
+                    sig, settle = result, None
+                df_scan = data.iloc[warmup:] if warmup else data
+                cl      = df_scan['Close'].values
+                op      = df_scan['Open'].values
+                n       = len(df_scan)
+                sig_s   = sig.iloc[warmup:] if warmup else sig
+                pos     = sig_s.ffill().fillna(0).values
+                w_curr  = np.empty(n); w_curr[0] = 0.0; w_curr[1:] = pos[:-1]
+                w_prev  = np.zeros(n)
+                if n >= 2: w_prev[2:] = pos[:-2]
+                if settle is not None:
+                    settle_s = settle.iloc[warmup:] if warmup else settle
+                    exec_s   = np.zeros(n, dtype=bool)
+                    exec_s[1:] = settle_s.values.astype(bool)[:-1]
+                else:
+                    exec_s = np.zeros(n, dtype=bool)
+                pf_ret, *_ = precise_pnl(cl, op, w_curr, w_prev, exec_s, fee)
+                sharpe, *_ = compute_stats(pf_ret, df_scan.index)
 
-            pos    = sig.ffill().fillna(0).values
-            w_curr = np.empty(n); w_curr[0] = 0.0; w_curr[1:] = pos[:-1]
-            w_prev = np.zeros(n)
-            if n >= 2: w_prev[2:] = pos[:-2]
-
-            pf_ret, *_ = precise_pnl(close_v, open_v, w_curr, w_prev, exec_shifted, fee)
-            sharpe, *_ = compute_stats(pf_ret, df_scan.index)
             if np.isfinite(sharpe):
                 grid[i, j] = sharpe
 

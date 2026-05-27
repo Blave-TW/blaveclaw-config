@@ -1,9 +1,12 @@
 import json, logging, math, os
+from pathlib import Path
 import numpy as np
 import pandas as pd
 from dotenv import dotenv_values
 from lib.execute import update_state, load_state, save_state
 from lib.analysis import plot_pnl, plot_pnl_portfolio, precise_pnl, compute_stats
+
+_REPO_ROOT = Path(__file__).parent.parent
 
 
 def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
@@ -29,9 +32,10 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
     env  = dotenv_values()
     hdrs = {'api-key': env.get('blave_api_key', ''), 'secret-key': env.get('blave_secret_key', '')}
 
-    os.makedirs(f'strategies/{strategy_name}', exist_ok=True)
+    out_dir = _REPO_ROOT / 'strategies' / strategy_name
+    os.makedirs(out_dir, exist_ok=True)
     logging.basicConfig(
-        filename=f'strategies/{strategy_name}/strategy.log',
+        filename=str(out_dir / 'strategy.log'),
         level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s'
     )
 
@@ -135,16 +139,16 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
              'Total Fees Paid [%]':  round(total_fees, 4),
              'daily_dates': d_dates, 'daily_returns': d_rets,
              },
-            open(f'strategies/{strategy_name}/stats.json', 'w'), indent=2
+            open(out_dir / 'stats.json', 'w'), indent=2
         )
 
         plot_pnl(df, result_d, title=strategy_name,
-                 output_path=f'strategies/{strategy_name}/pnl.png')
+                 output_path=str(out_dir / 'pnl.png'))
 
         if mode == 'backtest':
             if send_telegram_fn:
                 from lib.notify import send_photo
-                send_photo(f'strategies/{strategy_name}/pnl.png')
+                send_photo(str(out_dir / 'pnl.png'))
                 send_telegram_fn(
                     f"回測完成：{strategy_name}\n"
                     f"Return {total_ret:.1f}%  "
@@ -243,16 +247,16 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
              **bench_stats,
              'daily_dates': d_dates, 'daily_returns': d_rets,
              },
-            open(f'strategies/{strategy_name}/stats.json', 'w'), indent=2
+            open(out_dir / 'stats.json', 'w'), indent=2
         )
 
         plot_pnl_portfolio(pf_series, close_df, title=strategy_name,
-                           output_path=f'strategies/{strategy_name}/pnl.png',
+                           output_path=str(out_dir / 'pnl.png'),
                            bench_pct=bench_pct)
 
         if send_telegram_fn:
             from lib.notify import send_photo
-            send_photo(f'strategies/{strategy_name}/pnl.png')
+            send_photo(str(out_dir / 'pnl.png'))
             send_telegram_fn(
                 f"回測完成：{strategy_name}\n"
                 f"總報酬 {total_ret:.1%}  年化 {ann_ret:.1%}\n"

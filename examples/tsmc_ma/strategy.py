@@ -1,27 +1,23 @@
-# Strategy: WTI Crude Oil SMA Cross
+# Strategy: 台積電 SMA 黃金交叉
 # Type:     A (single symbol, signal-based)
-# Symbol:   CL (NYMEX front-month continuous)
-# Interval: 1h
-# Logic:    Long on SMA golden cross, flat on death cross
-#           Settlement exit (0.0) on last bar before instrument_id rollover
+# Symbol:   2330 (TSMC)
+# Interval: 1d
+# Logic:    快線 > 慢線 → 多；快線 < 慢線 → 出場
 
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # ── Config ────────────────────────────────────────────────────────────────────
-MODE          = "backtest"        # "backtest" | "live"
-STRATEGY_NAME = "cl_sma"
-SYMBOL        = "CL"
-INTERVAL      = "1h"
+MODE          = "backtest"
+STRATEGY_NAME = "tsmc_ma"
+SYMBOL        = "2330"
 START         = "2015-01-01"
 END           = None
-FEE           = 0.0003            # ~0.03% per side（CME 手續費 + 點差）
-DATASET       = "GLBX.MDP3"
-SCHEMA        = "ohlcv-1h"
+FEE           = 0.003          # ~0.3% 證交稅 + 手續費（賣方含稅）
 
-SMA_FAST = 4
-SMA_SLOW = 24
+SMA_FAST = 5                   # 週線
+SMA_SLOW = 60                  # 季線
 WARMUP   = SMA_SLOW
 
 
@@ -35,22 +31,22 @@ def _add_indicators(df, fast=SMA_FAST, slow=SMA_SLOW):
 
 # ── fetch_data ────────────────────────────────────────────────────────────────
 def fetch_data(hdrs):
-    from lib.data import fetch_db_kline
-    return fetch_db_kline(DATASET, SYMBOL, SCHEMA, START, END, hdrs)
+    from lib.data import fetch_twstock_price_adj
+    df = fetch_twstock_price_adj(SYMBOL, START, END, hdrs)
+    return _add_indicators(df)
 
 
 # ── compute_signals ───────────────────────────────────────────────────────────
 def compute_signals(df, fast=SMA_FAST, slow=SMA_SLOW):
     import pandas as pd, numpy as np
-
-    df     = _add_indicators(df, fast, slow)
+    df = _add_indicators(df, fast, slow)
+    f, s  = df['SMA_F'], df['SMA_S']
+    golden = (f > s) & (f.shift(1) <= s.shift(1))
+    death  = (f < s) & (f.shift(1) >= s.shift(1))
     signal = pd.Series(np.nan, index=df.index)
-    signal[df['SMA_F'] > df['SMA_S']] = 1.0
-    signal[df['SMA_F'] < df['SMA_S']] = 0.0
-
-    # 結算出場：換約前最後一根 bar 強制平倉（this-bar close），一般訊號為 next-bar open
-    from lib.data import settlement_signals_from_db
-    return settlement_signals_from_db(df, signal)
+    signal[golden] = 1.0
+    signal[death]  = 0.0
+    return signal
 
 
 if __name__ == '__main__':

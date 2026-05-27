@@ -1,13 +1,12 @@
-# Strategy Code Structure (Type A — Signal Strategy)
+# Strategy Code Structure (Type A & C)
 
-NOTE: This guide is for **Type A (Signal Strategy)** only — single symbol, fixed interval, backtest-first.
-For Type B (everything else), write from scratch — no template, no backtest.
+NOTE: This guide covers **Type A (Signal Strategy)** and **Type C (Portfolio Strategy)**. For Type B (everything else), write from scratch — no template, no backtest.
 
-CRITICAL: Every Type A strategy MUST be based on `strategies/TEMPLATE.py`. Copy the template and fill in the marked sections. Do NOT write a standalone backtest script from scratch.
+CRITICAL: Every Type A strategy MUST be based on `strategies/TEMPLATE_A.py`. Copy the template and fill in the marked sections. Do NOT write a standalone backtest script from scratch.
 
 ## Steps
 
-1. Copy `strategies/TEMPLATE.py` to `strategies/[strategy_name]/strategy.py`
+1. Copy `strategies/TEMPLATE_A.py` to `strategies/[strategy_name]/strategy.py`
 2. Set config at the top: `STRATEGY_NAME`, `SYMBOL`, `EXCHANGE`, `INTERVAL`, `START`
 3. Fill in the three marked sections:
    - `_add_indicators(df, p1, p2)` — add indicator columns, parameterized for scan
@@ -179,3 +178,97 @@ def compute_signals(df):
 - Default is always `MODE = "backtest"` — only switch to `"live"` after user confirms
 - NEVER truncate or cap arrays (no `[:N]` slicing)
 - Execution timing: signal fires at Close[t] → executes at Open[t+1] by default (next-bar open); use `exec_at_close` for this-bar close execution (futures settlement only)
+
+---
+
+## Type C — Portfolio Strategy
+
+CRITICAL: Every Type C strategy MUST be based on `strategies/TEMPLATE_C.py`. Copy it and fill in the marked sections. Read `examples/tw100_foreign_zscore/strategy.py` as a complete working reference.
+
+### Steps
+
+1. Copy `strategies/TEMPLATE_C.py` to `strategies/[strategy_name]/strategy.py`
+2. Set config: `STRATEGY_NAME`, `UNIVERSE`, `SIGNAL_WINDOW`, `WARMUP`, `FEE`, `START`
+3. Fill in three sections:
+   - `fetch_data(hdrs)` — fetches close/open/signal data for all UNIVERSE symbols; returns a **tuple**
+   - helpers (e.g. `_compute_weights`, `_rebalance_mask`) — signal → weight conversion
+   - `compute_signals(data)` — unpacks tuple, builds weight matrix, returns `(weights.values, price_df)`
+4. Run: `python3 strategies/[strategy_name]/strategy.py`
+
+### Interface Contract
+
+```
+fetch_data(hdrs)         → tuple of DataFrames   (close_df, open_df, ...)   # open_df always second; aux data (e.g. foreign_df) appended after
+compute_signals(data)    → (weights_mat, price_df)
+```
+
+| Return element | Type | Shape | Notes |
+|---|---|---|---|
+| `weights_mat` | `np.ndarray` | `(n_days, n_stocks)` | target weight at each close; rows sum to ≤ 1 |
+| `price_df` | `pd.DataFrame` (MultiIndex) | `(n_days, 2×n_stocks)` | `pd.concat({'close': close_df, 'open': open_df}, axis=1)` |
+| `exec_at_close` *(optional)* | `np.ndarray[bool]` | `(n_days,)` | bars that execute at this-bar close (rare) |
+
+**DO NOT pre-shift weights.** Runner shifts by 1 bar automatically: `w_curr[t] = weights[t-1]`.
+
+### Weight Matrix Pattern
+
+Use helpers for signal computation, weight building, and rebalance mask — this keeps `compute_signals` clean and lets `scan.py` sweep params without touching globals.
+
+```python
+def _compute_signal(close_df, param1=PARAM1):
+    """Per-asset signal DataFrame. Examples: pct_change, rolling z-score, MA ratio."""
+    # return close_df.pct_change(param1, fill_method=None)
+    raise NotImplementedError
+
+def _compute_weights(signal_df, param2, is_rebalance):
+    """Signal → weight DataFrame. Two common patterns:
+      A) Top-N equal weight:
+            rank = signal_df.rank(axis=1, ascending=False, na_option='bottom')
+            w = DataFrame(np.where(rank <= param2, 1/param2, 0), ...)
+            w[signal_df.isna().all(axis=1)] = 0.0
+      B) Proportional (z-score → normalize):
+            pos = signal_df.clip(lower=0).fillna(0)
+            w = pos.div(pos.sum(axis=1).where(pos.sum(axis=1) > 0), axis=0).fillna(0.0)
+    Always finish with rebalance mask + ffill:
+    """
+    # ... build w ...
+    w[~is_rebalance] = float('nan')
+    return w.ffill().fillna(0.0)
+
+def _rebalance_mask(idx, freq='W'):
+    """Bool numpy array — True on last bar of each period. freq: 'W', 'M', 'D'."""
+    import pandas as pd, numpy as np
+    if freq == 'D':
+        return np.ones(len(idx), dtype=bool)
+    s = pd.Series(idx.to_period(freq), index=idx)
+    return (s != s.shift(-1)).fillna(True).to_numpy()
+
+def compute_signals(data, param1=PARAM1, param2=PARAM2):
+    import pandas as pd
+    close_df, open_df = data          # unpack in same order as fetch_data return
+
+    signal       = _compute_signal(close_df, param1)
+    is_rebalance = _rebalance_mask(close_df.index, freq='W')
+    weights      = _compute_weights(signal, param2, is_rebalance)
+
+    price_df = pd.concat({'close': close_df, 'open': open_df}, axis=1)
+    return weights.values, price_df   # numpy array required — runner detects Type C by this
+```
+
+See `examples/tw100_foreign_zscore/strategy.py` (z-score proportional) and `examples/twstock_momentum/strategy.py` (top-N equal weight) for complete working implementations.
+
+### Lookahead Bias Warning
+
+`UNIVERSE` must be **fixed at backtest start** — determined only from information available before `START`.
+
+- **WRONG:** `universe = all_stocks.nlargest(100, 'cumulative_net_buy')` — uses full-period data
+- **RIGHT:** hardcode the universe from a historical constituent list, or use all IDs that ever appear in the data source
+
+Let `compute_signals` do per-rebalance ranking using only the lookback window available at each date.
+
+### What You Do NOT Need to Write
+
+- Backtest loop — handled by `lib/runner.py`
+- Weight shifting — runner shifts by 1 bar
+- PnL computation — runner calls `precise_pnl` with the weight matrix
+- Chart / stats / notify — runner handles all output

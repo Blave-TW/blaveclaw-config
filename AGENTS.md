@@ -16,11 +16,14 @@ CRITICAL: Read `references/deployment.md` before deploying any strategy live or 
 
 ## Examples
 
-`examples/` contains three complete reference strategies — read them when you need concrete patterns:
+`examples/` contains complete reference strategies — read them when you need concrete patterns:
 - `btc_sma_cross/` — Type A, SMA crossover, includes `scan.py` for parameter search
 - `btc_ti_5min/` — Type A, Taker Intensity threshold (Blave alpha), 5min kline
-- `tw100_foreign_zscore/` — Type C, Taiwan 100-stock portfolio, foreign institutional z-score
 - `cl_sma/` — Type A, WTI crude oil (CL) 1h SMA crossover with NYMEX settlement exit; uses `fetch_db_kline` + `settlement_signals_from_db()`
+- `tsmc_ma/` — Type A, Taiwan stock (2330) SMA crossover
+- `txf_ma_1m/` — Type A, Taiwan Index Futures (TXF) 1m SMA crossover
+- `tw100_foreign_zscore/` — Type C, Taiwan 100-stock portfolio, foreign institutional z-score
+- `twstock_momentum/` — Type C, Taiwan stock momentum, top-N equal weight
 
 These are not user strategies. User strategies live in `strategies/`.
 
@@ -33,9 +36,9 @@ Before writing any strategy code, classify the strategy:
 - Trades one fixed symbol on a fixed interval
 - Entry/exit driven by indicators or price signals (e.g. MA cross, RSI)
 - Backtest is meaningful — REQUIRED before going live
-- Read `references/strategy-code.md` and use `strategies/TEMPLATE.py`
+- Read `references/strategy-code.md` and use `strategies/TEMPLATE_A.py`
 - If the strategy uses any Blave alpha indicator (taker intensity, holder concentration, liquidation, whale hunter, etc.), read the **Alpha Indicators** section in `references/strategy-code.md` for the canonical fetch pattern: use `lib.data` fetchers inside `fetch_data(hdrs)`, join to df index, ffill. Do NOT write your own fetch logic inline.
-- blave-quant-skill provides data reference only — always structure the full strategy as TEMPLATE.py
+- blave-quant-skill provides data reference only — always structure the full strategy as TEMPLATE_A.py
 - `END` defaults to `None` (latest data) unless the user explicitly specifies an end date
 - Write three functions:
   - **`_add_indicators(df, param1=DEFAULT1, ...)`**: adds indicator columns to a copy of df; params default to module-level constants
@@ -61,6 +64,8 @@ Before writing any strategy code, classify the strategy:
 
 Examples: 「台股外資 Z-Score 選股」「多因子輪動」「跨市場資金分配」「ETF 週期調倉」
 
+- Read `strategies/TEMPLATE_C.py` — copy it to `strategies/[name]/strategy.py` and fill in the sections. Do NOT write from scratch.
+- Read `examples/tw100_foreign_zscore/strategy.py` as a complete working reference before writing any code.
 - Allocates capital across a **basket of stocks/assets** using a weight vector
 - Rebalances periodically (daily / weekly / monthly); weight changes drive trades
 - Pre-compute signals (e.g. Z-Score DataFrame) externally; build weight matrix from signals
@@ -69,7 +74,7 @@ Examples: 「台股外資 Z-Score 選股」「多因子輪動」「跨市場資�
   - `weights_mat`: numpy array `(n_days, n_stocks)` — target weights decided at each close
   - `price_df`: MultiIndex DataFrame built with `pd.concat({'close': close_df, 'open': open_df}, axis=1)`; 'open' level is optional but enables accurate execution pricing
   - Optional 3rd element `exec_at_close`: bool array `(n_days,)` for any bars that execute at close instead of next open
-- **Backtest REQUIRED** before going live — read `references/strategy-code.md` for the canonical multi-asset pattern
+- **Backtest REQUIRED** before going live
 - Still require explicit user confirmation before deploying or setting up cron jobs
 - **Candidate pool — NO lookahead bias**: the universe of stocks passed to `fetch_data` must be derived only from information available at the start of the backtest. NEVER filter candidates using full-period aggregates (e.g. `nlargest(N)` on cumulative net buy over the entire history) — that leaks future data. Instead use ALL stocks that ever appear in the data source (e.g. all stock_ids in trader flows), and let `compute_signals` do the per-rebalance ranking using only the lookback window available at that date.
 
@@ -77,11 +82,11 @@ Examples: 「台股外資 Z-Score 選股」「多因子輪動」「跨市場資�
 
 ```
 Does the strategy trade ONE fixed symbol (e.g. BTCUSDT) on a fixed interval?
-  → YES → Type A  (lib/runner.py + TEMPLATE.py)
+  → YES → Type A  (lib/runner.py + TEMPLATE_A.py)
 
 Does the strategy allocate weights across MULTIPLE symbols / a basket of assets,
 rebalancing on a schedule (daily / weekly / monthly)?
-  → YES → Type C  (lib/runner.py, see examples/tw100_foreign_zscore)
+  → YES → Type C  (lib/runner.py + TEMPLATE_C.py, see examples/tw100_foreign_zscore)
 
 Everything else (screener, grid, arbitrage, one-off execution, alert bot)?
   → Type B  (write from scratch, no backtest)
@@ -180,7 +185,7 @@ Never create a duplicate strategy folder just because you ran a scan.
 
 **Strategy-specific logic** (signal computation, indicator setup, place_order for a specific exchange) stays in the strategy file.
 
-Skill examples show data-fetch patterns only — integrate them into TEMPLATE.py using lib/ imports.
+Skill examples show data-fetch patterns only — integrate them into TEMPLATE_A.py using lib/ imports.
 
 **Marketplace lib rule** — strategies shared via marketplace must follow this boundary strictly:
 - `compute_signal`, indicator calculation, and all logic that affects trade decisions MUST stay in the strategy file — never in a custom lib
@@ -253,13 +258,9 @@ For full workflow, read `references/manager.md`.
 - When user asks to delete a strategy, delete only its own directory (e.g. `strategies/btc_kd_long/`). Never touch `manager/`.
 - **OKX `get_positions()` pitfall:** OKX positions API returns `ctVal` as `None` for some instrument types. Do NOT compute notional as `pos * markPx * ctVal` — use the `notionalUsd` field directly instead. Zero notional causes the position to be ignored and reconciliation skipped.
 - **Order library → reconciler is one atomic task:** Whenever you write or update any `lib/order_*.py` file (e.g. `lib/order_okx.py`), you MUST in the same session also update `manager/reconciler.py` to import from it and replace the `get_positions()` / `place_order()` stubs with real calls. Writing the library without wiring `reconciler.py` leaves automated trading permanently broken. `place_order(symbol, signed_diff, asset_spec, reduce_only=False)` — accept the `reduce_only` kwarg and pass it to the exchange's reduce-only / close-only flag. The reconciler splits position flips into a reduce-only close leg followed by a directional open leg; if the exchange is in one-way mode and reduce_only can be ignored, simply accept and discard the kwarg.
-- **Account library → snapshot is one atomic task:** Whenever you write or update any `lib/account_*.py` file (e.g. `lib/account_okx.py`), you MUST in the same session also update `manager/snapshot.py` to import from it and replace both stubs with real calls:
-  - `get_account_equity(exchange, env)` → `{'equity': float, 'currency': str}`
-  - `get_positions(exchange, env)` → `[{'symbol': str, 'side': str, 'size': float, 'mark_price': float}, ...]` — return `[]` if flat
-  API keys go in `.env` (same file as blave keys, e.g. `okx_api_key`, `okx_secret_key`, `okx_passphrase`). Before writing any `lib/account_*.py`, read the relevant skill reference under `skills/blave-quant/references/` for the correct balance and position endpoints.
+- **Account library — create lib/account_{exchange}.py:** To wire snapshot for an exchange, copy `lib/account_TEMPLATE.py` to `lib/account_{exchange}.py` and implement `get_equity(env)` and `get_positions(env)`. `snapshot.py` auto-discovers this file by name — **do NOT modify snapshot.py**. API keys go in `.env` (e.g. `okx_api_key`, `okx_secret_key`, `okx_passphrase`). Before writing, read the relevant skill reference under `skills/blave-quant/references/` for the correct balance and position endpoints.
 - **`portfolio_config.json["messages"]`** — Telegram message templates for reconciler and watchdog. Keys: `order_buy`, `order_sell`, `order_close_long`, `order_close_short`, `order_error`, `watchdog_started`, `watchdog_restart`. Placeholders: `{symbol}`, `{amount}`, `{error}`, `{code}`. Edit these to match the user's preferred language when deploying.
-- **`manager/snapshot.py`** — daily account equity snapshot. Reads unique exchanges from `portfolio_config.json["exchanges"]`, calls `get_account_equity()` per exchange, records to `manager/snapshots.jsonl`, sends Telegram report. Cron: `0 8 * * * cd /root/.openclaw/workspace && python3 manager/snapshot.py`. The `cd` is mandatory — cron runs from `/root` and all paths are relative; without it every file open fails silently before Telegram is reached. The `get_account_equity()` function is a stub until a `lib/account_*.py` is wired in.
-- **Instrument sizing via `asset_spec`:** If a strategy requires lot-constrained sizing (futures contracts, forex lots, etc.), set `asset_specs` in `portfolio_config.json` (same pattern as `exchanges`): `{"asset_specs": {"strategy_name": {"type": "futures_contracts", "contract_value": 200, "currency": "TWD", "lot_size": 1}}}`. The reconciler passes it unchanged to `place_order(symbol, signed_diff, asset_spec)`. Omit for fractional sizing (default: `qty = abs(signed_diff) / price`).
+- **`manager/snapshot.py`** — daily account equity snapshot. Reads unique exchanges from `portfolio_config.json["exchanges"]`, auto-imports `lib/account_{exchange}.py` per exchange, records to `manager/snapshots.jsonl`, sends Telegram report. Cron: `0 8 * * * cd /root/.openclaw/workspace && python3 manager/snapshot.py`. The `cd` is mandatory — cron runs from `/root` and all paths are relative; without it every file open fails silently before Telegram is reached.
 - **Always start the reconciler via the watchdog wrapper in a tmux session**, not directly and never with `nohup &`. `nohup &` background processes are killed when the shell session ends. Use tmux so the process survives across sessions:
   ```
   tmux new-session -d -s reconciler 'cd /root/.openclaw/workspace && bash manager/start_reconciler.sh'

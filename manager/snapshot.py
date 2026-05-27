@@ -1,4 +1,4 @@
-import sys, json, logging, os
+import sys, json, logging, os, importlib
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from datetime import datetime, timezone
@@ -52,35 +52,35 @@ def _plot_equity(path='manager/snapshot_equity.png'):
 
 
 def get_account_equity(exchange: str, env: dict) -> dict:
-    """
-    Query exchange for total account equity.
+    """Auto-dispatches to lib/account_{exchange}.py → get_equity(env).
+    Create that file from lib/account_TEMPLATE.py when wiring a new exchange.
     Returns {'equity': float, 'currency': str}
-
-    Implement by importing from lib/account_{exchange}.py:
-      from lib.account_okx import get_equity
-      if exchange == 'okx': return get_equity(env)
-
-    API keys go in .env (same file as blave keys).
-    OKX example: okx_api_key, okx_secret_key, okx_passphrase
-    Before implementing, read skills/blave-quant/references/<exchange>-skill.md.
     """
-    raise NotImplementedError(f"get_account_equity not implemented for {exchange}")
+    try:
+        mod = importlib.import_module(f'lib.account_{exchange}')
+    except ImportError:
+        raise NotImplementedError(
+            f"lib/account_{exchange}.py not found — "
+            f"create it from lib/account_TEMPLATE.py"
+        )
+    return mod.get_equity(env)
 
 
 def get_positions(exchange: str, env: dict) -> list:
+    """Auto-dispatches to lib/account_{exchange}.py → get_positions(env).
+    Returns [{'symbol', 'side', 'size', 'mark_price'}, ...] or [] if flat.
+    If get_positions is not yet implemented in the lib file, silently returns [].
     """
-    Query exchange for open positions.
-    Returns list of dicts, one per open position:
-      {'symbol': str, 'side': str, 'size': float, 'mark_price': float}
-    Return [] if no open positions (flat).
-
-    Implement by importing from lib/account_{exchange}.py:
-      from lib.account_okx import get_positions as _get
-      if exchange == 'okx': return _get(env)
-
-    Before implementing, read skills/blave-quant/references/<exchange>-skill.md.
-    """
-    raise NotImplementedError(f"get_positions not implemented for {exchange}")
+    try:
+        mod = importlib.import_module(f'lib.account_{exchange}')
+    except ImportError:
+        raise NotImplementedError(
+            f"lib/account_{exchange}.py not found — "
+            f"create it from lib/account_TEMPLATE.py"
+        )
+    if not hasattr(mod, 'get_positions'):
+        return []
+    return mod.get_positions(env)
 
 
 def _load_portfolio_config():
