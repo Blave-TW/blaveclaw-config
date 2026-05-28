@@ -28,14 +28,25 @@ tech = [item['公司代號'].strip() for item in r.json() if item['產業別'] i
 
 ```python
 from lib.data import (
-    fetch_twstock_price_adj_batch,        # (stock_ids, start, end, headers) → Open/Close
-    fetch_twstock_institutional_batch,    # (stock_ids, start, end, headers) → foreign_net 及原始欄位
-    fetch_twstock_shareholding_batch,     # (stock_ids, start, end, headers) → shareholders 欄
-    fetch_twstock_financials_batch,       # (stock_ids, headers) → 損益表 long format
-    fetch_twstock_balance_sheet_batch,    # (stock_ids, headers) → 資產負債表 long format
-    fetch_twstock_monthly_revenue_batch,  # (stock_ids, headers) → revenue, revenue_month, revenue_year
+    fetch_twstock_price_adj_batch,              # (stock_ids, start, end, headers) → Open/Close
+    fetch_twstock_institutional_batch,          # (stock_ids, start, end, headers) → foreign_net 及原始欄位
+    fetch_twstock_shareholding_batch,           # (stock_ids, start, end, headers) → shareholders 欄
+    fetch_twstock_foreign_shareholding_batch,   # (stock_ids, start, end, headers) → 外資持股比率/股數
+    fetch_twstock_financials_batch,             # (stock_ids, headers) → 損益表 long format
+    fetch_twstock_balance_sheet_batch,          # (stock_ids, headers) → 資產負債表 long format
+    fetch_twstock_monthly_revenue_batch,        # (stock_ids, headers) → revenue, revenue_month, revenue_year
 )
 ```
+
+`fetch_twstock_foreign_shareholding_batch` 主要欄位：
+
+| 欄位 | 說明 |
+|---|---|
+| `ForeignInvestmentSharesRatio` | 外資持股比率（%） |
+| `ForeignInvestmentShares` | 外資持股股數 |
+| `ForeignInvestmentRemainRatio` | 外資剩餘可投資比率（%） |
+| `ForeignInvestmentRemainingShares` | 外資剩餘可投資股數 |
+| `NumberOfSharesIssued` | 已發行股數 |
 
 分點資料（非 batch，按 trader 維度）：
 - `fetch_twstock_trader_flows(trader_id, start, end, headers)` → MultiIndex (date, stock_id)，`net` 欄（買 - 賣股數）；trader_id 例如 `'9217'`（凱基-松山）

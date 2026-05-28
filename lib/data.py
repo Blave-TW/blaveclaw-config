@@ -730,6 +730,66 @@ def fetch_twstock_institutional_batch(stock_ids, start, end, headers):
     return results
 
 
+def _fetch_twstock_foreign_shareholding_raw(stock_id, start, end, headers):
+    end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
+    r = _retry_get(f'{BASE}/studio/market/twstock/foreign_shareholding/{stock_id}',
+                   headers=headers, params={'start': start, 'end': end_str}, timeout=60)
+    data = r.json().get('data', [])
+    if not data:
+        return pd.DataFrame()
+    df = pd.DataFrame(data)
+    df['date'] = pd.to_datetime(df['date'])
+    return df.set_index('date').sort_index()
+
+
+def fetch_twstock_foreign_shareholding_batch(stock_ids, start, end, headers):
+    """Batch fetch 台股外資持股表. Returns dict {stock_id: DataFrame}.
+    Key columns: ForeignInvestmentSharesRatio (持股比率%), ForeignInvestmentShares (持股股數),
+    ForeignInvestmentRemainRatio (剩餘可投資比率%), NumberOfSharesIssued (已發行股數)."""
+    results = {}
+    uncached = []
+
+    for sid in stock_ids:
+        path = _cache_path('twstock_foreign_sh', {'id': sid}, start)
+        if path.exists():
+            try:
+                results[sid] = _extend_cache(
+                    path,
+                    lambda s, e, _sid=sid: _fetch_twstock_foreign_shareholding_raw(_sid, s, e, headers),
+                    start, end,
+                )
+                continue
+            except Exception:
+                pass
+        uncached.append(sid)
+
+    for i in range(0, len(uncached), 50):
+        chunk = uncached[i:i + 50]
+        try:
+            params = {'stock_ids': ','.join(chunk)}
+            if start:
+                params['start'] = start
+            if end:
+                params['end'] = end
+            r = _retry_get(f'{BASE}/studio/market/twstock/batch/foreign_shareholding',
+                           headers=headers, params=params, timeout=120)
+            batch_data = r.json().get('data', {})
+            for sid, records in batch_data.items():
+                if not records:
+                    continue
+                df = pd.DataFrame(records)
+                df['date'] = pd.to_datetime(df['date'])
+                df = df.set_index('date').sort_index()
+                path = _cache_path('twstock_foreign_sh', {'id': sid}, start)
+                path.parent.mkdir(exist_ok=True)
+                df.to_parquet(path, compression='snappy')
+                results[sid] = df
+        except Exception as e:
+            print(f'  [batch] foreign_shareholding chunk {i//50 + 1} error: {e}')
+
+    return results
+
+
 # ── Taiwan futures data ───────────────────────────────────────────────────────
 
 _TW_FUTURES_CHUNK_DAYS = {'1d': 3650, '1m': 28, '5m': 28, '15m': 28, '30m': 28, '60m': 28}
