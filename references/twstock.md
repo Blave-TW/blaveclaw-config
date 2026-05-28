@@ -10,19 +10,10 @@ import requests
 r = requests.get('https://openapi.twse.com.tw/v1/opendata/t187ap03_L', timeout=15)
 
 # 全部上市普通股（排除 ETF / 權證）
-universe = [
-    item['公司代號'].strip()
-    for item in r.json()
-    if item['公司代號'].strip().isdigit() and len(item['公司代號'].strip()) == 4
-]
+universe = [item['公司代號'].strip() for item in r.json()]
 
 # 依產業別篩選（例如半導體 '20' + 電腦及周邊 '21'）
-tech = [
-    item['公司代號'].strip()
-    for item in r.json()
-    if item['產業別'] in ('20', '21') and item['公司代號'].strip().isdigit()
-        and len(item['公司代號'].strip()) == 4
-]
+tech = [item['公司代號'].strip() for item in r.json() if item['產業別'] in ('20', '21')]
 ```
 
 欄位：`公司代號`（需 `.strip()`）、`公司簡稱`、`產業別`、`上市日期`（YYYYMMDD）
