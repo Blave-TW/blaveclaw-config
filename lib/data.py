@@ -518,14 +518,14 @@ def _fetch_fundamental(prefix, endpoint, stock_id, headers):
 
 def fetch_twstock_financials(stock_id, headers):
     """台股季頻綜合損益表 (long format). index=date, columns: type, value, origin_name.
-    Key types: revenue, gross_profit, operating_income, net_income, eps.
+    Key types: Revenue, GrossProfit, OperatingIncome, IncomeAfterTaxes, EPS.
     Pivot: df.pivot_table(index='date', columns='type', values='value', aggfunc='last')"""
     return _fetch_fundamental('twstock_fin', 'financials', stock_id, headers)
 
 
 def fetch_twstock_balance_sheet(stock_id, headers):
     """台股季頻資產負債表 (long format). index=date, columns: type, value, origin_name.
-    Key types: total_assets, total_equity. ROE = net_income / total_equity."""
+    Key types: TotalAssets, Equity. ROE = IncomeAfterTaxes / Equity."""
     return _fetch_fundamental('twstock_bs', 'balance_sheet', stock_id, headers)
 
 

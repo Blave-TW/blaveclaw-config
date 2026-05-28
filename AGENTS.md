@@ -132,8 +132,8 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 - `fetch_twstock_price_adj(stock_id, start, end, headers)` → DataFrame with Open/Close
 - `fetch_twstock_institutional(stock_id, start, end, headers)` → DataFrame with foreign_net and raw fields
 - `fetch_twstock_trader_flows(trader_id, start, end, headers)` → long-format DataFrame indexed by (date, stock_id) with `net` column (buy - sell in shares); trader_id is the securities_trader_id e.g. `'9217'` for KGI Securities Songshan branch
-- `fetch_twstock_financials(stock_id, headers)` → quarterly income statement, long format (index=date, columns: type, value, origin_name). Key types: `revenue`, `gross_profit`, `operating_income`, `net_income`, `eps`. Cached 30 days.
-- `fetch_twstock_balance_sheet(stock_id, headers)` → quarterly balance sheet, same long format. Key types: `total_assets`, `total_equity`. Cached 30 days.
+- `fetch_twstock_financials(stock_id, headers)` → quarterly income statement, long format (index=date, columns: type, value, origin_name). Key types: `Revenue`, `GrossProfit`, `OperatingIncome`, `IncomeAfterTaxes`, `EPS`. Cached 30 days.
+- `fetch_twstock_balance_sheet(stock_id, headers)` → quarterly balance sheet, same long format. Key types: `TotalAssets`, `Equity`. ROE = `IncomeAfterTaxes / Equity`. Cached 30 days.
 - `fetch_twstock_monthly_revenue(stock_id, headers)` → monthly revenue (index=date, columns: revenue in NTD thousands, revenue_month, revenue_year). Cached 30 days.
 
 **財報資料 — 使用說明**
@@ -150,9 +150,9 @@ wide = fin.pivot_table(index='date', columns='type', values='value', aggfunc='la
 bs = fetch_twstock_balance_sheet(sid, hdrs).pivot_table(index='date', columns='type', values='value', aggfunc='last')
 fin = fetch_twstock_financials(sid, hdrs).pivot_table(index='date', columns='type', values='value', aggfunc='last')
 
-roe = fin['net_income'] / bs['total_equity']              # ROE
-gross_margin = fin['gross_profit'] / fin['revenue']       # 毛利率
-eps_yoy = fin['eps'].pct_change(4)                        # EPS YoY（季頻 shift 4 期）
+roe = fin['IncomeAfterTaxes'] / bs['Equity']              # ROE
+gross_margin = fin['GrossProfit'] / fin['Revenue']        # 毛利率
+eps_yoy = fin['EPS'].pct_change(4)                        # EPS YoY（季頻 shift 4 期）
 rev = fetch_twstock_monthly_revenue(sid, hdrs)
 rev_yoy = rev['revenue'].pct_change(12)                   # 月營收 YoY
 ```
