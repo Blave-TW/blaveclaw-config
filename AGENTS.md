@@ -132,6 +132,60 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 - `fetch_twstock_price_adj(stock_id, start, end, headers)` → DataFrame with Open/Close
 - `fetch_twstock_institutional(stock_id, start, end, headers)` → DataFrame with foreign_net and raw fields
 - `fetch_twstock_trader_flows(trader_id, start, end, headers)` → long-format DataFrame indexed by (date, stock_id) with `net` column (buy - sell in shares); trader_id is the securities_trader_id e.g. `'9217'` for KGI Securities Songshan branch
+- `fetch_twstock_financials(stock_id, headers)` → quarterly income statement, long format (index=date, columns: type, value, origin_name). Key types: `revenue`, `gross_profit`, `operating_income`, `net_income`, `eps`. Cached 30 days.
+- `fetch_twstock_balance_sheet(stock_id, headers)` → quarterly balance sheet, same long format. Key types: `total_assets`, `total_equity`. Cached 30 days.
+- `fetch_twstock_monthly_revenue(stock_id, headers)` → monthly revenue (index=date, columns: revenue in NTD thousands, revenue_month, revenue_year). Cached 30 days.
+
+**財報資料 — 使用說明**
+
+資料為 long format（每個財務項目各一行），轉寬表格：
+```python
+fin = fetch_twstock_financials(sid, hdrs)
+wide = fin.pivot_table(index='date', columns='type', values='value', aggfunc='last')
+# wide.columns → ['eps', 'gross_profit', 'net_income', 'operating_income', 'revenue', ...]
+```
+
+常用因子計算（先 pivot balance_sheet 和 financials）：
+```python
+bs = fetch_twstock_balance_sheet(sid, hdrs).pivot_table(index='date', columns='type', values='value', aggfunc='last')
+fin = fetch_twstock_financials(sid, hdrs).pivot_table(index='date', columns='type', values='value', aggfunc='last')
+
+roe = fin['net_income'] / bs['total_equity']              # ROE
+gross_margin = fin['gross_profit'] / fin['revenue']       # 毛利率
+eps_yoy = fin['eps'].pct_change(4)                        # EPS YoY（季頻 shift 4 期）
+rev = fetch_twstock_monthly_revenue(sid, hdrs)
+rev_yoy = rev['revenue'].pct_change(12)                   # 月營收 YoY
+```
+
+**Lookahead bias — 財報可用日期**（rebalance 時確保用已發布的季報）：
+
+| 季別 | 財報公告截止日 | 可用日期 |
+|------|-------------|---------|
+| Q1（1–3月） | 5/15 | 5/16 起 |
+| Q2（4–6月） | 8/14 | 8/15 起 |
+| Q3（7–9月） | 11/14 | 11/15 起 |
+| Q4（10–12月） | 翌年 3/31 | 翌年 4/1 起 |
+
+**Batch 函式（大型股票池必用，避免 rate limit）**
+
+單次最多 50 支，超過自動切塊，回傳 `dict {stock_id: DataFrame}`：
+```python
+from lib.data import (
+    fetch_twstock_price_adj_batch,
+    fetch_twstock_institutional_batch,
+    fetch_twstock_financials_batch,
+    fetch_twstock_balance_sheet_batch,
+    fetch_twstock_monthly_revenue_batch,
+)
+
+prices      = fetch_twstock_price_adj_batch(universe, START, END, hdrs)
+inst        = fetch_twstock_institutional_batch(universe, START, END, hdrs)
+financials  = fetch_twstock_financials_batch(universe, hdrs)
+balance_sheets = fetch_twstock_balance_sheet_batch(universe, hdrs)
+revenues    = fetch_twstock_monthly_revenue_batch(universe, hdrs)
+```
+已 cache 的股票直接從 local parquet 讀取，不呼叫 API；未 cache 的批次送給 Blave batch endpoint（server-side 平行處理，命中 Redis 則直接返回）。**大型 universe（>50 支）一律用 batch 版，不要 ThreadPoolExecutor + 單股 fetch。**
+
 - `fetch_twfutures_ohlcv(symbol, schema, start, end, headers)` → Taiwan futures OHLCV DataFrame (Open/High/Low/Close/Volume); symbol: `'TXF'`; schema: `'1d'`/`'1m'`/`'5m'`/`'15m'`/`'30m'`/`'60m'`; Volume in contracts; data from 2020-03-22
 - `txf_settlement_mask(index)` → boolean Series, True on the last 1-min bar before TXF monthly settlement (3rd Wednesday of each month, 13:30 TWN). Use with intraday TXF strategies: `settle = txf_settlement_mask(df.index); signal[settle] = 0.0; return signal, settle`
 

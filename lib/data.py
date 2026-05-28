@@ -475,6 +475,213 @@ def fetch_twstock_broker_net(stock_id, broker_id, start, end, headers,
     return result.set_index('date').sort_index()
 
 
+# ── Taiwan fundamental data (quarterly / monthly) ────────────────────────────
+
+def _fundamental_cache_path(prefix, stock_id):
+    return _CACHE_DIR / f'{prefix}_{stock_id}.parquet'
+
+
+def _load_fundamental_cache(path, max_age_days=30):
+    if not path.exists():
+        return None
+    if (time.time() - path.stat().st_mtime) / 86400 > max_age_days:
+        return None
+    return pd.read_parquet(path)
+
+
+def _save_fundamental_cache(path, df):
+    path.parent.mkdir(exist_ok=True)
+    df.to_parquet(path, compression='snappy')
+
+
+def _fetch_twstock_fundamental_raw(endpoint, stock_id, headers):
+    r = _retry_get(f'{BASE}/studio/market/twstock/{endpoint}/{stock_id}',
+                   headers=headers, timeout=60)
+    data = r.json().get('data', [])
+    if not data:
+        return pd.DataFrame()
+    df = pd.DataFrame(data)
+    df['date'] = pd.to_datetime(df['date'])
+    return df.set_index('date').sort_index()
+
+
+def _fetch_fundamental(prefix, endpoint, stock_id, headers):
+    path = _fundamental_cache_path(prefix, stock_id)
+    df = _load_fundamental_cache(path)
+    if df is not None:
+        return df
+    df = _fetch_twstock_fundamental_raw(endpoint, stock_id, headers)
+    if not df.empty:
+        _save_fundamental_cache(path, df)
+    return df
+
+
+def fetch_twstock_financials(stock_id, headers):
+    """台股季頻綜合損益表 (long format). index=date, columns: type, value, origin_name.
+    Key types: revenue, gross_profit, operating_income, net_income, eps.
+    Pivot: df.pivot_table(index='date', columns='type', values='value', aggfunc='last')"""
+    return _fetch_fundamental('twstock_fin', 'financials', stock_id, headers)
+
+
+def fetch_twstock_balance_sheet(stock_id, headers):
+    """台股季頻資產負債表 (long format). index=date, columns: type, value, origin_name.
+    Key types: total_assets, total_equity. ROE = net_income / total_equity."""
+    return _fetch_fundamental('twstock_bs', 'balance_sheet', stock_id, headers)
+
+
+def fetch_twstock_monthly_revenue(stock_id, headers):
+    """台股月營收. index=date, columns: revenue (NTD thousands), revenue_month, revenue_year.
+    YoY = (rev - rev_same_month_last_year) / abs(rev_same_month_last_year)."""
+    return _fetch_fundamental('twstock_rev', 'monthly_revenue', stock_id, headers)
+
+
+def _fetch_fundamental_batch(prefix, endpoint, stock_ids, headers):
+    """Batch fetch fundamental data. Returns dict {stock_id: DataFrame}.
+    Uses cache first; fetches uncached stocks in chunks of 50 via batch API."""
+    results = {}
+    uncached = []
+
+    for sid in stock_ids:
+        path = _fundamental_cache_path(prefix, sid)
+        df = _load_fundamental_cache(path)
+        if df is not None:
+            results[sid] = df
+        else:
+            uncached.append(sid)
+
+    for i in range(0, len(uncached), 50):
+        chunk = uncached[i:i + 50]
+        try:
+            r = _retry_get(f'{BASE}/studio/market/twstock/batch/{endpoint}',
+                           headers=headers,
+                           params={'stock_ids': ','.join(chunk)},
+                           timeout=120)
+            batch_data = r.json().get('data', {})
+            for sid, records in batch_data.items():
+                if not records:
+                    continue
+                df = pd.DataFrame(records)
+                df['date'] = pd.to_datetime(df['date'])
+                df = df.set_index('date').sort_index()
+                _save_fundamental_cache(_fundamental_cache_path(prefix, sid), df)
+                results[sid] = df
+        except Exception as e:
+            print(f'  [batch] {endpoint} chunk {i//50 + 1} error: {e}')
+
+    return results
+
+
+def fetch_twstock_financials_batch(stock_ids, headers):
+    """Batch fetch 台股季頻綜合損益表. Returns dict {stock_id: DataFrame}."""
+    return _fetch_fundamental_batch('twstock_fin', 'financials', stock_ids, headers)
+
+
+def fetch_twstock_balance_sheet_batch(stock_ids, headers):
+    """Batch fetch 台股季頻資產負債表. Returns dict {stock_id: DataFrame}."""
+    return _fetch_fundamental_batch('twstock_bs', 'balance_sheet', stock_ids, headers)
+
+
+def fetch_twstock_monthly_revenue_batch(stock_ids, headers):
+    """Batch fetch 台股月營收. Returns dict {stock_id: DataFrame}."""
+    return _fetch_fundamental_batch('twstock_rev', 'monthly_revenue', stock_ids, headers)
+
+
+def fetch_twstock_price_adj_batch(stock_ids, start, end, headers):
+    """Batch fetch 台股向後調整日K. Returns dict {stock_id: DataFrame(Open, Close)}."""
+    results = {}
+    uncached = []
+
+    for sid in stock_ids:
+        path = _cache_path('twstock_price', {'id': sid}, start)
+        if path.exists():
+            try:
+                results[sid] = _extend_cache(
+                    path,
+                    lambda s, e, _sid=sid: _fetch_twstock_price_raw(_sid, s, e, headers),
+                    start, end,
+                )
+                continue
+            except Exception:
+                pass
+        uncached.append(sid)
+
+    for i in range(0, len(uncached), 50):
+        chunk = uncached[i:i + 50]
+        try:
+            params = {'stock_ids': ','.join(chunk)}
+            if start:
+                params['start'] = start
+            if end:
+                params['end'] = end
+            r = _retry_get(f'{BASE}/studio/market/twstock/batch/price_adj',
+                           headers=headers, params=params, timeout=120)
+            batch_data = r.json().get('data', {})
+            for sid, records in batch_data.items():
+                if not records:
+                    continue
+                df = pd.DataFrame(records)
+                df['date'] = pd.to_datetime(df['date'])
+                df = df.set_index('date').sort_index()[['open', 'close']].rename(
+                    columns={'open': 'Open', 'close': 'Close'}).astype(float)
+                df = df.replace(0, float('nan')).ffill()
+                path = _cache_path('twstock_price', {'id': sid}, start)
+                path.parent.mkdir(exist_ok=True)
+                df.to_parquet(path, compression='snappy')
+                results[sid] = df
+        except Exception as e:
+            print(f'  [batch] price_adj chunk {i//50 + 1} error: {e}')
+
+    return results
+
+
+def fetch_twstock_institutional_batch(stock_ids, start, end, headers):
+    """Batch fetch 台股三大法人. Returns dict {stock_id: DataFrame(foreign_net, ...)}."""
+    results = {}
+    uncached = []
+
+    for sid in stock_ids:
+        path = _cache_path('twstock_inst', {'id': sid}, start)
+        if path.exists():
+            try:
+                results[sid] = _extend_cache(
+                    path,
+                    lambda s, e, _sid=sid: _fetch_twstock_inst_raw(_sid, s, e, headers),
+                    start, end,
+                )
+                continue
+            except Exception:
+                pass
+        uncached.append(sid)
+
+    for i in range(0, len(uncached), 50):
+        chunk = uncached[i:i + 50]
+        try:
+            params = {'stock_ids': ','.join(chunk)}
+            if start:
+                params['start'] = start
+            if end:
+                params['end'] = end
+            r = _retry_get(f'{BASE}/studio/market/twstock/batch/institutional',
+                           headers=headers, params=params, timeout=120)
+            batch_data = r.json().get('data', {})
+            for sid, records in batch_data.items():
+                if not records:
+                    continue
+                df = pd.DataFrame(records)
+                df['date'] = pd.to_datetime(df['date'])
+                df = df.set_index('date').sort_index()
+                df['foreign_net'] = df['foreign_buy'] - df['foreign_sell']
+                df = df.fillna(0)
+                path = _cache_path('twstock_inst', {'id': sid}, start)
+                path.parent.mkdir(exist_ok=True)
+                df.to_parquet(path, compression='snappy')
+                results[sid] = df
+        except Exception as e:
+            print(f'  [batch] institutional chunk {i//50 + 1} error: {e}')
+
+    return results
+
+
 # ── Taiwan futures data ───────────────────────────────────────────────────────
 
 _TW_FUTURES_CHUNK_DAYS = {'1d': 3650, '1m': 28, '5m': 28, '15m': 28, '30m': 28, '60m': 28}
