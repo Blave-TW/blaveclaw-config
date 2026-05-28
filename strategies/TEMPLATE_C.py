@@ -89,6 +89,8 @@ def fetch_data(hdrs):
             print(f"  skip {sid}: {e}")
 
     close_df = pd.DataFrame(closes).sort_index().dropna(how='all')
+    if close_df.empty:
+        raise RuntimeError("fetch_data: no price data — check UNIVERSE, credentials, and START/END dates")
     open_df  = pd.DataFrame(opens).reindex(close_df.index)
     return close_df, open_df   # add more elements if needed (e.g. signal_df)
 
