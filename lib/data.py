@@ -586,6 +586,54 @@ def fetch_twstock_monthly_revenue_batch(stock_ids, headers):
     return _fetch_fundamental_batch('twstock_rev', 'monthly_revenue', stock_ids, headers)
 
 
+def fetch_twstock_shareholding_batch(stock_ids, start, end, headers):
+    """Batch fetch 台股週頻股東人數. Returns dict {stock_id: DataFrame(shareholders)}."""
+    results = {}
+    uncached = []
+
+    for sid in stock_ids:
+        path = _cache_path('twstock_shareholding', {'id': sid}, start)
+        if path.exists():
+            try:
+                results[sid] = _extend_cache(
+                    path,
+                    lambda s, e, _sid=sid: _fetch_twstock_shareholding_raw(_sid, s, e, headers),
+                    start, end,
+                )
+                continue
+            except Exception:
+                pass
+        uncached.append(sid)
+
+    for i in range(0, len(uncached), 50):
+        chunk = uncached[i:i + 50]
+        try:
+            params = {'stock_ids': ','.join(chunk)}
+            if start:
+                params['start'] = start
+            if end:
+                params['end'] = end
+            r = _retry_get(f'{BASE}/studio/market/twstock/batch/shareholding',
+                           headers=headers, params=params, timeout=120)
+            batch_data = r.json().get('data', {})
+            for sid, records in batch_data.items():
+                if not records:
+                    continue
+                df = pd.DataFrame(records)
+                df['date'] = pd.to_datetime(df['date'])
+                df = df.set_index('date').sort_index()
+                total = df[df['level'] == 'total'][['people']].rename(columns={'people': 'shareholders'}).astype(float)
+                total = total[~total.index.duplicated(keep='last')]
+                path = _cache_path('twstock_shareholding', {'id': sid}, start)
+                path.parent.mkdir(exist_ok=True)
+                total.to_parquet(path, compression='snappy')
+                results[sid] = total
+        except Exception as e:
+            print(f'  [batch] shareholding chunk {i//50 + 1} error: {e}')
+
+    return results
+
+
 def fetch_twstock_price_adj_batch(stock_ids, start, end, headers):
     """Batch fetch 台股向後調整日K. Returns dict {stock_id: DataFrame(Open, Close)}."""
     results = {}
