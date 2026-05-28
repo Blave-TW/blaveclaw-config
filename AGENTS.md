@@ -39,7 +39,7 @@ Before writing any strategy code, classify the strategy:
 - Read `references/strategy-code.md` and use `strategies/TEMPLATE_A.py`
 - If the strategy uses any Blave alpha indicator (taker intensity, holder concentration, liquidation, whale hunter, etc.), read the **Alpha Indicators** section in `references/strategy-code.md` for the canonical fetch pattern: use `lib.data` fetchers inside `fetch_data(hdrs)`, join to df index, ffill. Do NOT write your own fetch logic inline.
 - blave-quant-skill provides data reference only — always structure the full strategy as TEMPLATE_A.py
-- `END` defaults to `None` (latest data) unless the user explicitly specifies an end date
+- `END`: in backtest mode, hardcode a fixed past date (e.g. `"2026-05-21"`, roughly last week) — **never use a dynamic expression**. A fixed date guarantees cache hits on every re-run; `end=None` always triggers a delta API call. Update the date manually when fresher data is needed. In live mode, set `END = None`.
 - Write three functions:
   - **`_add_indicators(df, param1=DEFAULT1, ...)`**: adds indicator columns to a copy of df; params default to module-level constants
   - **`fetch_data(hdrs) → df`**: fetches kline + auxiliary data (realized_vol, alpha indicators). Does NOT call `_add_indicators` — `compute_signals` handles that
@@ -76,6 +76,7 @@ Examples: foreign institutional z-score stock selection, multi-factor rotation, 
   - Optional 3rd element `exec_at_close`: bool array `(n_days,)` for any bars that execute at close instead of next open
 - **Backtest REQUIRED** before going live
 - Still require explicit user confirmation before deploying or setting up cron jobs
+- `END`: in backtest mode, hardcode a fixed past date (e.g. `"2026-05-21"`, roughly last week) — **never use a dynamic expression**. A fixed date guarantees cache hits on every re-run. In live mode, set `END = None`.
 - **Candidate pool — NO lookahead bias**: the universe of stocks passed to `fetch_data` must be derived only from information available at the start of the backtest. NEVER filter candidates using full-period aggregates (e.g. `nlargest(N)` on cumulative net buy over the entire history) — that leaks future data. Instead use ALL stocks that ever appear in the data source (e.g. all stock_ids in trader flows), and let `compute_signals` do the per-rebalance ranking using only the lookback window available at that date.
 
 **Decision tree — classify BEFORE writing any code:**
