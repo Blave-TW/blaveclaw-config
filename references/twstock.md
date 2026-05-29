@@ -20,6 +20,40 @@ tech = [item['公司代號'].strip() for item in r.json() if item['產業別'] i
 
 產業別代碼速查：`20` 半導體、`21` 電腦及周邊、`22` 光電、`23` 通信網路、`24` 電子零組件、`25` 電子通路、`26` 資訊服務、`27` 其他電子、`33` 金融保險、`31` 航運
 
+**⚠️ Universe 抽樣規則 — 必須分散產業**
+
+台股代碼按產業群組排列（1xxx 水泥/食品、2xxx 紡織/化工/電子、9xxx 其他），直接取前 N 支會集中在少數產業。**回測 universe 必須依產業抽樣**，不得直接用 `[:100]` 截斷：
+
+```python
+import random, collections
+
+r = requests.get('https://openapi.twse.com.tw/v1/opendata/t187ap03_L', timeout=15)
+stocks = r.json()
+
+# 依產業別分組
+by_sector = collections.defaultdict(list)
+for item in stocks:
+    by_sector[item['產業別']].append(item['公司代號'].strip())
+
+# 每個產業等比例抽樣，合計 N 支
+def sample_by_sector(by_sector, total=100, seed=42):
+    rng = random.Random(seed)
+    n_sectors = len(by_sector)
+    per_sector = max(1, total // n_sectors)
+    result = []
+    for sids in by_sector.values():
+        result.extend(rng.sample(sids, min(per_sector, len(sids))))
+    # 若不足 total，從各產業再補
+    all_ids = [s for sids in by_sector.values() for s in sids if s not in result]
+    rng.shuffle(all_ids)
+    result.extend(all_ids[:total - len(result)])
+    return result[:total]
+
+universe = sample_by_sector(by_sector, total=100)
+```
+
+固定 `seed` 確保回測可重現。若用戶有指定產業，改用產業篩選後再抽樣。
+
 ---
 
 ## Batch 資料函式

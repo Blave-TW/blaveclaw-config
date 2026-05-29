@@ -77,6 +77,7 @@ Examples: foreign institutional z-score stock selection, multi-factor rotation, 
 - **Backtest REQUIRED** before going live
 - Still require explicit user confirmation before deploying or setting up cron jobs
 - `END`: in backtest mode, hardcode a fixed past date (e.g. `"2026-05-21"`, roughly last week) — **never use a dynamic expression**. A fixed date guarantees cache hits on every re-run. In live mode, set `END = None`.
+- **Taiwan stock universe must be sampled by sector** — never take `[:N]` from the raw list (codes are ordered by sector, so a head-slice concentrates in cement/food/textile). Use the sector-stratified sampling helper in `references/twstock.md`.
 - **Candidate pool — NO lookahead bias**: the universe of stocks passed to `fetch_data` must be derived only from information available at the start of the backtest. NEVER filter candidates using full-period aggregates (e.g. `nlargest(N)` on cumulative net buy over the entire history) — that leaks future data. Instead use ALL stocks that ever appear in the data source (e.g. all stock_ids in trader flows), and let `compute_signals` do the per-rebalance ranking using only the lookback window available at that date.
 
 **Decision tree — classify BEFORE writing any code:**
