@@ -209,6 +209,21 @@ Skill examples show data-fetch patterns only — integrate them into TEMPLATE_A.
 
 CRITICAL: Read the correct reference before writing any strategy code (see Strategy Types above).
 
+## Charts (matplotlib)
+
+**Always use English for all text in matplotlib charts** — titles, axis labels, legends, annotations. Chinese characters render as garbled boxes (□□□) on the server because the default font has no CJK glyphs.
+
+```python
+# ✓ correct
+plt.title("Cumulative Return")
+plt.xlabel("Date")
+plt.ylabel("Return (%)")
+plt.legend(["Strategy", "Benchmark"])
+
+# ✗ wrong — will show □□□
+plt.title("累積報酬")
+```
+
 ## Sending Images
 
 When you generate charts or images, you MUST send them to Telegram:
