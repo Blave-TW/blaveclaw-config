@@ -100,6 +100,26 @@ def fetch_twstock_kbar(stock_id: str, start: str, end: str, headers: dict) -> pd
 
 ---
 
+## PE / PB / 殖利率
+
+```python
+import requests
+
+def fetch_twstock_per(stock_id: str, start: str, end: str, headers: dict) -> pd.DataFrame:
+    """欄位：date, dividend_yield, PER, PBR。資料從 2005-10-01 起。"""
+    r = requests.get(
+        f"https://api.blave.org/studio/market/twstock/per/{stock_id}",
+        params={"start": start, "end": end},
+        headers=headers,
+        timeout=60,
+    )
+    r.raise_for_status()
+    data = r.json().get("data", [])
+    return pd.DataFrame(data).set_index("date") if data else pd.DataFrame()
+```
+
+---
+
 ## Batch 資料函式
 
 所有台股資料一律用 batch 函式（即使只有 1 支），回傳 `dict {stock_id: DataFrame}`，超過 50 支自動切塊：
