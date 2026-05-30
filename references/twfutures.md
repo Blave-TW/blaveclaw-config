@@ -4,6 +4,36 @@
 
 ---
 
+## 期貨三大法人（TaiwanFuturesInstitutionalInvestors）
+
+每天 3 筆：自營商、投信、外資。
+
+```python
+def fetch_twfutures_institutional(futures_id: str, start: str, end: str, headers: dict) -> pd.DataFrame:
+    """欄位：date, institutional_investors, long/short_deal_volume/amount, long/short_open_interest_balance_volume/amount"""
+    r = requests.get(
+        f"https://api.blave.org/studio/market/twfutures/institutional/{futures_id}",
+        params={"start": start, "end": end},
+        headers=headers,
+        timeout=60,
+    )
+    r.raise_for_status()
+    data = r.json().get("data", [])
+    return pd.DataFrame(data) if data else pd.DataFrame()
+```
+
+常用分析：
+```python
+df = fetch_twfutures_institutional("TX", "2025-01-01", "2025-05-30", hdrs)
+
+# 外資淨未平倉（多 - 空）
+foreign = df[df["institutional_investors"] == "外資"].copy()
+foreign["net_oi"] = foreign["long_open_interest_balance_volume"] - foreign["short_open_interest_balance_volume"]
+foreign_net = foreign.set_index("date")["net_oi"]
+```
+
+---
+
 ## 期貨日行情（TaiwanFuturesDaily）
 
 每天多筆：所有合約月份 × trading_session（`position` 盤中 / `after_market` 盤後）。
