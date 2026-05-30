@@ -1,5 +1,7 @@
 # 台股資料 — Taiwan Stock Data
 
+> 台股資料（日K、三大法人、融資融券、股權分級、財報、月營收、分點買賣超）由 [FinMind](https://finmindtrade.com) 提供。
+
 ## 股票池（Universe）建立
 
 使用 TWSE 公開 API（無需認證）：
