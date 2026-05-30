@@ -329,10 +329,34 @@ def _fetch_twstock_price_raw(stock_id, start, end, headers):
 
 
 def fetch_twstock_price_adj(stock_id, start, end, headers):
-    """台股向後調整日K. Returns DataFrame with Open/Close columns."""
+    """台股向後調整日K（除權息還原價）. Returns DataFrame with Open/Close columns.
+    Use for backtesting — prices are dividend-adjusted so returns are comparable across time."""
     return _extend_cache(
         _cache_path('twstock_price', {'id': stock_id}, start),
         lambda s, e: _fetch_twstock_price_raw(stock_id, s, e, headers),
+        start, end,
+    )
+
+
+def _fetch_twstock_price_nonadj_raw(stock_id, start, end, headers):
+    end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
+    r = _retry_get(f'{BASE}/studio/market/twstock/price/{stock_id}',
+                   headers=headers, params={'start': start, 'end': end_str}, timeout=60)
+    df = pd.DataFrame(r.json()['data'])
+    df['date'] = pd.to_datetime(df['date'])
+    cols = [c for c in ['open', 'high', 'low', 'close', 'volume'] if c in df.columns]
+    df = df.set_index('date').sort_index()[cols].rename(
+        columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}).astype(float)
+    return df.replace(0, float('nan')).ffill()
+
+
+def fetch_twstock_price(stock_id, start, end, headers):
+    """台股原始日K（未除權息）. Returns DataFrame with Open/High/Low/Close/Volume columns.
+    Use for visualization/charting — matches prices users see on broker apps.
+    Do NOT use for backtesting (dividends cause artificial price drops that distort signals)."""
+    return _extend_cache(
+        _cache_path('twstock_price_nonadj', {'id': stock_id}, start),
+        lambda s, e: _fetch_twstock_price_nonadj_raw(stock_id, s, e, headers),
         start, end,
     )
 

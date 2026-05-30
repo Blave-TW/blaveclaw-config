@@ -131,6 +131,11 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 - `fetch_capital_shortage(interval, start, end, headers)` → DataFrame with `alpha` (no symbol)
 - `fetch_market_sentiment(symbol, interval, start, end, headers)` → DataFrame with `alpha`
 - `fetch_top_trader_exposure(interval, start, end, headers)` → DataFrame with `alpha` (BTC only, no symbol)
+**Taiwan stock price — raw vs adjusted (critical distinction):**
+- `fetch_twstock_price(sid, start, end, headers)` → Open/High/Low/Close/Volume, **actual market prices**. Use when the user asks to plot or view a stock's trend — matches what they see on broker apps.
+- `fetch_twstock_price_adj(sid, start, end, headers)` → Open/Close, **dividend-adjusted backward prices**. Use for backtesting only — ensures returns are comparable across ex-dividend dates.
+- Never use `fetch_twstock_price_adj` just to draw a chart; the adjusted prices look different from real market prices and will confuse users.
+
 Taiwan stock data (universe, batch functions, fundamental factors, lookahead-bias table) — **`references/twstock.md`**
 
 - `fetch_twfutures_ohlcv(symbol, schema, start, end, headers)` → Taiwan futures OHLCV DataFrame (Open/High/Low/Close/Volume); symbol: `'TXF'`; schema: `'1d'`/`'1m'`/`'5m'`/`'15m'`/`'30m'`/`'60m'`; Volume in contracts; data from 2020-03-22

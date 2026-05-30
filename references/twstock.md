@@ -58,6 +58,48 @@ universe = sample_by_sector(by_sector, total=100)
 
 ---
 
+## 台股日K — 原始 vs 還原價
+
+| 函式 | endpoint | 何時使用 |
+|---|---|---|
+| `fetch_twstock_price(sid, start, end, hdrs)` | `/twstock/price/` | **畫圖、走勢查詢** — 原始市價，符合用戶在 app 看到的價格；欄位 Open/High/Low/Close/Volume |
+| `fetch_twstock_price_adj(sid, start, end, hdrs)` | `/twstock/price_adj/` | **回測** — 向後除權息還原價，歷史報酬可比較；欄位 Open/Close |
+
+> 除權息後原始價格會向下跳空，還原價則平滑消除跳空，適合計算指標與回報。  
+> 用戶問「台積電最近走勢怎樣」→ `fetch_twstock_price`；要跑 SMA 回測 → `fetch_twstock_price_adj`。
+
+---
+
+## 台股分K（1分鐘 OHLCV）
+
+```python
+import requests
+
+def fetch_twstock_kbar(stock_id: str, start: str, end: str, headers: dict) -> pd.DataFrame:
+    """最多 31 天，資料從 2019-01-01 起。欄位：date, minute, open, high, low, close, volume"""
+    r = requests.get(
+        f"https://api.blave.org/studio/market/twstock/kbar/{stock_id}",
+        params={"start": start, "end": end},
+        headers=headers,
+        timeout=60,
+    )
+    r.raise_for_status()
+    data = r.json().get("data", [])
+    if not data:
+        return pd.DataFrame()
+    df = pd.DataFrame(data)
+    df["datetime"] = pd.to_datetime(df["date"] + " " + df["minute"])
+    return df.set_index("datetime").sort_index()
+```
+
+**注意事項：**
+- `minute` 格式為 `HH:MM:SS`（例如 `09:00:00`）
+- 一天約 266 筆（09:00–13:25，每分鐘一筆）
+- 非交易日（週末、假日）自動略過，不返回資料
+- 超過 31 天會回 400 錯誤；長期回測需分段呼叫
+
+---
+
 ## Batch 資料函式
 
 所有台股資料一律用 batch 函式（即使只有 1 支），回傳 `dict {stock_id: DataFrame}`，超過 50 支自動切塊：
