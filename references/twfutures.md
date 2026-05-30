@@ -4,6 +4,41 @@
 
 ---
 
+## 期貨大額交易人（TaiwanFuturesOpenInterestLargeTraders）
+
+每天 3 筆：`contract_type` = week（當週到期）、近月（如 202505）、all（全部合約）。
+
+```python
+def fetch_twfutures_large_traders(futures_id: str, start: str, end: str, headers: dict) -> pd.DataFrame:
+    """欄位：date, futures_id, name, contract_type, buy/sell_top5/top10_trader_open_interest(_per), market_open_interest, buy/sell_top5/top10_specific_open_interest(_per)"""
+    r = requests.get(
+        f"https://api.blave.org/studio/market/twfutures/large_traders/{futures_id}",
+        params={"start": start, "end": end},
+        headers=headers,
+        timeout=60,
+    )
+    r.raise_for_status()
+    data = r.json().get("data", [])
+    return pd.DataFrame(data) if data else pd.DataFrame()
+```
+
+常用分析：
+```python
+df = fetch_twfutures_large_traders("TX", "2025-01-01", "2025-05-30", hdrs)
+
+# 近月合約大戶買賣超（top5 多 - 空）
+front = df[df["contract_type"].str.len() == 6]  # 202505 格式
+front["net_top5"] = front["buy_top5_trader_open_interest"] - front["sell_top5_trader_open_interest"]
+net_series = front.set_index("date")["net_top5"]
+
+# 大戶持倉比例（all contracts）
+all_c = df[df["contract_type"] == "all"].set_index("date")
+buy_per = all_c["buy_top10_trader_open_interest_per"]
+sell_per = all_c["sell_top10_trader_open_interest_per"]
+```
+
+---
+
 ## 選擇權三大法人（TaiwanOptionInstitutionalInvestors）
 
 每天 6 筆：3 法人 × 買權/賣權。`option_id` 通常為 `TXO`。
