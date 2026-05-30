@@ -120,6 +120,24 @@ def fetch_twstock_news(stock_id: str, start: str, end: str, headers: dict) -> pd
 
 ---
 
+## 市值
+
+```python
+def fetch_twstock_market_value(stock_id: str, start: str, end: str, headers: dict) -> pd.DataFrame:
+    """欄位：date, market_value（元，NTD）。資料從 2004-01-01 起。"""
+    r = requests.get(
+        f"https://api.blave.org/studio/market/twstock/market_value/{stock_id}",
+        params={"start": start, "end": end},
+        headers=headers,
+        timeout=60,
+    )
+    r.raise_for_status()
+    data = r.json().get("data", [])
+    return pd.DataFrame(data).set_index("date") if data else pd.DataFrame()
+```
+
+---
+
 ## 八大行庫買賣超
 
 每天 8 筆（一家銀行一筆）。FinMind 不支援單股查詢，後台會拉整天全市場資料再 filter，**最多 31 天**。
