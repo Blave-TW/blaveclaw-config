@@ -325,3 +325,103 @@ def plot_pnl_portfolio(pf_ret, close_df, title='Portfolio PnL', output_path='/tm
     plt.close()
     print(f'Chart saved: {output_path}')
     return output_path
+
+
+def plot_candlestick(df, title='走勢圖', output_path='/tmp/candlestick.png',
+                     n_xticks=10, extra_lines=None):
+    """
+    Candlestick + volume chart using integer index so all bar widths are in the same unit.
+
+    df must have columns: Open, High, Low, Close, Volume (case-sensitive).
+    extra_lines: list of dicts [{'data': array, 'label': str, 'color': str}] — overlaid on price panel.
+    """
+    xs      = np.arange(len(df))
+    opens   = df['Open'].values
+    highs   = df['High'].values
+    lows    = df['Low'].values
+    closes  = df['Close'].values
+    volumes = df['Volume'].values if 'Volume' in df.columns else None
+
+    up_mask   = closes >= opens
+    up_color  = '#26a69a'
+    dn_color  = '#ef5350'
+
+    # minimum visible size = 1.5%/0.8% of full y-range → every candle readable regardless of zoom
+    y_range    = float(highs.max() - lows.min()) or 1.0
+    min_shadow = y_range * 0.015
+    min_body   = y_range * 0.008
+
+    n_panels       = 2 if volumes is not None else 1
+    height_ratios  = [3, 1] if n_panels == 2 else [1]
+    fig, axes = plt.subplots(n_panels, 1, figsize=(14, 6 + 2 * (n_panels - 1)),
+                              sharex=True, gridspec_kw={'height_ratios': height_ratios})
+    if n_panels == 1:
+        axes = [axes]
+    ax_price = axes[0]
+
+    locked = (highs == lows)
+    line_h = y_range * 0.002  # 一字線高度
+
+    # shadows: locked → skip; up-day → pin top=high; down-day → pin bottom=low
+    raw_shadow     = highs - lows
+    shadow_heights = np.maximum(raw_shadow, min_shadow)
+    shadow_bottoms = np.where(up_mask, highs - shadow_heights, lows)
+    shadow_colors  = np.where(up_mask, up_color, dn_color)
+    for i in xs:
+        if locked[i]:
+            continue
+        ax_price.bar(i, shadow_heights[i], bottom=shadow_bottoms[i],
+                     width=0.08, color=shadow_colors[i], linewidth=0)
+
+    # bodies: locked → thin 一字線 centered on price; up-day → pin top=close; down-day → pin bottom=close
+    raw_body     = np.abs(closes - opens)
+    body_heights = np.maximum(raw_body, min_body)
+    body_bottoms = np.where(up_mask, closes - body_heights, closes)
+    body_colors  = np.where(up_mask, up_color, dn_color)
+    for i in xs:
+        if locked[i]:
+            ax_price.bar(i, line_h, bottom=closes[i] - line_h / 2,
+                         width=0.6, color=body_colors[i], linewidth=0)
+        else:
+            ax_price.bar(i, body_heights[i], bottom=body_bottoms[i],
+                         width=0.4, color=body_colors[i], linewidth=0)
+
+    # optional overlay lines (e.g. MA)
+    for line in (extra_lines or []):
+        ax_price.plot(xs, line['data'], color=line.get('color', '#FF9800'),
+                      lw=1, label=line.get('label', ''), alpha=0.85)
+    if extra_lines:
+        ax_price.legend(fontsize=9, loc='upper left')
+
+    ax_price.set_title(title, fontsize=12)
+    ax_price.set_ylabel('Price', fontsize=10)
+    ax_price.grid(alpha=0.2)
+
+    # volume panel
+    if volumes is not None:
+        ax_vol = axes[1]
+        vol_colors = np.where(up_mask, up_color, dn_color)
+        for i in xs:
+            ax_vol.bar(i, volumes[i], width=0.8, color=vol_colors[i], alpha=0.7, linewidth=0)
+        ax_vol.set_ylabel('Volume', fontsize=9)
+        ax_vol.grid(alpha=0.2)
+
+    # x-axis: replace integer index with HH:MM (or MM/DD) time labels
+    tick_step = max(1, len(xs) // n_xticks)
+    tick_pos  = xs[::tick_step]
+    timestamps = df.index[::tick_step]
+    # daily data: all times are midnight → use MM/DD; intraday: use HH:MM
+    all_midnight = all(getattr(t, 'hour', 0) == 0 and getattr(t, 'minute', 0) == 0
+                       for t in df.index)
+    if all_midnight:
+        tick_labels = [t.strftime('%m/%d') for t in timestamps]
+    else:
+        tick_labels = [t.strftime('%H:%M') for t in timestamps]
+    axes[-1].set_xticks(tick_pos)
+    axes[-1].set_xticklabels(tick_labels, fontsize=8, rotation=30, ha='right')
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f'Chart saved: {output_path}')
+    return output_path
