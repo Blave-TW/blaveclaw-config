@@ -120,6 +120,41 @@ def fetch_twstock_per(stock_id: str, start: str, end: str, headers: dict) -> pd.
 
 ---
 
+## 借券成交明細
+
+每天多筆，`transaction_type` 為 `競價` 或 `議借`，每筆費率/張數不同。
+
+```python
+def fetch_twstock_lending(stock_id: str, start: str, end: str, headers: dict) -> pd.DataFrame:
+    """欄位：date, transaction_type, volume, fee_rate, close, original_return_date, original_lending_period"""
+    r = requests.get(
+        f"https://api.blave.org/studio/market/twstock/lending/{stock_id}",
+        params={"start": start, "end": end},
+        headers=headers,
+        timeout=60,
+    )
+    r.raise_for_status()
+    data = r.json().get("data", [])
+    return pd.DataFrame(data) if data else pd.DataFrame()
+```
+
+常用分析：
+```python
+df = fetch_twstock_lending("2330", "2025-01-01", "2025-05-30", hdrs)
+
+# 每日借券總量
+daily_volume = df.groupby("date")["volume"].sum()
+
+# 競價 vs 議借 分布
+by_type = df.groupby(["date", "transaction_type"])["volume"].sum().unstack(fill_value=0)
+
+# 加權平均費率（借券成本）
+df["value"] = df["volume"] * df["fee_rate"]
+avg_fee = df.groupby("date").apply(lambda x: x["value"].sum() / x["volume"].sum())
+```
+
+---
+
 ## Batch 資料函式
 
 所有台股資料一律用 batch 函式（即使只有 1 支），回傳 `dict {stock_id: DataFrame}`，超過 50 支自動切塊：
