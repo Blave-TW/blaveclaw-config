@@ -100,6 +100,37 @@ def fetch_twstock_kbar(stock_id: str, start: str, end: str, headers: dict) -> pd
 
 ---
 
+## 八大行庫買賣超
+
+每天 8 筆（一家銀行一筆）。FinMind 不支援單股查詢，後台會拉整天全市場資料再 filter，**最多 31 天**。
+
+```python
+def fetch_twstock_gov_bank(stock_id: str, start: str, end: str, headers: dict) -> pd.DataFrame:
+    """欄位：date, bank_name, buy（張）, buy_amount（元）, sell（張）, sell_amount（元）"""
+    r = requests.get(
+        f"https://api.blave.org/studio/market/twstock/gov_bank/{stock_id}",
+        params={"start": start, "end": end},
+        headers=headers,
+        timeout=60,
+    )
+    r.raise_for_status()
+    data = r.json().get("data", [])
+    return pd.DataFrame(data) if data else pd.DataFrame()
+```
+
+常用分析：
+```python
+df = fetch_twstock_gov_bank("2330", "2025-01-01", "2025-01-31", hdrs)
+
+# 每日八大行庫合計淨買超（張）
+daily_net = df.groupby("date").apply(lambda x: (x["buy"] - x["sell"]).sum())
+
+# 各銀行累計淨買超
+bank_net = (df.groupby("bank_name")["buy"].sum() - df.groupby("bank_name")["sell"].sum())
+```
+
+---
+
 ## PE / PB / 殖利率
 
 ```python
