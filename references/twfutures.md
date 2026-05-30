@@ -4,6 +4,40 @@
 
 ---
 
+## 選擇權大額交易人（TaiwanOptionOpenInterestLargeTraders）
+
+每天 6 筆：`put_call`（call/put）× `contract_type`（week/近月/all）。`option_id` 通常為 `TXO`。
+
+```python
+def fetch_twoption_large_traders(option_id: str, start: str, end: str, headers: dict) -> pd.DataFrame:
+    """欄位：date, option_id, put_call, contract_type, buy/sell_top5/top10_trader_open_interest(_per), market_open_interest"""
+    r = requests.get(
+        f"https://api.blave.org/studio/market/twfutures/option/large_traders/{option_id}",
+        params={"start": start, "end": end},
+        headers=headers,
+        timeout=60,
+    )
+    r.raise_for_status()
+    data = r.json().get("data", [])
+    return pd.DataFrame(data) if data else pd.DataFrame()
+```
+
+常用分析：
+```python
+df = fetch_twoption_large_traders("TXO", "2025-01-01", "2025-05-30", hdrs)
+
+# all contracts Put/Call Ratio（大戶買方未平倉）
+all_c = df[df["contract_type"] == "all"].copy()
+pivot = all_c.groupby(["date", "put_call"])["buy_top10_trader_open_interest"].sum().unstack()
+pcr = pivot["put"] / pivot["call"]   # > 1 偏空
+
+# 外資 call net（用法人資料搭配）
+call_oi = all_c[all_c["put_call"] == "call"].set_index("date")
+net = call_oi["buy_top5_trader_open_interest"] - call_oi["sell_top5_trader_open_interest"]
+```
+
+---
+
 ## 期貨大額交易人（TaiwanFuturesOpenInterestLargeTraders）
 
 每天 3 筆：`contract_type` = week（當週到期）、近月（如 202505）、all（全部合約）。
