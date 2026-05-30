@@ -4,6 +4,40 @@
 
 ---
 
+## 選擇權三大法人（TaiwanOptionInstitutionalInvestors）
+
+每天 6 筆：3 法人 × 買權/賣權。`option_id` 通常為 `TXO`。
+
+```python
+def fetch_twoption_institutional(option_id: str, start: str, end: str, headers: dict) -> pd.DataFrame:
+    """欄位：date, option_id, call_put（買權/賣權）, institutional_investors, long/short_deal_volume/amount, long/short_open_interest_balance_volume/amount"""
+    r = requests.get(
+        f"https://api.blave.org/studio/market/twfutures/option/institutional/{option_id}",
+        params={"start": start, "end": end},
+        headers=headers,
+        timeout=60,
+    )
+    r.raise_for_status()
+    data = r.json().get("data", [])
+    return pd.DataFrame(data) if data else pd.DataFrame()
+```
+
+常用分析：
+```python
+df = fetch_twoption_institutional("TXO", "2025-01-01", "2025-05-30", hdrs)
+
+# 外資買權淨未平倉
+call_df = df[(df["call_put"] == "買權") & (df["institutional_investors"] == "外資")]
+call_net_oi = (call_df.set_index("date")["long_open_interest_balance_volume"]
+               - call_df.set_index("date")["short_open_interest_balance_volume"])
+
+# Put/Call Ratio（外資）
+foreign = df[df["institutional_investors"] == "外資"].groupby(["date", "call_put"])["long_open_interest_balance_volume"].sum().unstack()
+pcr = foreign["賣權"] / foreign["買權"]
+```
+
+---
+
 ## 期貨三大法人（TaiwanFuturesInstitutionalInvestors）
 
 每天 3 筆：自營商、投信、外資。
