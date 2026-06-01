@@ -181,6 +181,39 @@ def compute_signals(df):
 
 ---
 
+## Blave API Headers
+
+All `lib/data.py` functions accept a `headers` dict. Construct it as:
+
+```python
+from dotenv import load_dotenv; load_dotenv()
+import os
+hdrs = {'api-key': os.environ['blave_api_key'], 'secret-key': os.environ['blave_secret_key']}
+```
+
+The runner builds this automatically — only needed when calling lib functions outside of `run()`.
+
+**NEVER use** `X-API-KEY`, `X-SECRET-KEY`, or `Authorization: Bearer ...` — those are wrong formats and will return 403.
+
+---
+
+## Telegram Pairing Check
+
+Run this at session start, before any strategy run or notification:
+
+```python
+import json, os
+allow_path = "/root/.openclaw/credentials/telegram-default-allowFrom.json"
+paired = (
+    os.path.exists(allow_path)
+    and bool(json.load(open(allow_path)).get("allowFrom"))
+)
+```
+
+If `paired` is False: tell the user "Telegram is not paired yet. Please complete the pairing flow via the bot." Do not proceed until pairing is confirmed.
+
+---
+
 ## Type C — Portfolio Strategy
 
 CRITICAL: Every Type C strategy MUST be based on `strategies/TEMPLATE_C.py`. Copy it and fill in the marked sections. Read `examples/tw100_foreign_zscore/strategy.py` as a complete working reference.

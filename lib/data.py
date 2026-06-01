@@ -65,14 +65,16 @@ def _extend_cache(path, fetch_raw_fn, start, end):
         if end and last >= e - timedelta(days=1):
             return cached[cached.index < end_ts]
         new_df = fetch_raw_fn(last.strftime('%Y-%m-%d'), None)
-        if new_df.index.tz is not None:
+        if not new_df.empty and new_df.index.tz is not None:
             new_df.index = new_df.index.tz_convert('UTC').tz_localize(None)
-        df     = pd.concat([cached, new_df])
+        df = pd.concat([cached, new_df]) if not new_df.empty else cached
     else:
         df = fetch_raw_fn(start, end)
+        if df.empty:
+            return df
 
     # normalize before saving so cache is always tz-naive
-    if df.index.tz is not None:
+    if not df.empty and df.index.tz is not None:
         df.index = df.index.tz_convert('UTC').tz_localize(None)
     df = df[~df.index.duplicated(keep='last')].sort_index()
     path.parent.mkdir(exist_ok=True)
@@ -554,7 +556,7 @@ def fetch_twstock_balance_sheet(stock_id, headers):
 
 
 def fetch_twstock_monthly_revenue(stock_id, headers):
-    """台股月營收. index=date, columns: revenue (NTD thousands), revenue_month, revenue_year.
+    """台股月營收. index=date, columns: revenue (NTD 元, full amount not thousands), revenue_month, revenue_year.
     YoY = (rev - rev_same_month_last_year) / abs(rev_same_month_last_year)."""
     return _fetch_fundamental('twstock_rev', 'monthly_revenue', stock_id, headers)
 

@@ -98,15 +98,7 @@ If unsure between Type A and C: Type A has ONE symbol and ONE position (long/sho
 
 ## Blave API Headers
 
-All `lib/data.py` functions accept a `headers` dict. **Always construct it as:**
-
-```python
-from dotenv import load_dotenv; load_dotenv()
-import os
-hdrs = {'api-key': os.environ['blave_api_key'], 'secret-key': os.environ['blave_secret_key']}
-```
-
-The runner builds this automatically — only needed when calling lib functions outside of `run()`.
+All `lib/data.py` functions accept a `headers` dict — see `references/strategy-code.md` for the exact construction. The runner builds this automatically; only needed when calling lib functions outside of `run()`.
 
 **NEVER use** `X-API-KEY`, `X-SECRET-KEY`, or `Authorization: Bearer ...` — those are wrong formats and will return 403.
 
@@ -176,16 +168,7 @@ Never create a duplicate strategy folder just because you ran a scan.
 - `make_sender()` → text sender function (broadcasts to all paired chat IDs)
 - `make_sender(photo=True)` → photo sender function
 - Use `send_telegram_fn=make_sender()` when calling `run()`
-- **CRITICAL — Pairing check (run at session start, before any other action):** Telegram pairing happens in a separate Telegram session — you cannot infer its state from conversation context. Always check the file first:
-  ```python
-  import json, os
-  allow_path = "/root/.openclaw/credentials/telegram-default-allowFrom.json"
-  paired = (
-      os.path.exists(allow_path)
-      and bool(json.load(open(allow_path)).get("allowFrom"))
-  )
-  ```
-  If `paired` is False: tell the user "Telegram is not paired yet. Please complete the pairing flow via the bot." Do not proceed with any strategy run or notification until pairing is confirmed.
+- **CRITICAL — Pairing check (run at session start, before any other action):** Telegram pairing happens in a separate Telegram session — you cannot infer its state from conversation context. Check pairing status first (see `references/strategy-code.md`). If not paired: tell the user "Telegram is not paired yet. Please complete the pairing flow via the bot." Do not proceed with any strategy run or notification until pairing is confirmed.
 
 `lib/strategy.py`:
 - `from lib.strategy import add_realized_vol` — computes realized_vol in-place. **Standard window is 30 days** — convert to bars based on strategy interval (e.g. 1d→30, 1h→720, 5min→8640)
@@ -217,30 +200,7 @@ CRITICAL: Read the correct reference before writing any strategy code (see Strat
 
 ## Charts (matplotlib)
 
-**Always use English for all text in matplotlib charts** — titles, axis labels, legends, annotations. Chinese characters render as garbled boxes (□□□) on the server because the default font has no CJK glyphs.
-
-```python
-# ✓ correct
-plt.title("Cumulative Return")
-plt.xlabel("Date")
-plt.ylabel("Return (%)")
-plt.legend(["Strategy", "Benchmark"])
-
-# ✗ wrong — will show □□□
-plt.title("累積報酬")
-```
-
-## Sending Images
-
-When you generate charts or images, you MUST send them to Telegram:
-
-```python
-from lib.notify import send_photo, send_text
-send_photo("/tmp/chart.png")
-send_text("Backtest complete — Sharpe 1.42, MDD -12%")
-```
-
-Token and chat_id are read automatically from `/root/.openclaw/openclaw.json`.
+All chart text must be in English — Chinese characters render as garbled boxes on the server. `tight_layout()` does not accept `hspace`/`wspace` on this matplotlib version. When you generate charts, send them to Telegram via `send_photo`. See `references/charts.md` for all code examples.
 
 ## Shell Commands
 
