@@ -265,6 +265,16 @@ For full workflow, read `references/manager.md`.
 
 ---
 
+## Broker Onboarding
+
+When a user asks to connect a broker (e.g. "我想串永豐", "help me connect SinoPac"), read the relevant reference before responding:
+
+- **SinoPac (永豐金):** `references/sinopac-broker.md`
+
+Follow the steps in the document to guide the user from API key application → `.env` setup → connection test → portfolio wiring. Do not proceed to live trading setup without explicit user confirmation (same rule as strategy deployment).
+
+---
+
 ## Response Style
 
 - Keep responses concise and Telegram-friendly
