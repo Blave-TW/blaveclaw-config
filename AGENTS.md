@@ -133,9 +133,20 @@ Taiwan stock data (universe, batch functions, fundamental factors, lookahead-bia
 - `fetch_twfutures_ohlcv(symbol, schema, start, end, headers)` → Taiwan futures OHLCV DataFrame (Open/High/Low/Close/Volume); symbol: `'TXF'`; schema: `'1d'`/`'1m'`/`'5m'`/`'15m'`/`'30m'`/`'60m'`; Volume in contracts; data from 2020-03-22
 - `txf_settlement_mask(index)` → boolean Series, True on the last 1-min bar before TXF monthly settlement (3rd Wednesday of each month, 13:30 TWN). Use with intraday TXF strategies: `settle = txf_settlement_mask(df.index); signal[settle] = 0.0; return signal, settle`
 
-`lib/execute.py`:
-- `from lib.execute import update_state, load_state, save_state` — trade execution and state management
+`lib/execute.py` — all order execution logic (state management + algo orders):
+- `from lib.execute import update_state, load_state, save_state` — state management
 - `state.json` schema: `{"position": float, "symbol": str}` — `position` is the current signal value (positive=long, negative=short, 0=flat); all deployment config (exchange, asset_spec) lives in `portfolio_config.json`, not in state
+- `from lib.execute import run_twap` — TWAP execution engine (exchange-agnostic). Use for any strategy type (A/B/C) when the user wants to split a large order over time instead of a single market order.
+  - `run_twap(symbol, side, total_qty, duration_min, n_slices, place_slice_fn, strategy_name, signal_price=None, send_telegram_fn=None)`
+  - `place_slice_fn(symbol, side, qty) → {'fill_price': float, 'fill_qty': float}` — implement this per exchange (e.g. Binance, Bybit); raise on failure
+  - Logs every slice + summary to `strategies/{strategy_name}/twap_log.jsonl`; sends Telegram per slice and on completion
+  - `signal_price` (optional): price at signal time — used to compute `slippage_bps` per slice and in the summary
+- `from lib.execute import load_twap_log` — returns `(slices, summaries)` from `twap_log.jsonl`; use to analyze how TWAP parameters (duration, n_slices) affect execution quality vs strategy signal price
+- **TWAP wiring pattern** — when the user asks to use TWAP for a strategy, modify `reconciler.py`:
+  1. Add `TWAP_CONFIG = {"strategy_name": {"duration_min": 30, "n_slices": 10}, ...}` at the top
+  2. Implement `_place_slice(symbol, side, qty)` for the exchange (read the relevant `skills/blave-quant/references/` file first)
+  3. In `place_order`, check `TWAP_CONFIG.get(strategy_name)` and call `run_twap` if present, else fall back to a direct market order
+  - TWAP config is per-strategy — strategies not in `TWAP_CONFIG` continue using market orders unchanged
 
 `lib/analysis.py`:
 - `from lib.analysis import regime_analysis, plot_regime` — regime breakdown and regime chart
