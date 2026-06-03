@@ -873,6 +873,48 @@ def fetch_twfutures_ohlcv(symbol, schema, start, end, headers):
     )
 
 
+def fetch_twfutures_bid_ask_vol(start, end, headers):
+    """台指期內外盤成交量（1 分鐘）. Returns DataFrame indexed by UTC time.
+
+    Columns: bid_vol (內盤口數), ask_vol (外盤口數), total_vol (總口數).
+    Data from 2022-01-04. Max 31 days per request; chunked automatically.
+    Both day session (08:45-13:45 TWN) and night session (15:00-next 05:00 TWN) included.
+    """
+    s = datetime.strptime(start, '%Y-%m-%d')
+    e = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d') + timedelta(days=1)
+    chunk_days = 28
+
+    chunks, cursor = [], s
+    while cursor < e:
+        chunk_end = min(cursor + timedelta(days=chunk_days), e)
+        chunks.append((cursor.strftime('%Y-%m-%d'), chunk_end.strftime('%Y-%m-%d')))
+        cursor = chunk_end
+
+    def _fetch_one(cs, ce):
+        r = requests.get(
+            f'{BASE}/studio/market/twfutures/bid_ask_vol/TXF',
+            headers=headers,
+            params={'start': cs, 'end': ce},
+            timeout=60,
+        )
+        r.raise_for_status()
+        return r.json().get('data', [])
+
+    rows = []
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {pool.submit(_fetch_one, cs, ce): (cs, ce) for cs, ce in chunks}
+        for future in as_completed(futures):
+            rows.extend(future.result())
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df['time'] = pd.to_datetime(df['ts'], utc=True)
+    df = df.set_index('time').sort_index()
+    df = df[~df.index.duplicated(keep='first')]
+    return df[['bid_vol', 'ask_vol', 'total_vol']].astype(int)
+
+
 def txf_settlement_mask(index):
     """Return a boolean Series (same index) that is True on the last 1-min bar
     before TXF monthly settlement (3rd Wednesday of each month, 13:30 TWN).
