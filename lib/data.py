@@ -413,6 +413,126 @@ def _broker_day_cache_path(stock_id, date_str):
     return d / f'{date_str}.parquet'
 
 
+def _make_date_chunks(dates, chunk_days=90):
+    """Split a sorted date list into chunks, each spanning ≤ chunk_days calendar days."""
+    if not dates:
+        return []
+    chunks = []
+    start = dates[0]
+    for i, d in enumerate(dates):
+        if i == len(dates) - 1 or (dates[i + 1] - start).days >= chunk_days:
+            chunks.append((start, d))
+            if i < len(dates) - 1:
+                start = dates[i + 1]
+    return chunks
+
+
+def _populate_broker_day_cache(stock_id, weekdays, headers,
+                               chunk_days=90, rate_limit=270, period=300,
+                               max_retries=5):
+    """Ensure all weekdays have cached broker data. Uses 90-day range API chunks."""
+    EMPTY_COLS = ['date', 'stock_id', 'broker_id', 'broker_name', 'price', 'buy', 'sell']
+    missing = [d for d in weekdays if not _broker_day_cache_path(stock_id, d.isoformat()).exists()]
+    if not missing:
+        return
+
+    chunks  = _make_date_chunks(missing, chunk_days)
+    limiter = _RateLimiter(rate_limit, period)
+    total   = len(chunks)
+
+    for idx, (cs, ce) in enumerate(chunks):
+        chunk_missing = [d for d in missing if cs <= d <= ce]
+        for attempt in range(max_retries):
+            try:
+                limiter.acquire()
+                r = requests.get(
+                    f'{BASE}/studio/market/twstock/broker/stock/{stock_id}',
+                    headers=headers,
+                    params={'start': cs.isoformat(), 'end': ce.isoformat()},
+                    timeout=120,
+                )
+                if r.status_code == 429:
+                    time.sleep(2 ** (attempt + 1))
+                    continue
+                if r.status_code >= 500:
+                    time.sleep(2 ** (attempt + 1))
+                    continue
+                r.raise_for_status()
+                data    = r.json().get('data', [])
+                df_all  = pd.DataFrame(data) if data else pd.DataFrame(columns=EMPTY_COLS)
+                by_date = {}
+                if not df_all.empty and 'date' in df_all.columns:
+                    for date_str, grp in df_all.groupby('date'):
+                        by_date[date_str] = grp
+                for d in chunk_missing:
+                    date_str = d.isoformat()
+                    df_day   = by_date.get(date_str, pd.DataFrame(columns=EMPTY_COLS)).copy()
+                    df_day['date'] = date_str
+                    df_day.to_parquet(_broker_day_cache_path(stock_id, date_str),
+                                      index=False, compression='snappy')
+                print(f"  [broker_cache {stock_id}] chunk {idx+1}/{total} "
+                      f"({cs.isoformat()}~{ce.isoformat()})", flush=True)
+                break
+            except requests.exceptions.Timeout:
+                time.sleep(2 ** (attempt + 1))
+            except Exception as e:
+                print(f"  [broker_cache {stock_id}] error chunk {cs}~{ce}: {e}")
+                break
+
+
+def _populate_trader_day_cache(trader_id, weekdays, headers,
+                               chunk_days=90, rate_limit=270, period=300,
+                               max_retries=5):
+    """Ensure all weekdays have cached trader data. Uses 90-day range API chunks."""
+    EMPTY_COLS = ['date', 'broker_id', 'broker_name', 'stock_id', 'price', 'buy', 'sell']
+    missing = [d for d in weekdays if not _trader_day_cache_path(trader_id, d.isoformat()).exists()]
+    if not missing:
+        return
+
+    chunks  = _make_date_chunks(missing, chunk_days)
+    limiter = _RateLimiter(rate_limit, period)
+    total   = len(chunks)
+
+    for idx, (cs, ce) in enumerate(chunks):
+        chunk_missing = [d for d in missing if cs <= d <= ce]
+        for attempt in range(max_retries):
+            try:
+                limiter.acquire()
+                r = requests.get(
+                    f'{BASE}/studio/market/twstock/broker/trader/{trader_id}',
+                    headers=headers,
+                    params={'start': cs.isoformat(), 'end': ce.isoformat()},
+                    timeout=120,
+                )
+                if r.status_code == 429:
+                    time.sleep(2 ** (attempt + 1))
+                    continue
+                if r.status_code >= 500:
+                    time.sleep(2 ** (attempt + 1))
+                    continue
+                r.raise_for_status()
+                data    = r.json().get('data', [])
+                df_all  = pd.DataFrame(data) if data else pd.DataFrame(columns=EMPTY_COLS)
+                by_date = {}
+                if not df_all.empty and 'date' in df_all.columns:
+                    for date_str, grp in df_all.groupby('date'):
+                        by_date[date_str] = grp
+                for d in chunk_missing:
+                    date_str = d.isoformat()
+                    df_day   = by_date.get(date_str, pd.DataFrame(columns=EMPTY_COLS)).copy()
+                    df_day['date'] = date_str
+                    df_day.to_parquet(_trader_day_cache_path(trader_id, date_str),
+                                      index=False, compression='snappy')
+                print(f"  [trader_cache {trader_id}] chunk {idx+1}/{total} "
+                      f"({cs.isoformat()}~{ce.isoformat()})", flush=True)
+                break
+            except requests.exceptions.Timeout:
+                time.sleep(2 ** (attempt + 1))
+            except Exception as e:
+                print(f"  [trader_cache {trader_id}] error chunk {cs}~{ce}: {e}")
+                break
+
+
 def fetch_twstock_broker_net(stock_id, broker_id, start, end, headers,
                              max_workers=10, rate_limit=270, period=300,
                              max_retries=5):
@@ -432,57 +552,9 @@ def fetch_twstock_broker_net(stock_id, broker_id, start, end, headers,
                 for i in range((end_dt - start_dt).days + 1)
                 if (start_dt + timedelta(days=i)).weekday() < 5]
 
-    missing = [d for d in weekdays if not _broker_day_cache_path(stock_id, d.isoformat()).exists()]
+    _populate_broker_day_cache(stock_id, weekdays, headers,
+                               rate_limit=rate_limit, period=period, max_retries=max_retries)
 
-    # ── fetch missing dates ───────────────────────────────────────────────────
-    if missing:
-        total   = len(missing)
-        limiter = _RateLimiter(rate_limit, period)
-        counter = {'done': 0}
-        _lock   = threading.Lock()
-
-        def fetch_one(cur):
-            date_str = cur.isoformat()
-            for attempt in range(max_retries):
-                try:
-                    limiter.acquire()
-                    r = requests.get(
-                        f'{BASE}/studio/market/twstock/broker/stock/{stock_id}',
-                        headers=headers,
-                        params={'date': date_str},
-                        timeout=30,
-                    )
-                    if r.status_code == 429:
-                        time.sleep(2 ** (attempt + 1))
-                        continue
-                    if r.status_code >= 500:
-                        time.sleep(2 ** (attempt + 1))
-                        continue
-                    r.raise_for_status()
-                    data = r.json().get('data', [])
-                    path = _broker_day_cache_path(stock_id, date_str)
-                    df_day = pd.DataFrame(data) if data else pd.DataFrame(columns=['date','stock_id','broker_id','broker_name','price','buy','sell'])
-                    df_day['date'] = date_str
-                    df_day.to_parquet(path, index=False, compression='snappy')
-                    return date_str
-                except requests.exceptions.Timeout:
-                    time.sleep(2 ** (attempt + 1))
-                except Exception as e:
-                    print(f"  [broker_net] error {date_str}: {e}")
-                    return date_str
-            return date_str
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(fetch_one, d): d for d in missing}
-            for future in as_completed(futures):
-                future.result()
-                with _lock:
-                    counter['done'] += 1
-                    done = counter['done']
-                if done % 50 == 0 or done == total:
-                    print(f"  [broker_net] {done}/{total} fetched", flush=True)
-
-    # ── read from local cache and filter ─────────────────────────────────────
     frames = []
     for d in weekdays:
         path = _broker_day_cache_path(stock_id, d.isoformat())
@@ -499,6 +571,84 @@ def fetch_twstock_broker_net(stock_id, broker_id, start, end, headers,
     result = pd.DataFrame(frames)
     result['date'] = pd.to_datetime(result['date'])
     return result.set_index('date').sort_index()
+
+
+def fetch_twstock_all_broker_net(stock_id, start, end, headers,
+                                  max_workers=10, rate_limit=270, period=300,
+                                  max_retries=5):
+    """台股每日全市場所有分點合計淨買賣超 (sum of buy - sell across ALL broker branches).
+
+    Shares the same per-day parquet cache as fetch_twstock_broker_net.
+    Returns pd.Series indexed by date (trading days only).
+    """
+    from datetime import date as _date
+
+    end_dt   = _date.fromisoformat(end)   if end   else _date.today()
+    start_dt = _date.fromisoformat(start)
+
+    weekdays = [start_dt + timedelta(days=i)
+                for i in range((end_dt - start_dt).days + 1)
+                if (start_dt + timedelta(days=i)).weekday() < 5]
+
+    _populate_broker_day_cache(stock_id, weekdays, headers,
+                               rate_limit=rate_limit, period=period, max_retries=max_retries)
+
+    frames = []
+    for d in weekdays:
+        path = _broker_day_cache_path(stock_id, d.isoformat())
+        if not path.exists():
+            continue
+        df_day = pd.read_parquet(path)
+        net = float(df_day['buy'].sum() - df_day['sell'].sum()) if not df_day.empty else 0.0
+        frames.append({'date': d.isoformat(), 'net': net})
+
+    if not frames:
+        return pd.Series(dtype=float, name='net')
+    result = pd.DataFrame(frames)
+    result['date'] = pd.to_datetime(result['date'])
+    return result.set_index('date')['net'].sort_index()
+
+
+def fetch_twstock_branch_daily_net(stock_id, start, end, headers,
+                                    max_workers=10, rate_limit=270, period=300,
+                                    max_retries=5):
+    """台股每日各分點淨買賣超明細.
+
+    Returns DataFrame shape (dates, broker_ids): each cell = daily net (buy - sell)
+    for that branch on that date. Missing branch-day pairs are 0.
+    Shares the same per-day parquet cache as fetch_twstock_broker_net.
+    """
+    from datetime import date as _date
+
+    end_dt   = _date.fromisoformat(end)   if end   else _date.today()
+    start_dt = _date.fromisoformat(start)
+
+    weekdays = [start_dt + timedelta(days=i)
+                for i in range((end_dt - start_dt).days + 1)
+                if (start_dt + timedelta(days=i)).weekday() < 5]
+
+    _populate_broker_day_cache(stock_id, weekdays, headers,
+                               rate_limit=rate_limit, period=period, max_retries=max_retries)
+
+    frames = []
+    for d in weekdays:
+        path = _broker_day_cache_path(stock_id, d.isoformat())
+        if not path.exists():
+            continue
+        df_day = pd.read_parquet(path)
+        if df_day.empty:
+            frames.append(pd.Series(dtype=float, name=d.isoformat()))
+            continue
+        df_day['_net'] = df_day['buy'] - df_day['sell']
+        net_per_branch = df_day.groupby('broker_id')['_net'].sum()
+        net_per_branch.name = d.isoformat()
+        frames.append(net_per_branch)
+
+    if not frames:
+        return pd.DataFrame()
+    result = pd.DataFrame(frames)   # shape: (dates × branches)
+    result.index = pd.to_datetime(result.index)
+    return result.sort_index().fillna(0.0)
 
 
 # ── Taiwan fundamental data (quarterly / monthly) ────────────────────────────
@@ -970,12 +1120,12 @@ def _trader_day_cache_path(trader_id, date_str):
 
 
 def fetch_twstock_trader_flows(trader_id, start, end, headers,
-                               max_workers=10, rate_limit=270, period=300, max_retries=5):
+                               rate_limit=270, period=300, max_retries=5, **_kwargs):
     """分點對所有股票每日淨買賣超 (buy - sell).
 
     trader_id: securities_trader_id, e.g. '9217' for 凱基-松山.
     Local cache: cache/twstock_broker_trader_<trader_id>/<YYYY-MM-DD>.parquet
-    每天存全部股票完整資料，只 fetch 沒有的日期。
+    每天存全部股票完整資料，只 fetch 沒有的日期（90-day range chunks）。
     Returns long-format DataFrame indexed by (date, stock_id) with 'net' column.
     """
     from datetime import date as _date
@@ -987,55 +1137,8 @@ def fetch_twstock_trader_flows(trader_id, start, end, headers,
                 for i in range((end_dt - start_dt).days + 1)
                 if (start_dt + timedelta(days=i)).weekday() < 5]
 
-    missing = [d for d in weekdays if not _trader_day_cache_path(trader_id, d.isoformat()).exists()]
-
-    if missing:
-        total   = len(missing)
-        limiter = _RateLimiter(rate_limit, period)
-        counter = {'done': 0}
-        _lock   = threading.Lock()
-
-        def fetch_one(cur):
-            date_str = cur.isoformat()
-            for attempt in range(max_retries):
-                try:
-                    limiter.acquire()
-                    r = requests.get(
-                        f'{BASE}/studio/market/twstock/broker/trader/{trader_id}',
-                        headers=headers,
-                        params={'date': date_str},
-                        timeout=30,
-                    )
-                    if r.status_code == 429:
-                        time.sleep(2 ** (attempt + 1))
-                        continue
-                    if r.status_code >= 500:
-                        time.sleep(2 ** (attempt + 1))
-                        continue
-                    r.raise_for_status()
-                    data = r.json().get('data', [])
-                    path = _trader_day_cache_path(trader_id, date_str)
-                    df_day = pd.DataFrame(data) if data else pd.DataFrame(
-                        columns=['date', 'broker_id', 'broker_name', 'stock_id', 'price', 'buy', 'sell'])
-                    df_day['date'] = date_str
-                    df_day.to_parquet(path, index=False, compression='snappy')
-                    return date_str
-                except requests.exceptions.Timeout:
-                    time.sleep(2 ** (attempt + 1))
-                except Exception as e:
-                    print(f"  [trader_flows] error {date_str}: {e}")
-                    return date_str
-            return date_str
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(fetch_one, d): d for d in missing}
-            for future in as_completed(futures):
-                future.result()
-                with _lock:
-                    counter['done'] += 1
-                    done = counter['done']
-                if done % 50 == 0 or done == total:
-                    print(f"  [trader_flows] {done}/{total} fetched", flush=True)
+    _populate_trader_day_cache(trader_id, weekdays, headers,
+                               rate_limit=rate_limit, period=period, max_retries=max_retries)
 
     frames = []
     for d in weekdays:

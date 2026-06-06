@@ -42,5 +42,5 @@ plot_heatmap(
     best_idx=best_idx,
     row_label='SMA Fast (1m bars)', col_label='SMA Slow (1m bars)',
     title=f'{s.STRATEGY_NAME} — Sharpe Heatmap (with vol scaling)',
-    output_path='strategies/txf_ma_1m/heatmap.png',
+    output_path=str(Path(__file__).parent / 'heatmap.png'),
 )

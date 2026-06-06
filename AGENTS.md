@@ -174,6 +174,8 @@ Never create a duplicate strategy folder just because you ran a scan.
 
 `lib/validation.py`:
 - `from lib.validation import mcpt, plot_mcpt` — Monte Carlo Permutation Test; call `mcpt(close, position, n=2000, fee=..., target_vol=..., ...)` → `(actual_sharpe, p_value, dist)`
+- **All validation (MCPT, walk-forward, etc.) goes in a separate `validate.py` in the strategy folder** — never inside `strategy.py`. Keep `strategy.py` minimal: config, indicators, fetch_data, compute_signals, `run()` call only.
+- Daily stock params: `periods_per_year=252`, `vol_window=60`, `max_lev=1.0`
 
 `lib/notify.py`:
 - `from lib.notify import make_sender, send_text, send_photo`

@@ -11,13 +11,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 # ── Config ────────────────────────────────────────────────────────────────────
 MODE          = "backtest"
 STRATEGY_NAME = "twstock_momentum"
+INTERVAL      = "1d"
 START         = "2015-01-01"
 END           = None
 FEE           = 0.003          # ~0.3% 證交稅 + 手續費
 
-MOM_WINDOW  = 80               # 動能回望窗格（交易日）
-TOP_N       = 7                # 每週持有前 N 名
-WARMUP      = MOM_WINDOW
+MOM_WINDOW     = 120           # 動能回望窗格（交易日）
+TOP_N          = 10            # 每週持有前 N 名
+REBALANCE_FREQ = 'W'
+WARMUP         = MOM_WINDOW
 
 UNIVERSE = [
     # 半導體
@@ -82,14 +84,14 @@ def fetch_data(hdrs):
 
 
 # ── compute_signals ───────────────────────────────────────────────────────────
-def compute_signals(data, mom_window=MOM_WINDOW, top_n=TOP_N):
+def compute_signals(data, mom_window=MOM_WINDOW, top_n=TOP_N, rebalance_freq=REBALANCE_FREQ):
     import numpy as np
     import pandas as pd
 
     close_df, open_df = data
 
     mom          = _momentum(close_df, mom_window)
-    is_rebalance = _rebalance_mask(close_df.index, freq='W')
+    is_rebalance = _rebalance_mask(close_df.index, freq=rebalance_freq)
     weights      = _top_n_weights(mom, top_n, is_rebalance)
 
     price_df = pd.concat({'close': close_df, 'open': open_df}, axis=1)

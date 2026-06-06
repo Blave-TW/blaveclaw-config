@@ -11,13 +11,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 # ── Config ────────────────────────────────────────────────────────────────────
 MODE          = "backtest"
 STRATEGY_NAME = "[strategy_name]"
+INTERVAL      = "1d"            # '1d' for equities, '1h'/'4h' for crypto
 START         = "2015-01-01"
 END           = None
 FEE           = 0.003           # ~0.3% for Taiwan equities; adjust per asset class
 
-PARAM1  = ...                   # primary signal parameter (e.g. lookback window)
-PARAM2  = ...                   # secondary parameter (e.g. top-N, threshold)
-WARMUP  = PARAM1                # bars to trim from backtest start (= longest rolling window)
+PARAM1         = ...             # primary signal parameter (e.g. lookback window)
+PARAM2         = ...             # secondary parameter (e.g. top-N, threshold)
+REBALANCE_FREQ = 'W'             # 'D' = every bar, 'W' = weekly, 'M' = monthly
+WARMUP         = PARAM1          # bars to trim from backtest start (= longest rolling window)
 
 UNIVERSE = [
     # list all stock/asset IDs here — must be fixed at backtest start, NO lookahead bias
@@ -101,14 +103,14 @@ def fetch_data(hdrs):
 #
 #   weights_mat : numpy array  shape (n_days, n_stocks) — DO NOT pre-shift
 #   price_df    : pd.concat({'close': close_df, 'open': open_df}, axis=1)
-def compute_signals(data, param1=PARAM1, param2=PARAM2):
+def compute_signals(data, param1=PARAM1, param2=PARAM2, rebalance_freq=REBALANCE_FREQ):
     import numpy as np
     import pandas as pd
 
     close_df, open_df = data   # unpack in the same order as fetch_data's return
 
     signal       = _compute_signal(close_df, param1)
-    is_rebalance = _rebalance_mask(close_df.index, freq='W')
+    is_rebalance = _rebalance_mask(close_df.index, freq=rebalance_freq)
     weights      = _compute_weights(signal, param2, is_rebalance)
 
     price_df = pd.concat({'close': close_df, 'open': open_df}, axis=1)

@@ -35,5 +35,5 @@ plot_heatmap(
     grid, ACCUM_VALS, ZSCORE_VALS, best_idx,
     row_label="ACCUM_WINDOW", col_label="ZSCORE_WINDOW",
     title="tw100_foreign_zscore — Sharpe Scan",
-    output_path="strategies/tw100_foreign_zscore/heatmap.png",
+    output_path=str(Path(__file__).parent / 'heatmap.png'),
 )

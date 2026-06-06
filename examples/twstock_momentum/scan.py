@@ -35,5 +35,5 @@ plot_heatmap(
     grid, MOM_VALS, TOP_VALS, best_idx,
     row_label="MOM_WINDOW", col_label="TOP_N",
     title="twstock_momentum — Sharpe Scan",
-    output_path="strategies/twstock_momentum/heatmap.png",
+    output_path=str(Path(__file__).parent / 'heatmap.png'),
 )

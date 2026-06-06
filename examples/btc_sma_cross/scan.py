@@ -40,5 +40,5 @@ plot_heatmap(
     best_idx=best_idx,
     row_label='SMA Fast', col_label='SMA Slow',
     title=f'{s.STRATEGY_NAME} — Sharpe Grid',
-    output_path='strategies/btc_sma_cross/heatmap.png',
+    output_path=str(Path(__file__).parent / 'heatmap.png'),
 )

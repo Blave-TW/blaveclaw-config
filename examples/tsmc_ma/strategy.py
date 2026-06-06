@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 MODE          = "backtest"
 STRATEGY_NAME = "tsmc_ma"
 SYMBOL        = "2330"
+INTERVAL      = "1d"
 START         = "2015-01-01"
 END           = None
 FEE           = 0.003          # ~0.3% 證交稅 + 手續費（賣方含稅）

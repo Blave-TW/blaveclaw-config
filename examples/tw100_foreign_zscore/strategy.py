@@ -11,13 +11,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 # ── Config ────────────────────────────────────────────────────────────────────
 MODE          = "backtest"
 STRATEGY_NAME = "tw100_foreign_zscore"
+INTERVAL      = "1d"
 START         = "2010-01-01"
 END           = None
 FEE           = 0.003        # ~0.3% 證交稅 + 手續費（賣方含稅）
 
-ACCUM_WINDOW  = 40
-ZSCORE_WINDOW = 252          # 標準化視窗：1 年
-WARMUP        = ACCUM_WINDOW + ZSCORE_WINDOW
+ACCUM_WINDOW   = 40
+ZSCORE_WINDOW  = 252         # 標準化視窗：1 年
+REBALANCE_FREQ = 'W'
+WARMUP         = ACCUM_WINDOW + ZSCORE_WINDOW
 
 UNIVERSE = [
     # 半導體
@@ -92,13 +94,14 @@ def fetch_data(hdrs):
 
 
 # ── compute_signals ───────────────────────────────────────────────────────────
-def compute_signals(data, accum_window=ACCUM_WINDOW, zscore_window=ZSCORE_WINDOW):
+def compute_signals(data, accum_window=ACCUM_WINDOW, zscore_window=ZSCORE_WINDOW,
+                    rebalance_freq=REBALANCE_FREQ):
     import pandas as pd
 
     close_df, open_df, foreign_df = data
 
     signal       = _compute_signal(foreign_df, accum_window, zscore_window)
-    is_rebalance = _rebalance_mask(close_df.index, freq='W')
+    is_rebalance = _rebalance_mask(close_df.index, freq=rebalance_freq)
     weights      = _compute_weights(signal, is_rebalance)
 
     price_df = pd.concat({'close': close_df, 'open': open_df}, axis=1)

@@ -36,5 +36,5 @@ plot_heatmap(
     grid, FAST_VALS, SLOW_VALS, best_idx,
     row_label="SMA_FAST", col_label="SMA_SLOW",
     title="tsmc_ma — Sharpe Scan",
-    output_path="strategies/tsmc_ma/heatmap.png",
+    output_path=str(Path(__file__).parent / 'heatmap.png'),
 )

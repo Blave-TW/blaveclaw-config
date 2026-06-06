@@ -235,7 +235,7 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         d_dates, d_rets = daily_returns_typeC(pf_series)
 
         json.dump(
-            {'strategy': strategy_name, 'interval': '1d',
+            {'strategy': strategy_name, 'interval': interval,
              'start': close_df.index[0].strftime('%Y-%m-%d'),
              'end':   close_df.index[-1].strftime('%Y-%m-%d'),
              'fee': fee,

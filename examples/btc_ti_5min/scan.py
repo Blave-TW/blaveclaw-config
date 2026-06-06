@@ -34,5 +34,5 @@ plot_heatmap(
     best_idx=best_idx,
     row_label='ENTRY_TH', col_label='EXIT_TH',
     title=f'{s.STRATEGY_NAME} — Sharpe Grid (TI 24h, {s.INTERVAL})',
-    output_path='strategies/btc_ti_5min/heatmap.png',
+    output_path=str(Path(__file__).parent / 'heatmap.png'),
 )
