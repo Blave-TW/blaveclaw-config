@@ -39,7 +39,10 @@ Before writing any strategy code, classify the strategy:
 - Read `references/strategy-code.md` and use `strategies/TEMPLATE_A.py`
 - If the strategy uses any Blave alpha indicator (taker intensity, holder concentration, liquidation, whale hunter, etc.), read the **Alpha Indicators** section in `references/strategy-code.md` for the canonical fetch pattern: use `lib.data` fetchers inside `fetch_data(hdrs)`, join to df index, ffill. Do NOT write your own fetch logic inline.
 - blave-quant-skill provides data reference only — always structure the full strategy as TEMPLATE_A.py
-- `END`: in backtest mode, hardcode a fixed past date (e.g. `"2026-05-21"`, roughly last week) — **never use a dynamic expression**. A fixed date guarantees cache hits on every re-run; `end=None` always triggers a delta API call. Update the date manually when fresher data is needed. In live mode, set `END = None`.
+- `END`: three modes:
+  - **`strategy.py` backtest** (normal): hardcode a fixed past date (e.g. `"2026-05-21"`, roughly one week ago) — **never use a dynamic expression**. A fixed date guarantees cache hits on every re-run; `end=None` always triggers a delta API call.
+  - **`manager/manager.py` (portfolio weight optimisation)**: temporarily set `END = None` in each strategy before running — this ensures the optimiser sees the latest data and produces up-to-date weights. Restore the fixed date afterwards.
+  - **Live mode**: set `END = None`.
 - Write three functions:
   - **`_add_indicators(df, param1=DEFAULT1, ...)`**: adds indicator columns to a copy of df; params default to module-level constants
   - **`fetch_data(hdrs) → df`**: fetches kline + auxiliary data (realized_vol, alpha indicators). Does NOT call `_add_indicators` — `compute_signals` handles that
@@ -76,7 +79,10 @@ Examples: foreign institutional z-score stock selection, multi-factor rotation, 
   - Optional 3rd element `exec_at_close`: bool array `(n_days,)` for any bars that execute at close instead of next open
 - **Backtest REQUIRED** before going live
 - Still require explicit user confirmation before deploying or setting up cron jobs
-- `END`: in backtest mode, hardcode a fixed past date (e.g. `"2026-05-21"`, roughly last week) — **never use a dynamic expression**. A fixed date guarantees cache hits on every re-run. In live mode, set `END = None`.
+- `END`: three modes:
+  - **`strategy.py` backtest** (normal): hardcode a fixed past date (e.g. `"2026-05-21"`, roughly one week ago) — **never use a dynamic expression**. A fixed date guarantees cache hits on every re-run.
+  - **`manager/manager.py` (portfolio weight optimisation)**: temporarily set `END = None` in each strategy before running — ensures the optimiser sees the latest data and produces up-to-date weights. Restore the fixed date afterwards.
+  - **Live mode**: set `END = None`.
 - **Taiwan stock universe must be sampled by sector** — never take `[:N]` from the raw list (codes are ordered by sector, so a head-slice concentrates in cement/food/textile). Use the sector-stratified sampling helper in `references/twstock.md`.
 - **Candidate pool — NO lookahead bias**: the universe of stocks passed to `fetch_data` must be derived only from information available at the start of the backtest. NEVER filter candidates using full-period aggregates (e.g. `nlargest(N)` on cumulative net buy over the entire history) — that leaks future data. Instead use ALL stocks that ever appear in the data source (e.g. all stock_ids in trader flows), and let `compute_signals` do the per-rebalance ranking using only the lookback window available at that date.
 
@@ -264,6 +270,7 @@ For full workflow, read `references/manager.md`.
 - Never create files or subdirectories inside `manager/`. Never delete any file in it when removing strategies.
 - Before any reconcile: show pending order summary and ask for explicit user confirmation.
 - When user asks to backtest the portfolio: use `manager/management_backtest.py`, not individual strategy backtests.
+- **Before running `manager/manager.py` for weight optimisation**: set `END = None` in every strategy file so the optimiser uses the latest data. After the run, restore each strategy's fixed past date (roughly one week ago) for normal cache-backed backtests.
 - When user asks to delete a strategy, delete only its own directory (e.g. `strategies/btc_kd_long/`). Never touch `manager/`.
 - **OKX `get_positions()` pitfall:** OKX positions API returns `ctVal` as `None` for some instrument types. Do NOT compute notional as `pos * markPx * ctVal` — use the `notionalUsd` field directly instead. Zero notional causes the position to be ignored and reconciliation skipped.
 - **Order library → reconciler is one atomic task:** Whenever you write or update any `lib/order_*.py` file (e.g. `lib/order_okx.py`), you MUST in the same session also update `manager/reconciler.py` to import from it and replace the `get_positions()` / `place_order()` stubs with real calls. Writing the library without wiring `reconciler.py` leaves automated trading permanently broken. `place_order(symbol, signed_diff, asset_spec, reduce_only=False)` — accept the `reduce_only` kwarg and pass it to the exchange's reduce-only / close-only flag. The reconciler splits position flips into a reduce-only close leg followed by a directional open leg; if the exchange is in one-way mode and reduce_only can be ignored, simply accept and discard the kwarg.
