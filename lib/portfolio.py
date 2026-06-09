@@ -162,10 +162,12 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
     orders = compute_diff(target, actual, threshold)
 
     def _call_place(symbol, sub_diff, asset_spec, reduce_only):
+        # Returns False if place_order_fn skipped the order (e.g. below exchange minimum).
+        # Returns None/truthy on success. Propagates exceptions on failure.
         try:
-            place_order_fn(symbol, sub_diff, asset_spec, reduce_only=reduce_only)
+            return place_order_fn(symbol, sub_diff, asset_spec, reduce_only=reduce_only)
         except TypeError:
-            place_order_fn(symbol, sub_diff, asset_spec)
+            return place_order_fn(symbol, sub_diff, asset_spec)
 
     for order in orders:
         symbol     = order['symbol']
@@ -189,7 +191,7 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
             if abs(sub_diff) < threshold:
                 continue
             try:
-                _call_place(symbol, sub_diff, asset_spec, reduce_only)
+                placed = _call_place(symbol, sub_diff, asset_spec, reduce_only)
             except Exception as e:
                 log_msg = f"order error {symbol}: {e}"
                 logging.error(log_msg)
@@ -198,6 +200,11 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
                                          symbol=symbol, error=e))
                 failed = True
                 break
+
+            if placed is False:
+                # place_order skipped (e.g. qty below exchange minimum) — no notification or log
+                logging.info(f"[reconcile] {symbol} skipped by place_order — below exchange minimum")
+                continue
 
             if reduce_only:
                 key     = 'order_close_long'  if sub_diff < 0 else 'order_close_short'

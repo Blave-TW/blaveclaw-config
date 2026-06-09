@@ -57,12 +57,20 @@ def place_order(symbol, signed_diff, asset_spec=None):
     signed_diff < 0 → sell (increase short / reduce long)
     signed_diff is in account currency (e.g. USD).
 
-    asset_spec: passed through from state.json. Use it to convert
+    CRITICAL — return value convention:
+      return False   if the order was intentionally skipped (qty below exchange minimum,
+                     below one-lot threshold, etc.). This suppresses Telegram notification
+                     and orders.jsonl logging — the user will NOT see a phantom trade.
+      return None    (or any truthy value) on successful order placement.
+      raise          on unexpected errors (network failure, API rejection, etc.).
+
+    asset_spec: passed through from portfolio_config["asset_specs"]. Use it to convert
     signed_diff (account currency) into the instrument's native qty.
 
       asset_spec is None  →  default (fractional qty, no lot constraint):
         price = get_mark_price(symbol)
         qty   = abs(signed_diff) / price
+        if qty < EXCHANGE_MINIMUM: return False  # ← must return False, not bare return
         side  = BUY if signed_diff > 0 else SELL
 
       asset_spec example for futures contracts (e.g. 台指期):
@@ -72,7 +80,7 @@ def place_order(symbol, signed_diff, asset_spec=None):
         fx        = get_fx_rate("TWD")           # TWD per 1 account-currency unit
         notional  = price_twd * asset_spec["contract_value"] / fx
         contracts = round(abs(signed_diff) / notional)
-        if contracts == 0: return                # below one-lot threshold
+        if contracts == 0: return False          # below one-lot threshold
         side = BUY if signed_diff > 0 else SELL
     """
     raise NotImplementedError("implement exchange-specific order placement")
