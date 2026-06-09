@@ -1,4 +1,4 @@
-# Strategy Marketplace API
+# Strategy Library API
 
 Use Blave API credentials from `.env` for all requests.
 Base URL: `https://api.blave.org`
@@ -20,10 +20,11 @@ GET /openclaw/marketplace/strategies/{id}
 ## My accessible strategies
 
 **Flow when user asks what strategies they have, or wants to load any strategy:**
-1. Call BOTH endpoints in parallel:
+1. Call ALL THREE endpoints in parallel:
    - `GET /openclaw/marketplace/my/purchases` — purchased strategies
    - `GET /openclaw/marketplace/my/shared-with-me` — strategies others shared with you
-2. Show the combined list to the user
+   - `GET /openclaw/marketplace/my/official` — free official strategies (no purchase needed)
+2. Merge and deduplicate by id. Show the combined list to the user
 3. User picks one → `GET /openclaw/marketplace/strategies/{id}/code`
 4. Save code to `/tmp/<filename>.py`
 5. **Check for multi-strategy bundle** — scan the file for lines matching `# ===== STRATEGY \d+:`:
@@ -51,6 +52,19 @@ When the downloaded code contains `# ===== STRATEGY N: <name> =====` markers, tr
 
 Example: a file containing two strategies marked as `# ===== STRATEGY 1: BTC SMA Cross =====` and `# ===== STRATEGY 2: ETH RSI Fade =====` should produce `strategies/btc_sma_cross.py` and `strategies/eth_rsi_fade.py`.
 
+## Load official strategies (free)
+
+List all official Blave strategies — no purchase required:
+```
+GET /openclaw/marketplace/my/official
+```
+Response: `[{id, title, description, category, created_at}, ...]`
+
+Code is freely accessible:
+```
+GET /openclaw/marketplace/strategies/{id}/code
+```
+
 ## Load purchased strategies
 
 List purchased strategies:
@@ -58,7 +72,7 @@ List purchased strategies:
 GET /openclaw/marketplace/my/purchases
 ```
 
-Fetch strategy code (requires purchase):
+Fetch strategy code (requires purchase or is_official):
 ```
 GET /openclaw/marketplace/strategies/{id}/code
 ```
@@ -70,7 +84,7 @@ List strategies shared with you:
 ```
 GET /openclaw/marketplace/my/shared-with-me
 ```
-Response: `[{id, title, description, category, shared_at, owner_uid}, ...]`
+Response: `[{id, title, description, category, shared_at}, ...]`
 
 **Flow when user says a strategy was shared with them, or asks what strategies they have access to:**
 1. `GET /openclaw/marketplace/my/shared-with-me` — show the list
@@ -80,7 +94,43 @@ Response: `[{id, title, description, category, shared_at, owner_uid}, ...]`
    - Exit 0 (clean) → move to `strategies/<filename>.py` and proceed
    - Exit 1 (warnings) → show findings to user, ask for confirmation; if confirmed, move to `strategies/` and run
    - Exit 2 (critical) → show findings, delete `/tmp/<filename>.py`, do NOT run
-5. `python3 strategies/<filename>.py`
+
+## Strategy report (performance data)
+
+Get backtest performance for a strategy:
+```
+GET /openclaw/marketplace/strategies/{id}/report
+```
+Response: `{total_return, annual_return, sharpe, max_drawdown, win_rate, trade_count, pnl_curve, backtest_start, backtest_end}`
+
+Submit a report (strategy owner for community; admin only for official):
+```
+POST /openclaw/marketplace/strategies/{id}/report
+Body: {symbol, interval, total_return, annual_return, sharpe, max_drawdown, win_rate, trade_count, pnl_curve, backtest_start, backtest_end}
+```
+
+## Admin endpoints (user_id == 1 only)
+
+List pending community submissions:
+```
+GET /openclaw/marketplace/admin/pending
+```
+
+Approve a pending strategy (makes it public):
+```
+POST /openclaw/marketplace/admin/strategies/{id}/approve
+```
+
+Reject a strategy (sets status to unlisted):
+```
+POST /openclaw/marketplace/admin/strategies/{id}/reject
+```
+
+Create an official strategy (approved + public + is_official immediately):
+```
+POST /openclaw/marketplace/admin/strategies/official
+Body: {title, description, category, code}
+```
 
 ## Description format (required for all uploads)
 

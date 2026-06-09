@@ -252,12 +252,15 @@ After every backtest, `run()` automatically:
 
 Note: the runner builds result_d internally from the precise PnL computation — no manual array reconstruction needed.
 
-## Strategy Marketplace
+## Strategy Library
 
-For all marketplace operations (browse, upload private, submit, share, backup/restore, download), read `references/marketplace.md`.
+For all strategy library operations (browse, upload private, submit, share, backup/restore, download), read `references/marketplace.md`.
 
 - NEVER purchase a strategy on behalf of the user.
-- When user asks about shared strategies or what strategies are available: call `GET /openclaw/marketplace/my/shared-with-me`.
+- When user asks what strategies are available: call ALL THREE in parallel and merge by id:
+  - `GET /openclaw/marketplace/my/purchases`
+  - `GET /openclaw/marketplace/my/shared-with-me`
+  - `GET /openclaw/marketplace/my/official` (free, no purchase needed)
 - When downloading: save to `strategies/{name}/strategy.py`; if `ImportError` on custom lib, reconstruct from the description's "Custom lib dependencies" section.
 
 ## Manager & Reconciler
