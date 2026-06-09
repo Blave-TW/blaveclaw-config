@@ -97,17 +97,32 @@ Response: `[{id, title, description, category, shared_at}, ...]`
 
 ## Strategy report (performance data)
 
+> **Admin only (user_id == 1)** for official strategies. Community strategy owners can submit their own report.
+
 Get backtest performance for a strategy:
 ```
 GET /openclaw/marketplace/strategies/{id}/report
 ```
-Response: `{total_return, annual_return, sharpe, max_drawdown, win_rate, trade_count, pnl_curve, backtest_start, backtest_end}`
+Response: `{total_return, annual_return, sharpe, max_drawdown, pnl_curve, pnl_image_url, backtest_start, backtest_end}`
 
-Submit a report (strategy owner for community; admin only for official):
+Submit metrics:
 ```
 POST /openclaw/marketplace/strategies/{id}/report
-Body: {symbol, interval, total_return, annual_return, sharpe, max_drawdown, win_rate, trade_count, pnl_curve, backtest_start, backtest_end}
+Body: {symbol, interval, total_return, annual_return, sharpe, max_drawdown, pnl_curve, backtest_start, backtest_end}
 ```
+
+Upload P&L chart image (displayed in strategy modal):
+```
+POST /openclaw/marketplace/strategies/{id}/report/image
+Content-Type: multipart/form-data
+Field: image = pnl.png
+```
+Response: `{"status": "ok", "pnl_image_url": "https://..."}`
+
+**Admin flow — after running backtest:**
+1. `python3 strategies/{name}/strategy.py` → generates `strategies/{name}/pnl.png` + `stats.json`
+2. POST metrics from `stats.json` to `/report`
+3. POST `strategies/{name}/pnl.png` to `/report/image`
 
 ## Admin endpoints (user_id == 1 only)
 
