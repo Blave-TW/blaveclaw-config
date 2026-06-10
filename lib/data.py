@@ -45,44 +45,117 @@ def _retry_get(url, max_retries=6, **kwargs):
     return r
 
 
-def _cache_path(prefix, params, start):
-    """Build cache file path. Key = prefix + sorted param values + start date."""
+def _monthly_cache_dir(prefix, params):
+    """cache/{prefix}_{param_str}/  — parent dir for monthly parquet files."""
     param_str = '_'.join(str(v) for _, v in sorted(params.items()))
-    return _CACHE_DIR / f'{prefix}_{param_str}_{start}.parquet'
+    return _CACHE_DIR / f'{prefix}_{param_str}'
 
 
-def _extend_cache(path, fetch_raw_fn, start, end):
-    """Load cache, fetch only missing delta, save, return trimmed df."""
-    e = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d')
-    end_ts = pd.Timestamp(end) + pd.Timedelta(days=1) if end else None  # tz-naive cutoff
+def _next_month(ym):
+    """'2022-01' → '2022-02', '2022-12' → '2023-01'"""
+    y, m = int(ym[:4]), int(ym[5:7])
+    return f'{y+1}-01' if m == 12 else f'{y}-{m+1:02d}'
 
-    if path.exists():
-        cached = pd.read_parquet(path)
-        # normalize index to tz-naive to avoid tz-aware vs tz-naive TypeError
-        if cached.index.tz is not None:
-            cached.index = cached.index.tz_convert('UTC').tz_localize(None)
-        last = cached.index[-1].to_pydatetime()
-        if end and last >= e - timedelta(days=1):
-            return cached[cached.index < end_ts]
-        new_df = fetch_raw_fn(last.strftime('%Y-%m-%d'), None)
-        if not new_df.empty and new_df.index.tz is not None:
-            new_df.index = new_df.index.tz_convert('UTC').tz_localize(None)
-        df = pd.concat([cached, new_df]) if not new_df.empty else cached
-    else:
-        df = fetch_raw_fn(start, end)
-        if df.empty:
-            return df
 
-    # normalize before saving so cache is always tz-naive
-    if not df.empty and df.index.tz is not None:
+def _iter_months(start_str, end_str):
+    """Yield 'YYYY-MM' strings from start month to end month (inclusive)."""
+    ym, end_ym = start_str[:7], end_str[:7]
+    while ym <= end_ym:
+        yield ym
+        ym = _next_month(ym)
+
+
+def _normalise_index(df):
+    """Convert tz-aware index to tz-naive UTC in-place-safe copy."""
+    if df.index.tz is not None:
+        df = df.copy()
         df.index = df.index.tz_convert('UTC').tz_localize(None)
-    df = df[~df.index.duplicated(keep='last')].sort_index()
-    path.parent.mkdir(exist_ok=True)
-    df.to_parquet(path)
-
-    if end_ts is not None:
-        return df[df.index < end_ts]
     return df
+
+
+def _extend_cache_monthly(prefix, params, fetch_raw_fn, start, end):
+    """Monthly-partitioned cache.
+
+    Past months (before current month) are stored immutably — fetched once, never re-fetched.
+    Current month is delta-updated: load cached, fetch from last bar to now, merge.
+
+    Directory: cache/{prefix}_{params}/
+    Files:     YYYY-MM.parquet  (one per month)
+    """
+    cache_dir = _monthly_cache_dir(prefix, params)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.utcnow()
+    end_str   = end or now.strftime('%Y-%m-%d')
+    current_ym = now.strftime('%Y-%m')
+    tomorrow   = (now + timedelta(days=1)).strftime('%Y-%m-%d')
+
+    frames = []
+    for ym in _iter_months(start, end_str):
+        path    = cache_dir / f'{ym}.parquet'
+        ym_start = f'{ym}-01'
+        ym_end   = f'{_next_month(ym)}-01'   # exclusive upper bound when fetching
+
+        if ym < current_ym:
+            # Past month — immutable: fetch once, never touch again
+            if not path.exists():
+                df = fetch_raw_fn(ym_start, ym_end)
+                if df.empty:
+                    continue
+                df = _normalise_index(df)
+                df = df[~df.index.duplicated(keep='last')].sort_index()
+                df.to_parquet(path)
+            frames.append(pd.read_parquet(path))
+        else:
+            # Current month — may have new bars
+            if path.exists():
+                cached = _normalise_index(pd.read_parquet(path))
+                last_ts = cached.index[-1].strftime('%Y-%m-%d')
+                delta = fetch_raw_fn(last_ts, tomorrow)
+                if not delta.empty:
+                    delta  = _normalise_index(delta)
+                    merged = pd.concat([cached, delta])
+                    merged = merged[~merged.index.duplicated(keep='last')].sort_index()
+                    merged.to_parquet(path)
+                    frames.append(merged)
+                else:
+                    frames.append(cached)
+            else:
+                df = fetch_raw_fn(ym_start, tomorrow)
+                if df.empty:
+                    continue
+                df = _normalise_index(df)
+                df = df[~df.index.duplicated(keep='last')].sort_index()
+                df.to_parquet(path)
+                frames.append(df)
+
+    if not frames:
+        return pd.DataFrame()
+
+    result = pd.concat(frames)
+    result = _normalise_index(result)
+    result = result[~result.index.duplicated(keep='last')].sort_index()
+
+    start_ts = pd.Timestamp(start)
+    end_ts   = pd.Timestamp(end_str) + pd.Timedelta(days=1)
+    return result[(result.index >= start_ts) & (result.index < end_ts)]
+
+
+def _save_monthly(prefix, params, df):
+    """Split df by month and save each month's slice to its own parquet file.
+    Used by batch fetchers to populate the monthly cache after a bulk API call.
+    """
+    cache_dir = _monthly_cache_dir(prefix, params)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    df = _normalise_index(df)
+    df = df[~df.index.duplicated(keep='last')].sort_index()
+    for ym, grp in df.groupby(df.index.strftime('%Y-%m')):
+        path = cache_dir / f'{ym}.parquet'
+        if path.exists():
+            existing = _normalise_index(pd.read_parquet(path))
+            grp = pd.concat([existing, grp])
+            grp = grp[~grp.index.duplicated(keep='last')].sort_index()
+        grp.to_parquet(path, compression='snappy')
 
 
 # ── Kline ─────────────────────────────────────────────────────────────────────
@@ -122,9 +195,8 @@ def _fetch_kline_raw(symbol, interval, start, end, headers):
 
 def fetch_kline(symbol, interval, start, end, headers):
     """Fetch OHLCV kline data from Blave API with annual chunking and local cache."""
-    params = {'symbol': symbol, 'period': interval}
-    return _extend_cache(
-        _cache_path('kline', params, start),
+    return _extend_cache_monthly(
+        'kline', {'symbol': symbol, 'period': interval},
         lambda s, e: _fetch_kline_raw(symbol, interval, s, e, headers),
         start, end,
     )
@@ -167,8 +239,8 @@ def _fetch_alpha_raw(endpoint, params, headers, start, end):
 
 def _fetch_alpha(endpoint, params, headers, start, end):
     slug = endpoint.split('/')[0]
-    return _extend_cache(
-        _cache_path(slug, params, start),
+    return _extend_cache_monthly(
+        slug, params,
         lambda s, e: _fetch_alpha_raw(endpoint, params, headers, s, e),
         start, end,
     )
@@ -310,8 +382,8 @@ def settlement_signals_from_db(df, signal):
 def fetch_db_kline(dataset, symbol, schema, start, end, headers):
     """Fetch CME/NYMEX/ICE OHLCV with local cache."""
     slug = schema.replace('-', '')
-    return _extend_cache(
-        _cache_path(f'db_{slug}', {'dataset': dataset.replace('.', ''), 'symbol': symbol}, start),
+    return _extend_cache_monthly(
+        f'db_{slug}', {'dataset': dataset.replace('.', ''), 'symbol': symbol},
         lambda s, e: _fetch_db_raw(dataset, symbol, schema, s, e, headers),
         start, end,
     )
@@ -333,8 +405,8 @@ def _fetch_twstock_price_raw(stock_id, start, end, headers):
 def fetch_twstock_price_adj(stock_id, start, end, headers):
     """台股向後調整日K（除權息還原價）. Returns DataFrame with Open/Close columns.
     Use for backtesting — prices are dividend-adjusted so returns are comparable across time."""
-    return _extend_cache(
-        _cache_path('twstock_price', {'id': stock_id}, start),
+    return _extend_cache_monthly(
+        'twstock_price', {'id': stock_id},
         lambda s, e: _fetch_twstock_price_raw(stock_id, s, e, headers),
         start, end,
     )
@@ -356,8 +428,8 @@ def fetch_twstock_price(stock_id, start, end, headers):
     """台股原始日K（未除權息）. Returns DataFrame with Open/High/Low/Close/Volume columns.
     Use for visualization/charting — matches prices users see on broker apps.
     Do NOT use for backtesting (dividends cause artificial price drops that distort signals)."""
-    return _extend_cache(
-        _cache_path('twstock_price_nonadj', {'id': stock_id}, start),
+    return _extend_cache_monthly(
+        'twstock_price_nonadj', {'id': stock_id},
         lambda s, e: _fetch_twstock_price_nonadj_raw(stock_id, s, e, headers),
         start, end,
     )
@@ -376,8 +448,8 @@ def _fetch_twstock_inst_raw(stock_id, start, end, headers):
 
 def fetch_twstock_institutional(stock_id, start, end, headers):
     """台股三大法人每日買賣超. Returns DataFrame with foreign_net and raw columns."""
-    return _extend_cache(
-        _cache_path('twstock_inst', {'id': stock_id}, start),
+    return _extend_cache_monthly(
+        'twstock_inst', {'id': stock_id},
         lambda s, e: _fetch_twstock_inst_raw(stock_id, s, e, headers),
         start, end,
     )
@@ -399,8 +471,8 @@ def _fetch_twstock_shareholding_raw(stock_id, start, end, headers):
 
 def fetch_twstock_shareholding(stock_id, start, end, headers):
     """台股週頻股東人數（持股分級表 total）. Returns DataFrame with 'shareholders' column."""
-    return _extend_cache(
-        _cache_path('twstock_shareholding', {'id': stock_id}, start),
+    return _extend_cache_monthly(
+        'twstock_shareholding', {'id': stock_id},
         lambda s, e: _fetch_twstock_shareholding_raw(stock_id, s, e, headers),
         start, end,
     )
@@ -768,11 +840,11 @@ def fetch_twstock_shareholding_batch(stock_ids, start, end, headers):
     uncached = []
 
     for sid in stock_ids:
-        path = _cache_path('twstock_shareholding', {'id': sid}, start)
-        if path.exists():
+        cache_dir = _monthly_cache_dir('twstock_shareholding', {'id': sid})
+        if cache_dir.exists() and list(cache_dir.glob('*.parquet')):
             try:
-                results[sid] = _extend_cache(
-                    path,
+                results[sid] = _extend_cache_monthly(
+                    'twstock_shareholding', {'id': sid},
                     lambda s, e, _sid=sid: _fetch_twstock_shareholding_raw(_sid, s, e, headers),
                     start, end,
                 )
@@ -800,9 +872,7 @@ def fetch_twstock_shareholding_batch(stock_ids, start, end, headers):
                 df = df.set_index('date').sort_index()
                 total = df[df['level'] == 'total'][['people']].rename(columns={'people': 'shareholders'}).astype(float)
                 total = total[~total.index.duplicated(keep='last')]
-                path = _cache_path('twstock_shareholding', {'id': sid}, start)
-                path.parent.mkdir(exist_ok=True)
-                total.to_parquet(path, compression='snappy')
+                _save_monthly('twstock_shareholding', {'id': sid}, total)
                 results[sid] = total
         except Exception as e:
             print(f'  [batch] shareholding chunk {i//50 + 1} error: {e}')
@@ -816,11 +886,11 @@ def fetch_twstock_price_adj_batch(stock_ids, start, end, headers):
     uncached = []
 
     for sid in stock_ids:
-        path = _cache_path('twstock_price', {'id': sid}, start)
-        if path.exists():
+        cache_dir = _monthly_cache_dir('twstock_price', {'id': sid})
+        if cache_dir.exists() and list(cache_dir.glob('*.parquet')):
             try:
-                results[sid] = _extend_cache(
-                    path,
+                results[sid] = _extend_cache_monthly(
+                    'twstock_price', {'id': sid},
                     lambda s, e, _sid=sid: _fetch_twstock_price_raw(_sid, s, e, headers),
                     start, end,
                 )
@@ -848,9 +918,7 @@ def fetch_twstock_price_adj_batch(stock_ids, start, end, headers):
                 df = df.set_index('date').sort_index()[['open', 'close']].rename(
                     columns={'open': 'Open', 'close': 'Close'}).astype(float)
                 df = df.replace(0, float('nan')).ffill()
-                path = _cache_path('twstock_price', {'id': sid}, start)
-                path.parent.mkdir(exist_ok=True)
-                df.to_parquet(path, compression='snappy')
+                _save_monthly('twstock_price', {'id': sid}, df)
                 results[sid] = df
         except Exception as e:
             print(f'  [batch] price_adj chunk {i//50 + 1} error: {e}')
@@ -864,11 +932,11 @@ def fetch_twstock_institutional_batch(stock_ids, start, end, headers):
     uncached = []
 
     for sid in stock_ids:
-        path = _cache_path('twstock_inst', {'id': sid}, start)
-        if path.exists():
+        cache_dir = _monthly_cache_dir('twstock_inst', {'id': sid})
+        if cache_dir.exists() and list(cache_dir.glob('*.parquet')):
             try:
-                results[sid] = _extend_cache(
-                    path,
+                results[sid] = _extend_cache_monthly(
+                    'twstock_inst', {'id': sid},
                     lambda s, e, _sid=sid: _fetch_twstock_inst_raw(_sid, s, e, headers),
                     start, end,
                 )
@@ -896,9 +964,7 @@ def fetch_twstock_institutional_batch(stock_ids, start, end, headers):
                 df = df.set_index('date').sort_index()
                 df['foreign_net'] = df['foreign_buy'] - df['foreign_sell']
                 df = df.fillna(0)
-                path = _cache_path('twstock_inst', {'id': sid}, start)
-                path.parent.mkdir(exist_ok=True)
-                df.to_parquet(path, compression='snappy')
+                _save_monthly('twstock_inst', {'id': sid}, df)
                 results[sid] = df
         except Exception as e:
             print(f'  [batch] institutional chunk {i//50 + 1} error: {e}')
@@ -926,11 +992,11 @@ def fetch_twstock_foreign_shareholding_batch(stock_ids, start, end, headers):
     uncached = []
 
     for sid in stock_ids:
-        path = _cache_path('twstock_foreign_sh', {'id': sid}, start)
-        if path.exists():
+        cache_dir = _monthly_cache_dir('twstock_foreign_sh', {'id': sid})
+        if cache_dir.exists() and list(cache_dir.glob('*.parquet')):
             try:
-                results[sid] = _extend_cache(
-                    path,
+                results[sid] = _extend_cache_monthly(
+                    'twstock_foreign_sh', {'id': sid},
                     lambda s, e, _sid=sid: _fetch_twstock_foreign_shareholding_raw(_sid, s, e, headers),
                     start, end,
                 )
@@ -956,9 +1022,7 @@ def fetch_twstock_foreign_shareholding_batch(stock_ids, start, end, headers):
                 df = pd.DataFrame(records)
                 df['date'] = pd.to_datetime(df['date'])
                 df = df.set_index('date').sort_index()
-                path = _cache_path('twstock_foreign_sh', {'id': sid}, start)
-                path.parent.mkdir(exist_ok=True)
-                df.to_parquet(path, compression='snappy')
+                _save_monthly('twstock_foreign_sh', {'id': sid}, df)
                 results[sid] = df
         except Exception as e:
             print(f'  [batch] foreign_shareholding chunk {i//50 + 1} error: {e}')
@@ -1016,20 +1080,15 @@ def fetch_twfutures_ohlcv(symbol, schema, start, end, headers):
     schema: '1d' | '1m' | '5m' | '15m' | '30m' | '60m'
     Volume is in contracts (口數).
     """
-    return _extend_cache(
-        _cache_path(f'twfutures_{schema}', {'symbol': symbol}, start),
+    return _extend_cache_monthly(
+        f'twfutures_{schema}', {'symbol': symbol},
         lambda s, e: _fetch_twfutures_raw(symbol, schema, s, e, headers),
         start, end,
     )
 
 
-def fetch_twfutures_bid_ask_vol(start, end, headers):
-    """台指期內外盤成交量（1 分鐘）. Returns DataFrame indexed by UTC time.
-
-    Columns: bid_vol (內盤口數), ask_vol (外盤口數), total_vol (總口數).
-    Data from 2022-01-04. Max 31 days per request; chunked automatically.
-    Both day session (08:45-13:45 TWN) and night session (15:00-next 05:00 TWN) included.
-    """
+def _fetch_twfutures_bid_ask_vol_raw(start, end, headers):
+    """Fetch raw bid/ask vol for a date range (≤31 days per chunk)."""
     s = datetime.strptime(start, '%Y-%m-%d')
     e = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d') + timedelta(days=1)
     chunk_days = 28
@@ -1063,6 +1122,26 @@ def fetch_twfutures_bid_ask_vol(start, end, headers):
     df = df.set_index('time').sort_index()
     df = df[~df.index.duplicated(keep='first')]
     return df[['bid_vol', 'ask_vol', 'total_vol']].astype(int)
+
+
+def fetch_twfutures_bid_ask_vol(start, end, headers):
+    """台指期內外盤成交量（1 分鐘）. Returns DataFrame indexed by UTC time.
+
+    Columns: bid_vol (內盤口數), ask_vol (外盤口數), total_vol (總口數).
+    Data from 2022-01-04. Both day session (08:45-13:45 TWN) and night session included.
+    Monthly cache: cache/twfutures_bav_TXF/YYYY-MM.parquet
+    """
+    result = _extend_cache_monthly(
+        'twfutures_bav', {'symbol': 'TXF'},
+        lambda s, e: _fetch_twfutures_bid_ask_vol_raw(s, e, headers),
+        start, end,
+    )
+    if result.empty:
+        return result
+    for col in ['bid_vol', 'ask_vol', 'total_vol']:
+        if col in result.columns:
+            result[col] = result[col].astype(int)
+    return result
 
 
 def txf_settlement_mask(index):

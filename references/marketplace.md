@@ -103,13 +103,14 @@ Get backtest performance for a strategy:
 ```
 GET /openclaw/marketplace/strategies/{id}/report
 ```
-Response: `{total_return, annual_return, sharpe, max_drawdown, pnl_curve, pnl_image_url, backtest_start, backtest_end}`
+Response: `{total_return, annual_return, sharpe, max_drawdown, pnl_image_url, backtest_start, backtest_end}`
 
 Submit metrics:
 ```
 POST /openclaw/marketplace/strategies/{id}/report
-Body: {symbol, interval, total_return, annual_return, sharpe, max_drawdown, pnl_curve, backtest_start, backtest_end}
+Body: {symbol, interval, total_return, annual_return, sharpe, max_drawdown, backtest_start, backtest_end}
 ```
+All fields required. **Do not include `pnl_curve`** — P&L chart is displayed as an uploaded image, not rendered from data.
 
 Upload P&L chart image (displayed in strategy modal):
 ```
@@ -120,9 +121,10 @@ Field: image = pnl.png
 Response: `{"status": "ok", "pnl_image_url": "https://..."}`
 
 **Admin flow — after running backtest:**
-1. `python3 strategies/{name}/strategy.py` → generates `strategies/{name}/pnl.png` + `stats.json`
-2. POST metrics from `stats.json` to `/report`
-3. POST `strategies/{name}/pnl.png` to `/report/image`
+1. `python3 strategies/{name}/strategy.py` → generates `strategies/{name}/pnl.png` + `strategies/{name}/stats.json`
+2. Read `stats.json` for metrics. Compute `annual_return` from total return + date range if not present.
+3. POST metrics to `POST /strategies/{id}/report`
+4. POST `strategies/{name}/pnl.png` to `POST /strategies/{id}/report/image`
 
 ## Admin endpoints (user_id == 1 only)
 
@@ -149,31 +151,13 @@ Body: {title, description, category, code}
 
 ## Description format (required for all uploads)
 
-Every strategy uploaded to the marketplace (private or submit) must use this structured description so recipients can reconstruct any missing custom lib:
+Description is **plain text only** — 1–2 sentences describing the strategy logic. No parameter values, no markdown sections.
 
+Example: `台股動能輪動：每週從跨產業台股中選出動能最強的前 30 支等權持有，週末調倉，自動跟隨強勢板塊輪動。`
+
+If the strategy uses a **custom lib** (not standard lib), append a brief note:
 ```
-## Strategy logic
-[Entry/exit rules in plain language]
-
-## Parameters
-- SYMBOL, INTERVAL, BUDGET, etc.
-
-## Standard lib used
-[List of functions from lib/data, lib/execute, lib/report, lib/analysis]
-
-## Custom lib dependencies
-### lib/filename.py — function_name(param: type, ...) -> return_type
-[What it does, accepted values for each param, side effects, required env vars or headers]
-[Omit this section if the strategy only uses standard lib]
-```
-
-Example custom lib entry:
-```
-## Custom lib dependencies
-### lib/orders_bybit.py — place_order(side: str)
-Places a market order on Bybit. side accepts "BUY" | "SELL" | "SHORT" | "COVER".
-BUY/SHORT open a full-budget position; SELL/COVER close the entire position.
-Requires env vars: BYBIT_API_KEY, BYBIT_API_SECRET. Must include header: referer: Ue001036
+Custom lib: lib/orders_bybit.py — place_order("BUY"|"SELL"|"SHORT"|"COVER"). Requires BYBIT_API_KEY, BYBIT_API_SECRET.
 ```
 
 ## Submit a strategy for sale

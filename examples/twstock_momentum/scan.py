@@ -12,8 +12,8 @@ from dotenv import dotenv_values
 from strategy import fetch_data, compute_signals, FEE, WARMUP
 from lib.param_scan import scan_grid, find_plateau, plot_heatmap
 
-MOM_VALS = [20, 40, 60, 80, 120]
-TOP_VALS  = [3, 5, 7, 10]
+MOM_VALS = [60, 80, 100, 120, 140, 160, 200, 250]
+TOP_VALS  = [20, 25, 30, 35, 40]
 
 env  = dotenv_values()
 hdrs = {'api-key': env['blave_api_key'], 'secret-key': env['blave_secret_key']}
