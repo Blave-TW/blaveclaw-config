@@ -1132,6 +1132,24 @@ def _fetch_twfutures_bid_ask_vol_raw(start, end, headers):
     return df[['bid_vol', 'ask_vol', 'total_vol']].astype(int)
 
 
+def fetch_twfutures_pcr(start, end, headers):
+    """台指選擇權買賣權未平倉量比率（日）. Returns DataFrame with 'pcr' column.
+
+    Data from TAIFEX (台灣期貨交易所), from 2001-12-24.
+    index: date (daily, trading days only)
+    pcr: 買賣權未平倉量比率%
+    """
+    end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
+    r = _retry_get(f'{BASE}/studio/market/twfutures/option/pcr',
+                   headers=headers, params={'start': start, 'end': end_str}, timeout=60)
+    data = r.json().get('data', [])
+    if not data:
+        return pd.DataFrame(columns=['pcr'])
+    df = pd.DataFrame(data)
+    df['date'] = pd.to_datetime(df['date'])
+    return df.set_index('date').sort_index()[['pcr']].astype(float)
+
+
 def fetch_twfutures_bid_ask_vol(start, end, headers):
     """台指期內外盤成交量（1 分鐘）. Returns DataFrame indexed by UTC time.
 
