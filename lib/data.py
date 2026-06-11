@@ -1079,12 +1079,20 @@ def fetch_twfutures_ohlcv(symbol, schema, start, end, headers):
     symbol: 'TXF'
     schema: '1d' | '1m' | '5m' | '15m' | '30m' | '60m'
     Volume is in contracts (口數).
+
+    For 1d: index is Asia/Taipei tz so df.index[-1].date() returns the correct trading date.
     """
-    return _extend_cache_monthly(
+    df = _extend_cache_monthly(
         f'twfutures_{schema}', {'symbol': symbol},
         lambda s, e: _fetch_twfutures_raw(symbol, schema, s, e, headers),
         start, end,
     )
+    if schema == '1d' and not df.empty:
+        # Cache stores naive UTC (midnight TWN = prev-day 16:00 UTC). Convert to Asia/Taipei
+        # so the index date matches the actual trading date.
+        df = df.copy()
+        df.index = pd.to_datetime(df.index, utc=True).tz_convert('Asia/Taipei')
+    return df
 
 
 def _fetch_twfutures_bid_ask_vol_raw(start, end, headers):
