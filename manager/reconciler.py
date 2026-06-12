@@ -64,6 +64,19 @@ def place_order(symbol, signed_diff, asset_spec=None):
       return None    (or any truthy value) on successful order placement.
       raise          on unexpected errors (network failure, API rejection, etc.).
 
+    QTY PRECISION — REQUIRED before placing any order:
+      Exchanges reject orders whose qty violates the symbol's step size, so fetch
+      the instrument's trading rules FIRST (cache them at startup):
+        Binance futures: GET /fapi/v1/exchangeInfo → LOT_SIZE.stepSize, minQty, MIN_NOTIONAL
+        OKX:             GET /api/v5/public/instruments → lotSz, minSz
+        Bybit:           GET /v5/market/instruments-info → lotSizeFilter.qtyStep, minOrderQty
+      Then floor qty to the step using Decimal — float arithmetic produces
+      0.10000000000000003-style artifacts that exchanges reject:
+        from decimal import Decimal, ROUND_DOWN
+        qty = float(Decimal(str(raw_qty)).quantize(Decimal(step_str), rounding=ROUND_DOWN))
+      Send qty as a plain decimal string — never scientific notation like 1e-05.
+      If the floored qty < minQty or qty*price < minNotional → return False.
+
     asset_spec: passed through from portfolio_config["asset_specs"]. Use it to convert
     signed_diff (account currency) into the instrument's native qty.
 

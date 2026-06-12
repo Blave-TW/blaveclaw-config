@@ -7,6 +7,10 @@ Updates manager/portfolio_config.json.
 
 Usage:
     python3 manager/manager.py [--lookback 365] [--account 10000] [--notify]
+    python3 manager/manager.py --apply   # actually write portfolio_config.json
+
+Default is DRY-RUN: weights are computed and printed but portfolio_config.json
+is NOT touched. Pass --apply only after the user has confirmed the new weights.
 """
 import argparse, json, sys
 import numpy as np
@@ -103,6 +107,7 @@ def main():
     parser.add_argument('--account',    type=float, default=None,       help='Override account_value in portfolio_config.json')
     parser.add_argument('--target-vol', type=float, default=TARGET_VOL, help=f'Target annual volatility for leverage (default {TARGET_VOL})')
     parser.add_argument('--notify',     action='store_true',             default=NOTIFY, help='Send Telegram notification after update')
+    parser.add_argument('--apply',      action='store_true', help='Write the new weights to portfolio_config.json (default: dry-run, file untouched)')
     args = parser.parse_args()
 
     np.random.seed(42)
@@ -173,8 +178,9 @@ def main():
     cfg['sharpe_ratio']       = round(port_sharpe, 4)
     cfg.pop('daily_vol_usdt', None)
 
-    with open(CONFIG_PATH, 'w') as f:
-        json.dump(cfg, f, indent=2)
+    if args.apply:
+        with open(CONFIG_PATH, 'w') as f:
+            json.dump(cfg, f, indent=2)
 
     # Print summary
     print(f'\nBlaveClaw Strategy Manager  (lookback={args.lookback}d)')
@@ -192,12 +198,17 @@ def main():
     print(f'Portfolio Sharpe    : {port_sharpe:.4f}')
     print(f'Account Value       : ${account_value:,.0f}')
     print(f'Ann. Volatility     : {port_vol:.1f}%  →  target {args.target_vol*100:.0f}%  leverage {leverage:.2f}x')
-    print(f'manager/portfolio_config.json updated\n')
+    if args.apply:
+        print(f'manager/portfolio_config.json updated\n')
+    else:
+        print('DRY RUN — manager/portfolio_config.json NOT modified.')
+        print('Live weights are unchanged. Re-run with --apply to write the weights above.\n')
 
     if args.notify:
         try:
             from lib.notify import send_text
-            lines = [f'[BlaveClaw Manager] Portfolio updated (lookback={args.lookback}d)']
+            action = 'Portfolio updated' if args.apply else 'Proposed weights (DRY RUN, config not modified)'
+            lines = [f'[BlaveClaw Manager] {action} (lookback={args.lookback}d)']
             for name, w in sorted(weights.items(), key=lambda x: x[1], reverse=True):
                 sharpe = valid[name].get('Sharpe Ratio') or 0.0
                 lines.append(f'  {name}: {w:.1%}  Sharpe {sharpe:.2f}')
