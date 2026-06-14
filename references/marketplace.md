@@ -4,6 +4,23 @@ Use Blave API credentials from `.env` for all requests.
 Base URL: `https://api.blave.org`
 Headers: `api-key: {blave_api_key}`, `secret-key: {blave_secret_key}`
 
+## Strategy categories
+
+The **Strategy Library** is the umbrella system. Within it, every strategy falls into exactly one of four categories. "**Marketplace**" specifically means the *paid public store* (category 2) — not the whole library.
+
+| Category | Source | Cost | Who can see / download code | List endpoint |
+|---|---|---|---|---|
+| **Official** | Listed by Blave | Free | All users, no purchase needed | `GET /my/official` |
+| **Marketplace (paid)** | Listed for sale by other users | Paid | Anyone can browse; code downloadable only **after purchase** | Browse `GET /strategies`; after buying `GET /my/purchases` |
+| **Shared** | Privately shared to specific users | Free | Only the named recipients; not public, not browsable | `GET /my/shared-with-me` |
+| **Private** | Uploaded by you | — | Only you (plus anyone you explicitly share with) | `GET /my/private` |
+
+Distinguishing dimensions: **source** (who created it), **cost** (free / paid), **visibility** (public / named recipients / yourself only).
+
+- **"What strategies can I use / load?"** → the first three categories (official + purchases + shared-with-me) are the strategies authored by others that you can load. Merge and dedupe them, then let the user pick. See [My accessible strategies](#my-accessible-strategies).
+- **"Which private strategies have I uploaded?"** → the fourth category, via `GET /my/private`. See [Private strategies](#private-strategies).
+- A private strategy can be **promoted** to the Marketplace (submit for sale) or **shared** with specific users, but by default it is visible to you alone.
+
 ## Browse
 
 List all available strategies:
@@ -242,6 +259,15 @@ Content-Type: application/json
 Status starts as `pending`. Blave reviews and publishes it. Buyer downloads the single file and their agent automatically splits and deploys both strategies.
 
 ## Private strategies
+
+Private strategies are your own uploads — only you can see them (plus anyone you explicitly share with). They are free, skip review, and are immediately accessible.
+
+**List your private strategies:**
+```
+GET /openclaw/marketplace/my/private
+```
+Response: `{"strategies": [{id, title, description, category, created_at}, ...]}`
+This is the only category not covered by the three "accessible strategies" endpoints — use it when the user asks which strategies they have uploaded, or to list their own private strategies.
 
 Upload a private strategy (no review, immediately accessible):
 ```

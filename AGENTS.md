@@ -257,11 +257,15 @@ Note: the runner builds result_d internally from the precise PnL computation —
 
 For all strategy library operations (browse, upload private, submit, share, backup/restore, download), read `references/marketplace.md`.
 
+The Strategy Library has four distinct categories — keep them straight (full taxonomy in `references/marketplace.md`):
+- **Official** (free, from Blave) → `GET /openclaw/marketplace/my/official`
+- **Marketplace (paid)** (listed for sale by other users) → browse `GET /openclaw/marketplace/strategies`, buy, then `GET /openclaw/marketplace/my/purchases`
+- **Shared** (privately shared to you by specific users) → `GET /openclaw/marketplace/my/shared-with-me`
+- **Private** (uploaded by you, visible only to you) → `GET /openclaw/marketplace/my/private`
+
 - NEVER purchase a strategy on behalf of the user.
-- When user asks what strategies are available: call ALL THREE in parallel and merge by id:
-  - `GET /openclaw/marketplace/my/purchases`
-  - `GET /openclaw/marketplace/my/shared-with-me`
-  - `GET /openclaw/marketplace/my/official` (free, no purchase needed)
+- When user asks what strategies they can use / load: call the first THREE (official + purchases + shared-with-me) in parallel and merge by id — these are strategies authored by others.
+- When user asks which strategies *they* uploaded: use `GET /openclaw/marketplace/my/private`.
 - When downloading: save to `strategies/{name}/strategy.py`; if `ImportError` on custom lib, reconstruct from the description's "Custom lib dependencies" section.
 
 ## Manager & Reconciler
