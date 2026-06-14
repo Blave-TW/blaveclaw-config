@@ -50,6 +50,7 @@ Before writing any strategy code, classify the strategy:
 - `run(locals(), fetch_data, compute_signals, send_telegram_fn=make_sender())` — runner handles everything else
 - `WARMUP` (optional config) — number of bars to trim from the start of the backtest (warm-up period where indicators are not yet stable). Set to the sum of all rolling windows used. Runner automatically trims if present.
 - Signal values: positive float = long (size fraction), negative float = short (size fraction), 0.0 = flat/cover, nan = hold (ffill)
+- **Long AND short strategies: use FOUR independent thresholds** (`BUY_TH`/`SELL_TH`/`SHORT_TH`/`COVER_TH`) — never collapse long-exit and short-entry into one `exit_th` (that removes the flat state and flips the book on every oscillation). Exits are threshold *crossings*, not band-landings — a two-sided strategy MUST use a stateful loop, not vectorized assignment + ffill (which holds stale positions when price gaps over the flat band). Read the **Long/Short** section in `references/strategy-code.md` for the correct stateful pattern and how to scan it.
 - Settlement exit for futures: use 0.0 (same as flat) — do NOT use -1.0 (that means short)
 - **Execution model — two types, must declare explicitly:**
   - **next-bar open** (default): signal at close[t] executes at open[t+1]. Plain `pd.Series` return, no exec_at_close needed.

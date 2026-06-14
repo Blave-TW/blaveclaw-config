@@ -21,6 +21,7 @@ CRITICAL: Every Type A strategy MUST be based on `strategies/TEMPLATE_A.py`. Cop
 | Value | Meaning | Execution |
 |-------|---------|-----------|
 | positive float (`1.0`, `0.6`, …) | long, value = position size fraction | next bar **Open** |
+| negative float (`-1.0`, `-0.6`, …) | short, value = position size fraction | next bar **Open** |
 | `0.0` | flat — exit | next bar **Open** |
 | `nan` | hold — keep current position unchanged | no trade |
 
@@ -103,6 +104,111 @@ def compute_signals(df):
 ```
 
 `compute_signals` must be a **pure function** (no API calls, no I/O, no side effects).
+
+## Indicator hygiene — standardise ratios in log space
+
+A **ratio** (put/call ratio, volume ratio, OI ratio — anything `>0` and right-skewed) must be **log-transformed before** computing a rolling z-score or mean. A raw z-score assumes a symmetric distribution; a ratio is multiplicative and bounded below by 0, so a raw z-score compresses the high tail (exactly where the extreme signal usually lives) and exaggerates the low tail. Take `log` first, then standardise:
+
+```python
+logp = np.log(df['pcr'])                       # ratio → additive, ~symmetric
+z    = (logp - logp.rolling(w).mean()) / logp.rolling(w).std()
+```
+
+This makes the z-score symmetric, keeps extreme readings meaningful, and tends to move the scanned optimum away from the grid edge (a raw-ratio scan often pins the best threshold at the boundary because the skew piles up there). Same idea for any strictly-positive, multiplicatively-distributed input.
+
+## Long/Short — use FOUR independent thresholds
+
+CRITICAL: A strategy that trades **both** long and short needs four distinct thresholds, never two. Long-exit and short-entry are **separate decisions** and must not share a threshold.
+
+```python
+BUY_TH   =  0.8   # enter long   when indicator rises above this
+SELL_TH  =  0.2   # exit long → flat when it falls back below this
+COVER_TH = -0.2   # exit short → flat when it rises back above this
+SHORT_TH = -0.8   # enter short  when it falls below this
+# HARD constraints (per side): BUY_TH > SELL_TH, COVER_TH > SHORT_TH, and BUY_TH > SHORT_TH.
+# SELL_TH vs COVER_TH is a DESIGN CHOICE, not a rule:
+#   SELL_TH > COVER_TH → clean flat neutral band in the middle (tight exits, mean-reversion style)
+#   SELL_TH < COVER_TH → overlapping HOLD zone (cover_th..sell_th): positions ride through the
+#                        middle, exiting only on the far side (trend / give-room style)
+```
+
+**Why not two?** Collapsing long-exit and short-entry into one `exit_th` (e.g. `signal[x < exit_th] = -1.0`) removes the flat state entirely — the book is *always* long or short and flips directly at one level. That couples two unrelated risk decisions, eliminates any neutral zone, and makes the backtest flip on every minor oscillation around that single level. The four-threshold form gives each side its own entry and its own exit, with a flat hold-band in the middle.
+
+**You MUST use a stateful loop — vectorized assignment is WRONG here.**
+
+The naive `signal[x>buy]=1; signal[x<short]=-1; signal[(x>cover)&(x<sell)]=0` (then ffill) is **buggy**. With one side only, the exit is a half-line (`x < exit_th` → 0) that price can never skip — vectorized is fine. But with two sides the flat exit must be a *bounded band* `(cover_th, sell_th)` (a half-line would overwrite the opposite entry). An exit is a **threshold crossing**, not "landing inside a band": if price gaps over the band in a single bar (e.g. from short territory straight into the long dead zone), `ffill` keeps holding the **stale** position instead of exiting. The dead zones can no longer be told apart from a carried-over position. Correct exit logic requires the current position, i.e. **state**:
+
+```python
+def compute_signals(df, buy_th=BUY_TH, sell_th=SELL_TH,
+                     cover_th=COVER_TH, short_th=SHORT_TH):
+    import pandas as pd, numpy as np
+    x   = df['indicator'].to_numpy()
+    pos = 0                                  # current position: +1 / 0 / -1
+    out = np.zeros(len(x))
+    for i, xi in enumerate(x):
+        if np.isnan(xi):
+            out[i] = pos; continue
+        # 1) exit first — crossing back out of a position's dead zone
+        if pos == 1 and xi < sell_th:   pos = 0     # exit long → flat
+        elif pos == -1 and xi > cover_th: pos = 0   # exit short → flat
+        # 2) then entry (allows a same-bar flip flat→long/short after an exit)
+        if pos == 0:
+            if   xi > buy_th:   pos = 1
+            elif xi < short_th: pos = -1
+        out[i] = pos
+    return pd.Series(out, index=df.index)
+```
+
+Dead zones now behave correctly: a long is **held** through `(sell_th, buy_th)` and only exits once `x` actually crosses *below* `sell_th` — no matter how far it gaps; a short is held through `(short_th, cover_th)` and exits only on crossing *above* `cover_th`. A big gap from one side past the flat band straight to the opposite entry flips in a single bar (exit then enter), which the band-landing version silently misses.
+
+The loop is pure (no I/O) and runs on a daily series in milliseconds — fast enough for `scan_grid`'s repeated calls.
+
+**Scanning four thresholds — scan each side independently, two heatmaps.**
+
+`scan_grid` / `plot_heatmap` are inherently 2D (two params → one heatmap). Do NOT force symmetry to squeeze four params into one chart — long and short are independent decisions and the market is rarely symmetric (crashes are faster than rallies). Instead scan each side on its own:
+
+1. **Long scan** — sweep `buy_th` × `sell_th` with the short side turned OFF → `heatmap_long.png`, pick the best long pair.
+2. **Short scan** — sweep `short_th` × `cover_th` with the long side turned OFF → `heatmap_short.png`, pick the best short pair.
+3. Put all four into `strategy.py`, run the full long+short backtest to verify.
+
+**Choosing the scan ranges — do NOT use `percentile_thresholds` for a contrarian/mean-reversion strategy.** That helper splits the distribution into entry=upper-half / exit=lower-half, which hard-codes the assumption "exit on the opposite side of zero from entry" (fine for momentum). A contrarian long often takes profit on a *positive* indicator reading (fear normalising, not flipping to greed), so its best exit lives on the **same side as entry** — a region `percentile_thresholds` never samples. Instead derive the span from the indicator's own distribution and let the exit sweep **both sides**:
+
+```python
+zs     = df['indicator'].dropna()
+LO, HI = np.round(np.percentile(zs, [2, 98]), 3)   # data-driven span
+buy_vals  = np.round(np.linspace(0.2, HI, 8), 3)   # entry on the signal side
+sell_vals = np.round(np.linspace(LO, HI, 9), 3)    # exit: full range, BOTH sides
+```
+
+Because each scan turns the **other side OFF**, the long scan and short scan are fully decoupled — so optimising each in isolation is valid no matter how `SELL_TH` and `COVER_TH` end up ordered relative to each other. Turn a side off by pushing its thresholds out of range (`compute_signals` already takes all four as kwargs):
+
+```python
+import numpy as np
+from lib.param_scan import scan_grid, find_plateau, plot_heatmap
+import strategy as s
+
+# long side: short_th/cover_th pushed to -inf so no short ever triggers
+long_fn  = lambda data, buy_th, sell_th: s.compute_signals(
+    data, buy_th=buy_th, sell_th=sell_th, short_th=-1e9, cover_th=-1e9)
+grid_L = scan_grid(df, long_fn, buy_vals, sell_vals,
+                   row_param='buy_th', col_param='sell_th',
+                   fee=s.FEE, freq='1d', warmup=s.WARMUP,
+                   valid_fn=lambda b, sll: b > sll)
+plot_heatmap(grid_L, buy_vals, sell_vals, row_label='BUY_TH', col_label='SELL_TH',
+             output_path='strategies/<name>/heatmap_long.png')
+
+# short side: buy_th/sell_th pushed to +inf so no long ever triggers
+short_fn = lambda data, short_th, cover_th: s.compute_signals(
+    data, buy_th=1e9, sell_th=1e9, short_th=short_th, cover_th=cover_th)
+grid_S = scan_grid(df, short_fn, short_vals, cover_vals,
+                   row_param='short_th', col_param='cover_th',
+                   fee=s.FEE, freq='1d', warmup=s.WARMUP,
+                   valid_fn=lambda sh, c: sh < c)
+plot_heatmap(grid_S, short_vals, cover_vals, row_label='SHORT_TH', col_label='COVER_TH',
+             output_path='strategies/<name>/heatmap_short.png')
+```
+
+After combining, the only hard checks are the per-side ones — `BUY_TH > SELL_TH`, `COVER_TH > SHORT_TH`, and `BUY_TH > SHORT_TH`. The order of `SELL_TH` vs `COVER_TH` is **not** a correctness check: `SELL_TH > COVER_TH` gives a flat neutral band, `SELL_TH < COVER_TH` gives an overlapping hold zone (positions ride through the middle). Both are valid — just confirm the independently-picked exits put you in the regime you intended.
 
 ## What You Do NOT Need to Write
 
