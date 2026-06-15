@@ -187,3 +187,21 @@ oi_series = front_month.set_index("date")["open_interest"]
 - `contract_date` 含 `/` 的為價差合約（e.g. `202505/202506`），通常過濾掉
 - `trading_session = "position"` 為正規盤，`"after_market"` 為盤後交易
 - 近月連續序列需自行用成交量或到期日判斷；TXF 分K 仍使用 `/twfutures/ohlcv/TXF/<schema>`
+
+---
+
+## Option Put/Call Ratio (TaiwanOptionPutCallRatio)
+
+Official TAIFEX daily put/call open-interest ratio (OI-based PCR), one row per day. Data from 2001-12-24.
+
+```python
+from lib.data import fetch_twfutures_pcr
+
+df = fetch_twfutures_pcr("2024-01-01", "2024-12-31", hdrs)
+# index: date (daily, trading days only)
+# column: pcr (買賣權未平倉量比率%, float)
+```
+
+**Notes:**
+- This is the official PCR endpoint (`/studio/market/twfutures/option/pcr`). It is NOT the same as the `put/call` ratio computed by hand from `fetch_twoption_large_traders` / `fetch_twoption_institutional` above. Use this function when you need the official value — do not recompute it.
+- `pcr > 100` (ratio > 1.0) tends to be bearish, `< 100` bullish, but in practice read the relative level and trend rather than an absolute threshold.

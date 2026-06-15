@@ -137,8 +137,9 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 
 Taiwan stock data (universe, batch functions, fundamental factors, lookahead-bias table) — **`references/twstock.md`**
 
-- `fetch_twfutures_ohlcv(symbol, schema, start, end, headers)` → Taiwan futures OHLCV DataFrame (Open/High/Low/Close/Volume); symbol: `'TXF'`; schema: `'1d'`/`'1m'`/`'5m'`/`'15m'`/`'30m'`/`'60m'`; Volume in contracts; data from 2013-12-30
+- `fetch_twfutures_ohlcv(symbol, schema, start, end, headers)` → Taiwan futures OHLCV DataFrame (Open/High/Low/Close/Volume); symbol: `'TXF'`; schema: `'1d'`/`'1m'`/`'5m'`/`'15m'`/`'30m'`/`'60m'`; Volume in contracts; data from 2020-03-22
 - `fetch_twfutures_bid_ask_vol(start, end, headers)` → TXF 1-min bid/ask volume DataFrame (bid_vol, ask_vol, total_vol); bid_vol = 內盤 (seller-initiated), ask_vol = 外盤 (buyer-initiated); includes day + night sessions; data from 2018-02-22; max 31 days per chunk (auto-chunked)
+- `fetch_twfutures_pcr(start, end, headers)` → DataFrame with a single `pcr` column (daily, index `date`); official TAIFEX put/call ratio (OI-based, 買賣權未平倉量比率%); data from 2001-12-24. The official ratio — NOT the value derived from option institutional / large-trader data in `references/twfutures.md`.
 - `txf_settlement_mask(index)` → boolean Series, True on the last 1-min bar before TXF monthly settlement (3rd Wednesday of each month, 13:30 TWN). Use with intraday TXF strategies: `settle = txf_settlement_mask(df.index); signal[settle] = 0.0; return signal, settle`
 
 `lib/execute.py` — all order execution logic (state management + algo orders):
