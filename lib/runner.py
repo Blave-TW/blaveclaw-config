@@ -102,7 +102,7 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         sharpe, sortino, omega, mdd_raw, _ = compute_stats(pf_ret, df.index)
 
         total_ret  = float(np.prod(1 + np.nan_to_num(pf_ret)) - 1) * 100
-        mdd        = abs(mdd_raw) * 100
+        mdd        = -abs(mdd_raw) * 100  # drawdown is a loss from peak → always ≤ 0
         bench_ret  = (close_v[-1] / close_v[0] - 1) * 100
         total_fees = float(tc_daily.sum()) * 100
 
