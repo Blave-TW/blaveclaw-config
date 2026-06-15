@@ -205,3 +205,22 @@ df = fetch_twfutures_pcr("2024-01-01", "2024-12-31", hdrs)
 **Notes:**
 - This is the official PCR endpoint (`/studio/market/twfutures/option/pcr`). It is NOT the same as the `put/call` ratio computed by hand from `fetch_twoption_large_traders` / `fetch_twoption_institutional` above. Use this function when you need the official value — do not recompute it.
 - `pcr > 100` (ratio > 1.0) tends to be bearish, `< 100` bullish, but in practice read the relative level and trend rather than an absolute threshold.
+
+---
+
+## Bid/Ask Volume (TaiwanFuturesBidAskVolume)
+
+TXF 1-minute bid/ask volume aggregated from tick data, including both day and night sessions. Data from 2018-02-22 (backfilled history). Max 31 days per request — the lib auto-chunks.
+
+```python
+from lib.data import fetch_twfutures_bid_ask_vol
+
+df = fetch_twfutures_bid_ask_vol("2024-01-01", "2024-03-31", hdrs)
+# index: UTC time (1-minute bars)
+# columns: bid_vol (內盤, seller-initiated), ask_vol (外盤, buyer-initiated), total_vol (incl. unclassified)
+```
+
+**Notes:**
+- bid_vol = 內盤 (seller-initiated / 主動賣), ask_vol = 外盤 (buyer-initiated / 主動買). `ask_vol - bid_vol` is the net aggressive-buy pressure.
+- Includes both day (08:45–13:45 TWN) and night (15:00–next day 05:00 TWN) sessions.
+- Auto-chunked at 31 days per request — no need to split manually.
