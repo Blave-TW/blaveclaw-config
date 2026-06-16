@@ -39,4 +39,4 @@ send_photo("/tmp/chart.png")
 send_text("Backtest complete — Sharpe 1.42, MDD -12%")
 ```
 
-Token and chat_id are read automatically from `/root/.openclaw/openclaw.json`.
+`lib/notify.py` resolves delivery automatically — token from `openclaw.json`, paired chat IDs from `telegram-default-allowFrom.json` (broadcasts to all). Never add a `chatId` key to `openclaw.json`; it is invalid and crashes the gateway on restart.
