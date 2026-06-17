@@ -834,142 +834,111 @@ def fetch_twstock_monthly_revenue_batch(stock_ids, headers):
     return _fetch_fundamental_batch('twstock_rev', 'monthly_revenue', stock_ids, headers)
 
 
-def fetch_twstock_shareholding_batch(stock_ids, start, end, headers):
-    """Batch fetch 台股週頻股東人數. Returns dict {stock_id: DataFrame(shareholders)}."""
-    results = {}
-    uncached = []
+def _fetch_twstock_cached_batch(prefix, endpoint, raw_fn, parse_fn, stock_ids, start, end, headers):
+    """Shared batch fetcher for monthly-cached 台股 datasets.
 
+    Phase 1: symbols that already have a local cache are extended (current-month delta)
+             concurrently — each one tops up its own parquet, so they parallelise freely.
+    Phase 2: the rest are fetched via the /batch/<endpoint> endpoint, 50 ids per request,
+             with the chunks issued concurrently.
+
+    raw_fn(sid, start, end, headers) -> DataFrame   single-symbol fetch used by the cache
+    parse_fn(records) -> DataFrame                  one symbol's batch records -> cached frame
+    """
+    results, uncached = {}, []
+
+    to_extend = []
     for sid in stock_ids:
-        cache_dir = _monthly_cache_dir('twstock_shareholding', {'id': sid})
+        cache_dir = _monthly_cache_dir(prefix, {'id': sid})
         if cache_dir.exists() and list(cache_dir.glob('*.parquet')):
-            try:
-                results[sid] = _extend_cache_monthly(
-                    'twstock_shareholding', {'id': sid},
-                    lambda s, e, _sid=sid: _fetch_twstock_shareholding_raw(_sid, s, e, headers),
-                    start, end,
-                )
-                continue
-            except Exception:
-                pass
-        uncached.append(sid)
+            to_extend.append(sid)
+        else:
+            uncached.append(sid)
 
-    for i in range(0, len(uncached), 50):
-        chunk = uncached[i:i + 50]
+    def _extend_one(sid):
+        return _extend_cache_monthly(
+            prefix, {'id': sid},
+            lambda s, e, _sid=sid: raw_fn(_sid, s, e, headers),
+            start, end,
+        )
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(_extend_one, sid): sid for sid in to_extend}
+        for future in as_completed(futures):
+            sid = futures[future]
+            try:
+                results[sid] = future.result()
+            except Exception:
+                uncached.append(sid)
+
+    chunks = [uncached[i:i + 50] for i in range(0, len(uncached), 50)]
+
+    def _fetch_chunk(idx, chunk):
+        partial = {}
         try:
             params = {'stock_ids': ','.join(chunk)}
             if start:
                 params['start'] = start
             if end:
                 params['end'] = end
-            r = _retry_get(f'{BASE}/studio/market/twstock/batch/shareholding',
+            r = _retry_get(f'{BASE}/studio/market/twstock/batch/{endpoint}',
                            headers=headers, params=params, timeout=120)
             batch_data = r.json().get('data', {})
             for sid, records in batch_data.items():
                 if not records:
                     continue
-                df = pd.DataFrame(records)
-                df['date'] = pd.to_datetime(df['date'])
-                df = df.set_index('date').sort_index()
-                total = df[df['level'] == 'total'][['people']].rename(columns={'people': 'shareholders'}).astype(float)
-                total = total[~total.index.duplicated(keep='last')]
-                _save_monthly('twstock_shareholding', {'id': sid}, total)
-                results[sid] = total
+                df = parse_fn(records)
+                _save_monthly(prefix, {'id': sid}, df)
+                partial[sid] = df
         except Exception as e:
-            print(f'  [batch] shareholding chunk {i//50 + 1} error: {e}')
+            print(f'  [batch] {endpoint} chunk {idx + 1} error: {e}')
+        return partial
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(_fetch_chunk, idx, chunk) for idx, chunk in enumerate(chunks)]
+        for future in as_completed(futures):
+            results.update(future.result())
 
     return results
+
+
+def fetch_twstock_shareholding_batch(stock_ids, start, end, headers):
+    """Batch fetch 台股週頻股東人數. Returns dict {stock_id: DataFrame(shareholders)}."""
+    def _parse(records):
+        df = pd.DataFrame(records)
+        df['date'] = pd.to_datetime(df['date'])
+        df = df.set_index('date').sort_index()
+        total = df[df['level'] == 'total'][['people']].rename(columns={'people': 'shareholders'}).astype(float)
+        return total[~total.index.duplicated(keep='last')]
+    return _fetch_twstock_cached_batch(
+        'twstock_shareholding', 'shareholding', _fetch_twstock_shareholding_raw, _parse,
+        stock_ids, start, end, headers)
 
 
 def fetch_twstock_price_adj_batch(stock_ids, start, end, headers):
     """Batch fetch 台股向後調整日K. Returns dict {stock_id: DataFrame(Open, Close)}."""
-    results = {}
-    uncached = []
-
-    for sid in stock_ids:
-        cache_dir = _monthly_cache_dir('twstock_price', {'id': sid})
-        if cache_dir.exists() and list(cache_dir.glob('*.parquet')):
-            try:
-                results[sid] = _extend_cache_monthly(
-                    'twstock_price', {'id': sid},
-                    lambda s, e, _sid=sid: _fetch_twstock_price_raw(_sid, s, e, headers),
-                    start, end,
-                )
-                continue
-            except Exception:
-                pass
-        uncached.append(sid)
-
-    for i in range(0, len(uncached), 50):
-        chunk = uncached[i:i + 50]
-        try:
-            params = {'stock_ids': ','.join(chunk)}
-            if start:
-                params['start'] = start
-            if end:
-                params['end'] = end
-            r = _retry_get(f'{BASE}/studio/market/twstock/batch/price_adj',
-                           headers=headers, params=params, timeout=120)
-            batch_data = r.json().get('data', {})
-            for sid, records in batch_data.items():
-                if not records:
-                    continue
-                df = pd.DataFrame(records)
-                df['date'] = pd.to_datetime(df['date'])
-                df = df.set_index('date').sort_index()[['open', 'close']].rename(
-                    columns={'open': 'Open', 'close': 'Close'}).astype(float)
-                df = df.replace(0, float('nan')).ffill()
-                _save_monthly('twstock_price', {'id': sid}, df)
-                results[sid] = df
-        except Exception as e:
-            print(f'  [batch] price_adj chunk {i//50 + 1} error: {e}')
-
-    return results
+    def _parse(records):
+        df = pd.DataFrame(records)
+        df['date'] = pd.to_datetime(df['date'])
+        df = df.set_index('date').sort_index()[['open', 'close']].rename(
+            columns={'open': 'Open', 'close': 'Close'}).astype(float)
+        return df.replace(0, float('nan')).ffill()
+    return _fetch_twstock_cached_batch(
+        'twstock_price', 'price_adj', _fetch_twstock_price_raw, _parse,
+        stock_ids, start, end, headers)
 
 
 def fetch_twstock_institutional_batch(stock_ids, start, end, headers):
     """Batch fetch 台股三大法人. Returns dict {stock_id: DataFrame(foreign_net, ...)}."""
-    results = {}
-    uncached = []
-
-    for sid in stock_ids:
-        cache_dir = _monthly_cache_dir('twstock_inst', {'id': sid})
-        if cache_dir.exists() and list(cache_dir.glob('*.parquet')):
-            try:
-                results[sid] = _extend_cache_monthly(
-                    'twstock_inst', {'id': sid},
-                    lambda s, e, _sid=sid: _fetch_twstock_inst_raw(_sid, s, e, headers),
-                    start, end,
-                )
-                continue
-            except Exception:
-                pass
-        uncached.append(sid)
-
-    for i in range(0, len(uncached), 50):
-        chunk = uncached[i:i + 50]
-        try:
-            params = {'stock_ids': ','.join(chunk)}
-            if start:
-                params['start'] = start
-            if end:
-                params['end'] = end
-            r = _retry_get(f'{BASE}/studio/market/twstock/batch/institutional',
-                           headers=headers, params=params, timeout=120)
-            batch_data = r.json().get('data', {})
-            for sid, records in batch_data.items():
-                if not records:
-                    continue
-                df = pd.DataFrame(records)
-                df['date'] = pd.to_datetime(df['date'])
-                df = df.set_index('date').sort_index()
-                df['foreign_net'] = df['foreign_buy'] - df['foreign_sell']
-                df = df.fillna(0)
-                _save_monthly('twstock_inst', {'id': sid}, df)
-                results[sid] = df
-        except Exception as e:
-            print(f'  [batch] institutional chunk {i//50 + 1} error: {e}')
-
-    return results
+    def _parse(records):
+        df = pd.DataFrame(records)
+        df['date'] = pd.to_datetime(df['date'])
+        df = df.set_index('date').sort_index()
+        df['foreign_net'] = df['foreign_buy'] - df['foreign_sell']
+        return df.fillna(0)
+    return _fetch_twstock_cached_batch(
+        'twstock_inst', 'institutional', _fetch_twstock_inst_raw, _parse,
+        stock_ids, start, end, headers)
 
 
 def _fetch_twstock_foreign_shareholding_raw(stock_id, start, end, headers):
@@ -988,46 +957,13 @@ def fetch_twstock_foreign_shareholding_batch(stock_ids, start, end, headers):
     """Batch fetch 台股外資持股表. Returns dict {stock_id: DataFrame}.
     Key columns: ForeignInvestmentSharesRatio (持股比率%), ForeignInvestmentShares (持股股數),
     ForeignInvestmentRemainRatio (剩餘可投資比率%), NumberOfSharesIssued (已發行股數)."""
-    results = {}
-    uncached = []
-
-    for sid in stock_ids:
-        cache_dir = _monthly_cache_dir('twstock_foreign_sh', {'id': sid})
-        if cache_dir.exists() and list(cache_dir.glob('*.parquet')):
-            try:
-                results[sid] = _extend_cache_monthly(
-                    'twstock_foreign_sh', {'id': sid},
-                    lambda s, e, _sid=sid: _fetch_twstock_foreign_shareholding_raw(_sid, s, e, headers),
-                    start, end,
-                )
-                continue
-            except Exception:
-                pass
-        uncached.append(sid)
-
-    for i in range(0, len(uncached), 50):
-        chunk = uncached[i:i + 50]
-        try:
-            params = {'stock_ids': ','.join(chunk)}
-            if start:
-                params['start'] = start
-            if end:
-                params['end'] = end
-            r = _retry_get(f'{BASE}/studio/market/twstock/batch/foreign_shareholding',
-                           headers=headers, params=params, timeout=120)
-            batch_data = r.json().get('data', {})
-            for sid, records in batch_data.items():
-                if not records:
-                    continue
-                df = pd.DataFrame(records)
-                df['date'] = pd.to_datetime(df['date'])
-                df = df.set_index('date').sort_index()
-                _save_monthly('twstock_foreign_sh', {'id': sid}, df)
-                results[sid] = df
-        except Exception as e:
-            print(f'  [batch] foreign_shareholding chunk {i//50 + 1} error: {e}')
-
-    return results
+    def _parse(records):
+        df = pd.DataFrame(records)
+        df['date'] = pd.to_datetime(df['date'])
+        return df.set_index('date').sort_index()
+    return _fetch_twstock_cached_batch(
+        'twstock_foreign_sh', 'foreign_shareholding', _fetch_twstock_foreign_shareholding_raw, _parse,
+        stock_ids, start, end, headers)
 
 
 # ── Taiwan futures data ───────────────────────────────────────────────────────
