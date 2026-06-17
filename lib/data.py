@@ -252,6 +252,12 @@ def fetch_holder_concentration(symbol, interval, start, end, headers):
                         {'symbol': symbol, 'period': interval}, headers, start, end)
 
 
+def fetch_funding_rate(symbol, interval, start, end, headers):
+    """資金費率 Funding Rate (Binance). Returns DataFrame with 'alpha' column (alpha = funding rate × 100)."""
+    return _fetch_alpha('funding_rate/get_alpha',
+                        {'symbol': symbol, 'period': interval}, headers, start, end)
+
+
 def fetch_taker_intensity(symbol, interval, start, end, headers, timeframe='24h'):
     """多空力道 Taker Intensity. Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('taker_intensity/get_alpha',

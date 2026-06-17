@@ -129,6 +129,7 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 - `settlement_signals_from_db(df, signal)` → returns `(signal, exec_at_close)`. For futures strategies using `fetch_db_kline`: call at the end of `compute_signals` and `return` the result directly. Forces `signal=0.0` on the last bar before each contract rollover, and marks those bars `exec_at_close=True` (executed at this-bar close, not next-bar open). Do NOT use `-1.0` for settlement — that opens a short position.
 - `fetch_kline(symbol, interval, start, end, headers)` → OHLCV DataFrame (Open/High/Low/Close/Volume)
 - `fetch_holder_concentration(symbol, interval, start, end, headers)` → DataFrame with `alpha` column
+- `fetch_funding_rate(symbol, interval, start, end, headers)` → DataFrame with `alpha` (Binance only; alpha = funding rate × 100)
 - `fetch_taker_intensity(symbol, interval, start, end, headers, timeframe='24h')` → DataFrame with `alpha`
 - `fetch_whale_hunter(symbol, interval, start, end, headers, timeframe='24h', score_type='score_oi')` → DataFrame with `alpha`
 - `fetch_squeeze_momentum(symbol, start, end, headers)` → DataFrame with `alpha` (period fixed to 1d)
