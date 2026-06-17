@@ -62,7 +62,7 @@ def run_twap(
     duration_min,
     n_slices,
     place_slice_fn,
-    strategy_name,
+    twap_key,
     signal_price=None,
     send_telegram_fn=None,
 ):
@@ -79,7 +79,11 @@ def run_twap(
                          Must raise on failure — caller is responsible for exchange-specific
                          retry / order-type logic. Exceptions are caught, logged, and recorded;
                          execution continues on the next slice.
-        strategy_name  : used for log path: strategies/{strategy_name}/twap_log.jsonl
+        twap_key       : execution key for the log path: manager/twap/{twap_key}.jsonl.
+                         Orders are netted per symbol (no single strategy name exists at
+                         execution time), so this is a symbol+direction key like
+                         'btcusdt_long' / 'btcusdt_short', NOT a strategy name.
+                         Logs live under manager/ (never strategies/, which is for strategy.py).
         signal_price   : price at signal time (optional) — used to compute slippage vs signal.
                          For buy:  slippage = (vwap - signal_price) / signal_price * 10000 bps
                          For sell: slippage = (signal_price - vwap) / signal_price * 10000 bps
@@ -87,28 +91,28 @@ def run_twap(
         send_telegram_fn: optional callable(str) for per-slice + summary Telegram updates
 
     Returns:
-        summary dict (same record written to twap_log.jsonl with type='summary'):
+        summary dict (same record written to twap log with type='summary'):
         {
           'type': 'summary',
-          'strategy_name', 'symbol', 'side',
+          'twap_key', 'symbol', 'side',
           'total_target', 'total_filled', 'n_filled',
           'vwap', 'signal_price', 'slippage_bps',
           'duration_min', 'n_slices',
           'start_ts', 'end_ts'
         }
 
-    Log schema (strategies/{strategy_name}/twap_log.jsonl, one JSON per line):
-        Slice record   — type='slice':   ts, strategy_name, symbol, side,
+    Log schema (manager/twap/{twap_key}.jsonl, one JSON per line):
+        Slice record   — type='slice':   ts, twap_key, symbol, side,
                                          slice_n, of_n, target_qty,
                                          fill_qty, fill_price, elapsed_s,
                                          slippage_bps (null if no signal_price),
                                          error (only on failure)
         Summary record — type='summary': aggregated stats for the full TWAP run
 
-    Impact analysis: use load_twap_log(strategy_name) to read slices + summaries,
+    Impact analysis: use load_twap_log(twap_key) to read slices + summaries,
     then compare slippage_bps across runs with different duration_min / n_slices.
     """
-    log_path = f"strategies/{strategy_name}/twap_log.jsonl"
+    log_path = f"manager/twap/{twap_key}.jsonl"
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
     interval_s = (duration_min * 60) / n_slices
@@ -126,7 +130,7 @@ def run_twap(
         slice_start = time.time()
         ts = datetime.now(timezone.utc).isoformat()
         record = {
-            "ts": ts, "type": "slice", "strategy_name": strategy_name,
+            "ts": ts, "type": "slice", "twap_key": twap_key,
             "symbol": symbol, "side": side,
             "slice_n": i + 1, "of_n": n_slices,
             "target_qty": round(slice_qty, 8),
@@ -183,7 +187,7 @@ def run_twap(
 
     end_ts  = datetime.now(timezone.utc).isoformat()
     summary = {
-        "ts": end_ts, "type": "summary", "strategy_name": strategy_name,
+        "ts": end_ts, "type": "summary", "twap_key": twap_key,
         "symbol": symbol, "side": side,
         "total_target": round(total_qty, 8),
         "total_filled": round(total_filled, 8),
@@ -205,14 +209,15 @@ def run_twap(
     return summary
 
 
-def load_twap_log(strategy_name):
+def load_twap_log(twap_key):
     """
-    Read all TWAP records for a strategy. Returns (slices, summaries).
+    Read all TWAP records for an execution key (e.g. 'btcusdt_long'). Returns
+    (slices, summaries).
 
     Use for impact analysis — compare vwap vs signal_price across runs,
     or plot slippage_bps vs duration_min to find optimal TWAP parameters.
     """
-    log_path = f"strategies/{strategy_name}/twap_log.jsonl"
+    log_path = f"manager/twap/{twap_key}.jsonl"
     if not os.path.exists(log_path):
         return [], []
 
