@@ -192,7 +192,7 @@ oi_series = front_month.set_index("date")["open_interest"]
 
 ## Option Put/Call Ratio (TaiwanOptionPutCallRatio)
 
-Official TAIFEX daily put/call open-interest ratio (OI-based PCR), one row per day. Data from 2001-12-24.
+Official TAIFEX daily put/call open-interest ratio (OI-based PCR), one row per day.
 
 ```python
 from lib.data import fetch_twfutures_pcr
@@ -210,7 +210,7 @@ df = fetch_twfutures_pcr("2024-01-01", "2024-12-31", hdrs)
 
 ## Bid/Ask Volume (TaiwanFuturesBidAskVolume)
 
-TXF 1-minute bid/ask volume aggregated from tick data, including both day and night sessions. Data from 2018-02-22 (backfilled history). Max 31 days per request — the lib auto-chunks.
+TXF 1-minute bid/ask volume aggregated from tick data, including both day and night sessions (backfilled history; earliest date — see the blave-quant skill). Max 31 days per request — the lib auto-chunks.
 
 ```python
 from lib.data import fetch_twfutures_bid_ask_vol

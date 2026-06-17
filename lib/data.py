@@ -1135,7 +1135,7 @@ def _fetch_twfutures_bid_ask_vol_raw(start, end, headers):
 def fetch_twfutures_pcr(start, end, headers):
     """台指選擇權買賣權未平倉量比率（日）. Returns DataFrame with 'pcr' column.
 
-    Data from TAIFEX (台灣期貨交易所), from 2001-12-24.
+    Source: TAIFEX (台灣期貨交易所). (History range: see the blave-quant skill / Notion API doc.)
     index: date (daily, trading days only)
     pcr: 買賣權未平倉量比率%
     """
@@ -1154,7 +1154,8 @@ def fetch_twfutures_bid_ask_vol(start, end, headers):
     """台指期內外盤成交量（1 分鐘）. Returns DataFrame indexed by UTC time.
 
     Columns: bid_vol (內盤口數), ask_vol (外盤口數), total_vol (總口數).
-    Data from 2022-01-04. Both day session (08:45-13:45 TWN) and night session included.
+    Both day session (08:45-13:45 TWN) and night session included.
+    (History range: see the blave-quant skill / Notion API doc.)
     Monthly cache: cache/twfutures_bav_TXF/YYYY-MM.parquet
     """
     result = _extend_cache_monthly(

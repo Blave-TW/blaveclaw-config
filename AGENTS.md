@@ -137,25 +137,34 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 
 Taiwan stock data (universe, batch functions, fundamental factors, lookahead-bias table) — **`references/twstock.md`**
 
-- `fetch_twfutures_ohlcv(symbol, schema, start, end, headers)` → Taiwan futures OHLCV DataFrame (Open/High/Low/Close/Volume); symbol: `'TXF'`; schema: `'1d'`/`'1m'`/`'5m'`/`'15m'`/`'30m'`/`'60m'`; Volume in contracts; data from 2020-03-22
-- `fetch_twfutures_bid_ask_vol(start, end, headers)` → TXF 1-min bid/ask volume DataFrame (bid_vol, ask_vol, total_vol); bid_vol = 內盤 (seller-initiated), ask_vol = 外盤 (buyer-initiated); includes day + night sessions; data from 2018-02-22; max 31 days per chunk (auto-chunked)
-- `fetch_twfutures_pcr(start, end, headers)` → DataFrame with a single `pcr` column (daily, index `date`); official TAIFEX put/call ratio (OI-based, 買賣權未平倉量比率%); data from 2001-12-24. The official ratio — NOT the value derived from option institutional / large-trader data in `references/twfutures.md`.
+- `fetch_twfutures_ohlcv(symbol, schema, start, end, headers)` → Taiwan futures OHLCV DataFrame (Open/High/Low/Close/Volume); symbol: `'TXF'`; schema: `'1d'`/`'1m'`/`'5m'`/`'15m'`/`'30m'`/`'60m'`; Volume in contracts
+- `fetch_twfutures_bid_ask_vol(start, end, headers)` → TXF 1-min bid/ask volume DataFrame (bid_vol, ask_vol, total_vol); bid_vol = 內盤 (seller-initiated), ask_vol = 外盤 (buyer-initiated); includes day + night sessions; max 31 days per chunk (auto-chunked)
+- `fetch_twfutures_pcr(start, end, headers)` → DataFrame with a single `pcr` column (daily, index `date`); official TAIFEX put/call ratio (OI-based, 買賣權未平倉量比率%); the official ratio — NOT the value derived from option institutional / large-trader data in `references/twfutures.md`.
 - `txf_settlement_mask(index)` → boolean Series, True on the last 1-min bar before TXF monthly settlement (3rd Wednesday of each month, 13:30 TWN). Use with intraday TXF strategies: `settle = txf_settlement_mask(df.index); signal[settle] = 0.0; return signal, settle`
+- **Data history ranges** (earliest available date per endpoint) are NOT listed here — they live in the `blave-quant` skill / Notion API doc, which auto-update on each box. This config is baked in at provision time (no live-update path), so a start date copied here would silently go stale. Check the skill before assuming an endpoint's earliest date.
 
 `lib/execute.py` — all order execution logic (state management + algo orders):
 - `from lib.execute import update_state, load_state, save_state` — state management
 - `state.json` schema: `{"position": float, "symbol": str}` — `position` is the current signal value (positive=long, negative=short, 0=flat); all deployment config (exchange, asset_spec) lives in `portfolio_config.json`, not in state
 - `from lib.execute import run_twap` — TWAP execution engine (exchange-agnostic). Use for any strategy type (A/B/C) when the user wants to split a large order over time instead of a single market order.
-  - `run_twap(symbol, side, total_qty, duration_min, n_slices, place_slice_fn, strategy_name, signal_price=None, send_telegram_fn=None)`
+  - `run_twap(symbol, side, total_qty, duration_min, n_slices, place_slice_fn, twap_key, signal_price=None, send_telegram_fn=None)`
   - `place_slice_fn(symbol, side, qty) → {'fill_price': float, 'fill_qty': float}` — implement this per exchange (e.g. Binance, Bybit); raise on failure
-  - Logs every slice + summary to `strategies/{strategy_name}/twap_log.jsonl`; sends Telegram per slice and on completion
+  - `twap_key`: **symbol+direction** key like `'btcusdt_long'` / `'btcusdt_short'` — NOT a strategy name. Reconciler nets orders per symbol, so there is no single strategy name at execution time.
+  - Logs every slice + summary to `manager/twap/{twap_key}.jsonl` (under `manager/`, never `strategies/`); sends Telegram per slice and on completion
   - `signal_price` (optional): price at signal time — used to compute `slippage_bps` per slice and in the summary
-- `from lib.execute import load_twap_log` — returns `(slices, summaries)` from `twap_log.jsonl`; use to analyze how TWAP parameters (duration, n_slices) affect execution quality vs strategy signal price
-- **TWAP wiring pattern** — when the user asks to use TWAP for a strategy, modify `reconciler.py`:
-  1. Add `TWAP_CONFIG = {"strategy_name": {"duration_min": 30, "n_slices": 10}, ...}` at the top
-  2. Implement `_place_slice(symbol, side, qty)` for the exchange (read the relevant `skills/blave-quant/references/` file first)
-  3. In `place_order`, check `TWAP_CONFIG.get(strategy_name)` and call `run_twap` if present, else fall back to a direct market order
-  - TWAP config is per-strategy — strategies not in `TWAP_CONFIG` continue using market orders unchanged
+- `from lib.execute import load_twap_log` — `load_twap_log(twap_key)` returns `(slices, summaries)` from `manager/twap/{twap_key}.jsonl`; use to analyze how TWAP parameters (duration, n_slices) affect execution quality vs strategy signal price
+- **TWAP wiring pattern** — when the user asks to use TWAP, modify `reconciler.py`. **Key insight: `reconcile()` nets orders per symbol** (see `lib/portfolio.py` — one order per symbol, multiple `contributors`, flips split into reduce-only + open legs). There is NO single strategy name at order-placement time, so TWAP is keyed by symbol+direction, not by strategy:
+  1. Add a key generator so config, lookup, and log path always agree:
+     ```python
+     def _twap_key(symbol, signed_diff):
+         return f"{symbol.lower()}_{'long' if signed_diff > 0 else 'short'}"
+     ```
+  2. Add `TWAP_CONFIG = {"btcusdt_long": {"duration_min": 30, "n_slices": 10}, "btcusdt_short": {...}, ...}` at the top — keys are `symbol_direction`, NOT strategy names.
+  3. Implement `_place_slice(symbol, side, qty)` for the exchange (read the relevant `skills/blave-quant/references/` file first).
+  4. In `place_order(symbol, signed_diff, ...)`, compute `key = _twap_key(symbol, signed_diff)`, check `TWAP_CONFIG.get(key)`, and call `run_twap(..., twap_key=key, ...)` if present, else fall back to a direct market order.
+  - `place_order` does NOT need a `strategy_name` parameter — the key is derived from `symbol + signed_diff`.
+  - Symbol/directions not in `TWAP_CONFIG` continue using market orders unchanged.
+  - Never write TWAP logs under `strategies/` — that folder is for `strategy.py` files; doing so creates orphan folders with no strategy.
 
 `lib/analysis.py`:
 - `from lib.analysis import regime_analysis, plot_regime` — regime breakdown and regime chart
