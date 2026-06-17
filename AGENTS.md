@@ -235,6 +235,7 @@ All chart text must be in English — Chinese characters render as garbled boxes
 
 ## Shell Commands
 
+- **One-off / throwaway scripts go in `tmp/`** (workspace-relative, e.g. `tmp/check_data.py`) — ad-hoc exploration, debugging, or data-inspection scripts that are NOT a strategy and NOT a reusable `lib/` helper. Never drop them in the workspace root or inside `strategies/` (that folder is for `strategy.py` folders only — see Manager & Reconciler rules). This is for scripts only; **output artifacts (charts, stats, heatmaps) still follow their own rules** — never `tmp/` (nor `/tmp/`) for those; charts go under `strategies/{name}/`.
 - **NEVER write `except Exception: pass`** — silent failures hide all errors. Always at minimum `except Exception as e: print(f"Error: {e}")`. This applies everywhere: scan.py, strategy.py, notify calls, exchange API calls.
 - NEVER chain commands with && or || or ; — run ONE command at a time
 - Use `python3 file.py [args]` or `node file.js` directly — passing arguments is fine, but never chain with && or || or ;
