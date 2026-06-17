@@ -266,7 +266,12 @@ Note: the runner builds result_d internally from the precise PnL computation —
 
 ## Strategy Library
 
-For all strategy library operations (browse, upload private, submit, share, backup/restore, download), read `references/marketplace.md`.
+For all strategy library operations (browse, load / install / deploy a strategy, upload private, submit, share, backup/restore, download), read `references/marketplace.md`. The user's verb does not matter — **載入 / 安裝 / 部署 / install / load / deploy / "用我買的策略" all mean the same thing: pull the strategy from the Strategy Library API and run it.** Treat them identically.
+
+**A strategy is NOT a skill — never confuse the two:**
+- A **strategy** is something the user bought / was shared / uploaded. It lives in the Blave **Strategy Library** and is loaded over HTTP: `GET /openclaw/marketplace/my/...`, authenticated by the Blave API key in `.env`. There is **no slug, no purchase code, no install command** — you already know who the user is from the key.
+- A **skill** (e.g. `blave-quant`) is an OpenClaw runtime tool, installed from ClawHub via `npx skills add` / `openclaw skills` (see "Skill Install / Update" above).
+- When the user says "安裝 / install 我（買的/已購買）策略", this ALWAYS means the Strategy Library, NEVER ClawHub or a skill install. **Do NOT ask for a slug, do NOT run `openclaw skills install` / `npx skills add`, do NOT mention ClawHub.** Go straight to `GET /openclaw/marketplace/my/purchases`.
 
 The Strategy Library has four distinct categories — keep them straight (full taxonomy in `references/marketplace.md`):
 - **Official** (free, from Blave) → `GET /openclaw/marketplace/my/official`
@@ -275,6 +280,7 @@ The Strategy Library has four distinct categories — keep them straight (full t
 - **Private** (uploaded by you, visible only to you) → `GET /openclaw/marketplace/my/private`
 
 - NEVER purchase a strategy on behalf of the user.
+- When user asks to **install / 安裝 / 載入 / 部署 their purchased strategy** (or "用我買的策略"): call `GET /openclaw/marketplace/my/purchases`, show the list, let them pick, then download via `GET /openclaw/marketplace/strategies/{id}/code` → security scan → deploy. Never ask for a slug — the `.env` Blave key already identifies them.
 - When user asks what strategies they can use / load: call the first THREE (official + purchases + shared-with-me) in parallel and merge by id — these are strategies authored by others.
 - When user asks which strategies *they* uploaded: use `GET /openclaw/marketplace/my/private`.
 - When downloading: save to `strategies/{name}/strategy.py`; if `ImportError` on custom lib, reconstruct from the description's "Custom lib dependencies" section.
