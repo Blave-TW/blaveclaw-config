@@ -4,8 +4,8 @@ Use Blave API credentials from `.env` for all requests.
 Base URL: `https://api.blave.org`
 Headers: `api-key: {blave_api_key}`, `secret-key: {blave_secret_key}`
 
-> **「安裝 / install / 載入 / 部署 / deploy 我（買的）策略」= this API, NOT a skill install.**
-> Loading a purchased/shared/official strategy is ALWAYS a plain HTTP call to the endpoints below — the user is identified by the `.env` Blave key, so there is **no slug, no purchase code, no install command**. Never ask the user for a slug. Never run `openclaw skills install` / `npx skills add` and never mention ClawHub — those are for installing OpenClaw *skills* (e.g. `blave-quant`), a completely separate layer from the Strategy Library. The verb the user used (安裝/載入/部署/install/load/deploy) does not change the flow: for a purchased strategy, go straight to `GET /openclaw/marketplace/my/purchases`.
+> **「安裝 / install / 載入 / 部署 / deploy 我（買的）策略」= this API.**
+> Loading a purchased/shared/official strategy is ALWAYS a plain HTTP call to the endpoints below — the user is identified by the `.env` Blave key, so they never supply an identifier, code, or install command. The verb the user used (安裝/載入/部署/install/load/deploy) does not change the flow: for a purchased strategy, go straight to `GET /openclaw/marketplace/my/purchases`. (Skills are a separate runtime layer, provisioned automatically — never relevant to loading a strategy.)
 
 ## Strategy categories
 
