@@ -71,6 +71,22 @@ def _iter_months(start_str, end_str):
         ym = _next_month(ym)
 
 
+def _contiguous_spans(months):
+    """Group a sorted list of 'YYYY-MM' into runs of consecutive months.
+    ['2022-01','2022-02','2022-05'] → [['2022-01','2022-02'], ['2022-05']]."""
+    spans, cur = [], []
+    for ym in months:
+        if cur and _next_month(cur[-1]) == ym:
+            cur.append(ym)
+        else:
+            if cur:
+                spans.append(cur)
+            cur = [ym]
+    if cur:
+        spans.append(cur)
+    return spans
+
+
 def _normalise_index(df):
     """Convert tz-aware index to tz-naive UTC in-place-safe copy."""
     if df.index.tz is not None:
@@ -96,48 +112,60 @@ def _extend_cache_monthly(prefix, params, fetch_raw_fn, start, end):
     current_ym = now.strftime('%Y-%m')
     tomorrow   = (now + timedelta(days=1)).strftime('%Y-%m-%d')
 
-    frames = []
-    for ym in _iter_months(start, end_str):
-        path    = cache_dir / f'{ym}.parquet'
-        ym_start = f'{ym}-01'
-        ym_end   = f'{_next_month(ym)}-01'   # exclusive upper bound when fetching
+    all_months    = list(_iter_months(start, end_str))
+    past_months   = [ym for ym in all_months if ym < current_ym]
+    present_months = [ym for ym in all_months if ym >= current_ym]   # current (+ any future)
 
-        if ym < current_ym:
-            # Past month — immutable: fetch once (even if empty), never touch again.
-            # Empty months MUST be written too, otherwise a range that starts before
-            # the data exists (e.g. institutional from 2010) re-fetches every empty
-            # month on every run — a per-run API storm that trips rate limits.
-            if not path.exists():
-                df = fetch_raw_fn(ym_start, ym_end)
-                if not df.empty:
-                    df = _normalise_index(df)
-                    df = df[~df.index.duplicated(keep='last')].sort_index()
-                df.to_parquet(path)
-            cached = pd.read_parquet(path)
-            if not cached.empty:
+    # ── Backfill missing PAST months in contiguous spans ──────────────────────
+    # Past months are immutable. Fetch each contiguous run of missing months with a
+    # SINGLE ranged call — raw_fn chunks it concurrently internally — instead of one
+    # slow sequential call per month, then split the result into per-month parquets.
+    # Empty months still get a marker file so they are never re-fetched.
+    missing = [ym for ym in past_months if not (cache_dir / f'{ym}.parquet').exists()]
+    for span in _contiguous_spans(missing):
+        span_start = f'{span[0]}-01'
+        span_end   = f'{_next_month(span[-1])}-01'   # exclusive upper bound
+        df = fetch_raw_fn(span_start, span_end)
+        if not df.empty:
+            df = _normalise_index(df)
+            df = df[~df.index.duplicated(keep='last')].sort_index()
+            by_month = {ym: grp for ym, grp in df.groupby(df.index.strftime('%Y-%m'))}
+        else:
+            by_month = {}
+        for ym in span:
+            grp = by_month.get(ym)
+            (grp if grp is not None else pd.DataFrame()).to_parquet(cache_dir / f'{ym}.parquet')
+
+    frames = []
+    for ym in past_months:
+        cached = pd.read_parquet(cache_dir / f'{ym}.parquet')
+        if not cached.empty:
+            frames.append(cached)
+
+    # ── Current month (and any future month in range) — delta update ──────────
+    for ym in present_months:
+        path     = cache_dir / f'{ym}.parquet'
+        ym_start = f'{ym}-01'
+        if path.exists():
+            cached = _normalise_index(pd.read_parquet(path))
+            last_ts = cached.index[-1].strftime('%Y-%m-%d')
+            delta = fetch_raw_fn(last_ts, tomorrow)
+            if not delta.empty:
+                delta  = _normalise_index(delta)
+                merged = pd.concat([cached, delta])
+                merged = merged[~merged.index.duplicated(keep='last')].sort_index()
+                merged.to_parquet(path)
+                frames.append(merged)
+            else:
                 frames.append(cached)
         else:
-            # Current month — may have new bars
-            if path.exists():
-                cached = _normalise_index(pd.read_parquet(path))
-                last_ts = cached.index[-1].strftime('%Y-%m-%d')
-                delta = fetch_raw_fn(last_ts, tomorrow)
-                if not delta.empty:
-                    delta  = _normalise_index(delta)
-                    merged = pd.concat([cached, delta])
-                    merged = merged[~merged.index.duplicated(keep='last')].sort_index()
-                    merged.to_parquet(path)
-                    frames.append(merged)
-                else:
-                    frames.append(cached)
-            else:
-                df = fetch_raw_fn(ym_start, tomorrow)
-                if df.empty:
-                    continue
-                df = _normalise_index(df)
-                df = df[~df.index.duplicated(keep='last')].sort_index()
-                df.to_parquet(path)
-                frames.append(df)
+            df = fetch_raw_fn(ym_start, tomorrow)
+            if df.empty:
+                continue
+            df = _normalise_index(df)
+            df = df[~df.index.duplicated(keep='last')].sort_index()
+            df.to_parquet(path)
+            frames.append(df)
 
     if not frames:
         return pd.DataFrame()
