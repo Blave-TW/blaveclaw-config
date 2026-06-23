@@ -859,6 +859,27 @@ def fetch_twstock_monthly_revenue_batch(stock_ids, headers):
     return _fetch_fundamental_batch('twstock_rev', 'monthly_revenue', stock_ids, headers)
 
 
+def _mark_empty_months(prefix, sid, start, end):
+    """Write empty-marker parquets for every PAST month in [start, end] that has
+    no cached file.
+
+    The /batch endpoint only returns months that have data, so the empty early
+    months (e.g. institutional before the dataset existed) never get a file from
+    _save_monthly — and the next run's extend path would re-fetch every one of
+    them. Marking them here keeps a cold batch fetch a true cache hit on re-run.
+    """
+    cache_dir = _monthly_cache_dir(prefix, {'id': sid})
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    current_ym = datetime.utcnow().strftime('%Y-%m')
+    end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
+    for ym in _iter_months(start, end_str):
+        if ym >= current_ym:        # never freeze the current (still-growing) month
+            continue
+        path = cache_dir / f'{ym}.parquet'
+        if not path.exists():
+            pd.DataFrame().to_parquet(path)
+
+
 def _fetch_twstock_cached_batch(prefix, endpoint, raw_fn, parse_fn, stock_ids, start, end, headers):
     """Shared batch fetcher for monthly-cached 台股 datasets.
 
@@ -915,6 +936,11 @@ def _fetch_twstock_cached_batch(prefix, endpoint, raw_fn, parse_fn, stock_ids, s
                 df = parse_fn(records)
                 _save_monthly(prefix, {'id': sid}, df)
                 partial[sid] = df
+            # Mark every in-range past month with no data as an empty parquet, so
+            # the next run is a cache hit instead of re-fetching the empty months.
+            if start:
+                for sid in chunk:
+                    _mark_empty_months(prefix, sid, start, end)
         except Exception as e:
             print(f'  [batch] {endpoint} chunk {idx + 1} error: {e}')
         return partial
