@@ -32,14 +32,20 @@ _CACHE_DIR = Path(__file__).parent.parent / 'cache'
 
 
 def _retry_get(url, max_retries=6, **kwargs):
-    """GET with exponential backoff on 429 (2, 4, 8, 16, 32, 64 s)."""
+    """GET with exponential backoff on transient failures (2, 4, 8, 16, 32, 64 s).
+
+    Retries 429 (Blave per-IP rate limit, 500/5min) and 5xx (incl. 503, which the
+    API returns when upstream FinMind itself rate-limits). 403 is NOT retried — the
+    API returns it only for a missing/invalid api-key, a permanent error that
+    backing off would just delay surfacing.
+    """
     for attempt in range(max_retries):
         r = requests.get(url, **kwargs)
-        if r.status_code != 429:
+        if r.status_code != 429 and r.status_code < 500:
             r.raise_for_status()
             return r
         wait = 2 ** (attempt + 1)
-        print(f"  429 rate limit — retrying in {wait}s ({url.split('/')[-2]}/{url.split('/')[-1]})")
+        print(f"  {r.status_code} transient — retrying in {wait}s ({url.split('/')[-2]}/{url.split('/')[-1]})")
         time.sleep(wait)
     r.raise_for_status()
     return r
@@ -97,15 +103,19 @@ def _extend_cache_monthly(prefix, params, fetch_raw_fn, start, end):
         ym_end   = f'{_next_month(ym)}-01'   # exclusive upper bound when fetching
 
         if ym < current_ym:
-            # Past month — immutable: fetch once, never touch again
+            # Past month — immutable: fetch once (even if empty), never touch again.
+            # Empty months MUST be written too, otherwise a range that starts before
+            # the data exists (e.g. institutional from 2010) re-fetches every empty
+            # month on every run — a per-run API storm that trips rate limits.
             if not path.exists():
                 df = fetch_raw_fn(ym_start, ym_end)
-                if df.empty:
-                    continue
-                df = _normalise_index(df)
-                df = df[~df.index.duplicated(keep='last')].sort_index()
+                if not df.empty:
+                    df = _normalise_index(df)
+                    df = df[~df.index.duplicated(keep='last')].sort_index()
                 df.to_parquet(path)
-            frames.append(pd.read_parquet(path))
+            cached = pd.read_parquet(path)
+            if not cached.empty:
+                frames.append(cached)
         else:
             # Current month — may have new bars
             if path.exists():
@@ -401,7 +411,10 @@ def _fetch_twstock_price_raw(stock_id, start, end, headers):
     end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
     r = _retry_get(f'{BASE}/studio/market/twstock/price_adj/{stock_id}',
                    headers=headers, params={'start': start, 'end': end_str}, timeout=60)
-    df = pd.DataFrame(r.json()['data'])
+    data = r.json().get('data', [])
+    if not data:
+        return pd.DataFrame(columns=['Open', 'Close'])
+    df = pd.DataFrame(data)
     df['date'] = pd.to_datetime(df['date'])
     df = df.set_index('date').sort_index()[['open', 'close']].rename(
         columns={'open': 'Open', 'close': 'Close'}).astype(float)
@@ -422,7 +435,10 @@ def _fetch_twstock_price_nonadj_raw(stock_id, start, end, headers):
     end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
     r = _retry_get(f'{BASE}/studio/market/twstock/price/{stock_id}',
                    headers=headers, params={'start': start, 'end': end_str}, timeout=60)
-    df = pd.DataFrame(r.json()['data'])
+    data = r.json().get('data', [])
+    if not data:
+        return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume'])
+    df = pd.DataFrame(data)
     df['date'] = pd.to_datetime(df['date'])
     cols = [c for c in ['open', 'high', 'low', 'close', 'volume'] if c in df.columns]
     df = df.set_index('date').sort_index()[cols].rename(
@@ -445,7 +461,10 @@ def _fetch_twstock_inst_raw(stock_id, start, end, headers):
     end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
     r = _retry_get(f'{BASE}/studio/market/twstock/institutional/{stock_id}',
                    headers=headers, params={'start': start, 'end': end_str}, timeout=60)
-    df = pd.DataFrame(r.json()['data'])
+    data = r.json().get('data', [])
+    if not data:
+        return pd.DataFrame()
+    df = pd.DataFrame(data)
     df['date'] = pd.to_datetime(df['date'])
     df = df.set_index('date').sort_index()
     df['foreign_net'] = df['foreign_buy'] - df['foreign_sell']

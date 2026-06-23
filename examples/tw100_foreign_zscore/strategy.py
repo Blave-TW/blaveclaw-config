@@ -75,17 +75,23 @@ def _rebalance_mask(idx, freq='W'):
 # ── fetch_data ────────────────────────────────────────────────────────────────
 def fetch_data(hdrs):
     import pandas as pd
-    from lib.data import fetch_twstock_price_adj, fetch_twstock_institutional
+    from lib.data import fetch_twstock_price_adj_batch, fetch_twstock_institutional_batch
+
+    # Batch fetch — one /batch request per ≤50 ids (concurrent), not one per stock.
+    # 100 stocks: ~minutes (per-stock single fetch) → seconds. See references/twstock.md.
+    price_all   = fetch_twstock_price_adj_batch(UNIVERSE, START, END, hdrs)      # {sid: Open/Close}
+    foreign_all = fetch_twstock_institutional_batch(UNIVERSE, START, END, hdrs)  # {sid: foreign_net,...}
 
     closes, opens, foreign_nets = {}, {}, {}
     for sid in UNIVERSE:
-        try:
-            price = fetch_twstock_price_adj(sid, START, END, hdrs)
-            closes[sid]       = price['Close']
-            opens[sid]        = price['Open']
-            foreign_nets[sid] = fetch_twstock_institutional(sid, START, END, hdrs)['foreign_net']
-        except Exception as e:
-            print(f"  skip {sid}: {e}")
+        price = price_all.get(sid)
+        if price is None or price.empty:
+            continue
+        closes[sid] = price['Close']
+        opens[sid]  = price['Open']
+        inst = foreign_all.get(sid)
+        if inst is not None and not inst.empty and 'foreign_net' in inst.columns:
+            foreign_nets[sid] = inst['foreign_net']
 
     close_df   = pd.DataFrame(closes).sort_index().dropna(how='all')
     open_df    = pd.DataFrame(opens).reindex(close_df.index)
