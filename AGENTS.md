@@ -240,11 +240,13 @@ CRITICAL: Read the correct reference before writing any strategy code (see Strat
 
 ## Charts (matplotlib)
 
-All chart text must be in English — Chinese characters render as garbled boxes on the server. `tight_layout()` does not accept `hspace`/`wspace` on this matplotlib version. When you generate charts, send them to Telegram via `send_photo`. See `references/charts.md` for all code examples.
+**The user is on Telegram — the ONLY way to let them SEE an image is `send_photo`.** Whenever the user asks to *see / draw / plot / show* anything (畫、圖、走勢、走勢圖、K線、chart, plot, visualize, "show me…"), the deliverable is an **actual image file sent via `send_photo`** — a text summary is NEVER a substitute for a requested chart. Standard flow: fetch data → plot with matplotlib → `plt.savefig(path)` → `send_photo(path)` → optional `send_text` caption. Ad-hoc / one-off charts the user just wants to view save to `/tmp/` (e.g. `/tmp/btc_1y.png`, matching `references/charts.md`); only charts that are a strategy's output artifact go under `strategies/{name}/`. (Note: `pnl.png` from `run()` and `heatmap.png` from `plot_heatmap()` are auto-sent — see `references/charts.md` — but every chart YOU generate must be sent explicitly.)
+
+All chart text must be in English — Chinese characters render as garbled boxes on the server. `tight_layout()` does not accept `hspace`/`wspace` on this matplotlib version. See `references/charts.md` for all code examples.
 
 ## Shell Commands
 
-- **One-off / throwaway scripts go in `tmp/`** (workspace-relative, e.g. `tmp/check_data.py`) — ad-hoc exploration, debugging, or data-inspection scripts that are NOT a strategy and NOT a reusable `lib/` helper. Never drop them in the workspace root or inside `strategies/` (that folder is for `strategy.py` folders only — see Manager & Reconciler rules). This is for scripts only; **output artifacts (charts, stats, heatmaps) still follow their own rules** — never `tmp/` (nor `/tmp/`) for those; charts go under `strategies/{name}/`.
+- **One-off / throwaway scripts go in `tmp/`** (workspace-relative, e.g. `tmp/check_data.py`) — ad-hoc exploration, debugging, or data-inspection scripts that are NOT a strategy and NOT a reusable `lib/` helper. Never drop them in the workspace root or inside `strategies/` (that folder is for `strategy.py` folders only — see Manager & Reconciler rules). This is for scripts only; **a strategy's output artifacts (its `pnl.png`, `heatmap.png`, `stats.json`) follow their own rules** — never `tmp/` (nor `/tmp/`) for those; they go under `strategies/{name}/`. (Exception: an ad-hoc chart the user just wants to *view* — not tied to any strategy — goes to `/tmp/`; see Charts above.)
 - **NEVER write `except Exception: pass`** — silent failures hide all errors. Always at minimum `except Exception as e: print(f"Error: {e}")`. This applies everywhere: scan.py, strategy.py, notify calls, exchange API calls.
 - NEVER chain commands with && or || or ; — run ONE command at a time
 - Use `python3 file.py [args]` or `node file.js` directly — passing arguments is fine, but never chain with && or || or ;
