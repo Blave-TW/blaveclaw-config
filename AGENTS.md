@@ -189,6 +189,7 @@ Taiwan stock data (universe, batch functions, fundamental factors, lookahead-bia
   - `find_plateau` returns 5 values: `best_idx, nbr_mean, best_row, best_col, best_sharpe` — use `best_row`, `best_col`, `best_sharpe` directly; `nbr_mean` is a **2D array** (do NOT format it as a scalar)
   - Canonical usage: `best_idx, _, best_row, best_col, best_sharpe = find_plateau(grid, ROW_VALS, COL_VALS)`
   - `plot_heatmap` `output_path` is **required** — always pass `output_path='strategies/{strategy_name}/heatmap.png'`, never `/tmp/`
+  - `plot_heatmap` **auto-sends the heatmap to Telegram** (via `send_photo`, same as `run()` does for `pnl.png`) — you do NOT need a manual `send_photo` after it. Pass `send_telegram=False` only if you explicitly want to suppress it. Requires Telegram to be paired (see the pairing check); if unpaired it prints an error and keeps the saved file rather than crashing the scan
 - `from lib.analysis import precise_pnl, compute_stats` — available if you need a custom loop (rare)
 
 **Parameter scan workflow:**

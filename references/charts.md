@@ -40,3 +40,12 @@ send_text("Backtest complete — Sharpe 1.42, MDD -12%")
 ```
 
 `lib/notify.py` resolves delivery automatically — token from `openclaw.json`, paired chat IDs from `telegram-default-allowFrom.json` (broadcasts to all). Never add a `chatId` key to `openclaw.json`; it is invalid and crashes the gateway on restart.
+
+## Charts the lib sends for you
+
+Two lib-generated charts are sent to Telegram automatically — do NOT add a manual `send_photo` for these:
+
+- **Backtest `pnl.png`** — `run()` sends it when you pass `send_telegram_fn` (see `lib/runner.py`).
+- **Scan `heatmap.png`** — `plot_heatmap()` sends it by default (`send_telegram=True`); pass `send_telegram=False` to suppress.
+
+Any *other* chart you generate yourself (custom analysis, regime plots, ad-hoc figures) is NOT auto-sent — call `send_photo(path)` explicitly.

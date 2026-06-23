@@ -200,6 +200,7 @@ def plot_heatmap(
     col_label="EXIT_TH",
     title="Sharpe Heatmap",
     output_path=None,
+    send_telegram=True,
 ):
     """
     Plot a Sharpe heatmap with the plateau cell highlighted.
@@ -214,6 +215,9 @@ def plot_heatmap(
     col_label  : x-axis label (default 'EXIT_TH')
     title      : chart title
     output_path: REQUIRED — use 'strategies/{strategy_name}/heatmap.png'
+    send_telegram: if True (default), broadcast the saved heatmap to Telegram
+                 via lib.notify.send_photo — mirrors run()'s auto-send of
+                 pnl.png so scan charts reach the user without manual sending
 
     Returns
     -------
@@ -262,4 +266,12 @@ def plot_heatmap(
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"Heatmap saved: {output_path}")
+
+    if send_telegram:
+        try:
+            from lib.notify import send_photo
+            send_photo(output_path)
+        except Exception as e:
+            print(f"Error: heatmap saved but Telegram send failed: {e}")
+
     return output_path
