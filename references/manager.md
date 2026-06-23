@@ -24,11 +24,13 @@ When the user asks to backtest the portfolio / combined strategies, use THIS scr
 Reads all `strategies/*/stats.json` (daily_returns). Maximizes `slope/std` of the combined portfolio equity curve (365-day lookback). Writes optimal weights + leverage to `manager/portfolio_config.json` — **only with `--apply`**.
 
 ```
-python3 manager/manager.py [--lookback 365] [--account 10000] [--target-vol 0.30]            # dry-run
-python3 manager/manager.py [--lookback 365] [--account 10000] [--target-vol 0.30] --apply    # write config
+python3 manager/manager.py [--lookback 365] [--target-vol 0.30]            # dry-run
+python3 manager/manager.py [--lookback 365] [--target-vol 0.30] --apply    # write config
 ```
 
 `--target-vol`: sets target annual volatility; computes `leverage = target_vol / ann_vol`
+
+**manager.py never touches `account_value`.** It only writes `weights` and `leverage`. `account_value` is the live position-sizing base (`contribution = account_value * leverage * weight * position`), so changing capital is a separate, explicit action: edit `portfolio_config.json["account_value"]` by hand. There is intentionally no `--account` flag — updating weights must not be able to resize live positions.
 
 **`--apply` flag — protects live trading.** Default is dry-run: weights are computed and printed but `portfolio_config.json` is untouched, so a research run can never silently change the weights the live reconciler is trading on. The optimiser is seeded (`np.random.seed(42)`), so the `--apply` re-run produces exactly the weights shown in the dry-run (same stats.json inputs).
 

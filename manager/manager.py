@@ -6,11 +6,16 @@ portfolio returns (R · w), where R is the strategy returns matrix.
 Updates manager/portfolio_config.json.
 
 Usage:
-    python3 manager/manager.py [--lookback 365] [--account 10000] [--notify]
+    python3 manager/manager.py [--lookback 365] [--notify]
     python3 manager/manager.py --apply   # actually write portfolio_config.json
 
 Default is DRY-RUN: weights are computed and printed but portfolio_config.json
 is NOT touched. Pass --apply only after the user has confirmed the new weights.
+
+This command ONLY recomputes weights / leverage. It never changes
+account_value — that is the live position-sizing base (see lib/portfolio.py:
+contribution = account_value * leverage * weight * position). To change capital,
+edit portfolio_config.json["account_value"] directly as a separate, explicit step.
 """
 import argparse, json, sys
 import numpy as np
@@ -104,7 +109,6 @@ def optimize_weights(ret_df, lookback):
 def main():
     parser = argparse.ArgumentParser(description='BlaveClaw Strategy Manager')
     parser.add_argument('--lookback',   type=int,   default=LOOKBACK,   help=f'Lookback window in days (default {LOOKBACK})')
-    parser.add_argument('--account',    type=float, default=None,       help='Override account_value in portfolio_config.json')
     parser.add_argument('--target-vol', type=float, default=TARGET_VOL, help=f'Target annual volatility for leverage (default {TARGET_VOL})')
     parser.add_argument('--notify',     action='store_true',             default=NOTIFY, help='Send Telegram notification after update')
     parser.add_argument('--apply',      action='store_true', help='Write the new weights to portfolio_config.json (default: dry-run, file untouched)')
@@ -146,12 +150,14 @@ def main():
     else:
         cfg = {'account_value': 10000}
 
-    # Preserve deployment fields that manager must never overwrite
+    # Preserve deployment fields that manager must never overwrite.
+    # account_value is deliberately NOT settable here — it is the live
+    # position-sizing base and must be changed as a separate explicit step,
+    # never as a side effect of a weight update.
+    cfg.setdefault('account_value', 10000)
     cfg.setdefault('exchanges', {})
     cfg.setdefault('asset_specs', {})
 
-    if args.account is not None:
-        cfg['account_value'] = args.account
     cfg['weights'] = weights
 
     # Portfolio volatility and Sharpe
