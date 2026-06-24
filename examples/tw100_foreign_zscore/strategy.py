@@ -94,6 +94,8 @@ def fetch_data(hdrs):
             foreign_nets[sid] = inst['foreign_net']
 
     close_df   = pd.DataFrame(closes).sort_index().dropna(how='all')
+    if close_df.empty:
+        raise RuntimeError("fetch_data: no price data — check UNIVERSE, credentials, and START/END dates")
     open_df    = pd.DataFrame(opens).reindex(close_df.index)
     foreign_df = pd.DataFrame(foreign_nets).reindex(close_df.index).fillna(0)
     return close_df, open_df, foreign_df

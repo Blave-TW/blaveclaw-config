@@ -184,7 +184,11 @@ def fetch_twstock_per(stock_id: str, start: str, end: str, headers: dict) -> pd.
     )
     r.raise_for_status()
     data = r.json().get("data", [])
-    return pd.DataFrame(data).set_index("date") if data else pd.DataFrame()
+    if not data:
+        return pd.DataFrame()
+    df = pd.DataFrame(data).set_index("date")
+    df.index = pd.to_datetime(df.index)   # 對齊價格/法人等 batch fetcher 的 DatetimeIndex；否則 reindex 全 NaN
+    return df.sort_index()
 ```
 
 ---
