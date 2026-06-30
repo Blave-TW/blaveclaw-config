@@ -18,6 +18,4 @@ json.dump(cfg, open('/root/.openclaw/openclaw.json', 'w'), indent=2)
 
 Model ID format: `anthropic/{id}` — use the `id` field from the `/v1/models` response.
 
-After updating, tell the user: "Settings updated. Run `systemctl restart openclaw-gateway` in the terminal to apply the change."
-
-**NEVER run `systemctl restart openclaw-gateway` yourself** — it kills the current session.
+After updating, tell the user: "Settings updated. The new model takes effect immediately — no restart needed."
