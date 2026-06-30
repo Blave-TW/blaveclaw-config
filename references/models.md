@@ -12,10 +12,10 @@ When the user asks to switch models (e.g. "換成 DeepSeek Flash", "用 Opus"), 
 ```python
 import json
 cfg = json.load(open('/root/.openclaw/openclaw.json'))
-cfg['agents']['defaults']['model']['primary'] = 'anthropic/deepseek-v4-flash'
+cfg['agents']['defaults']['model']['primary'] = 'deepseek/deepseek-v4-flash'
 json.dump(cfg, open('/root/.openclaw/openclaw.json', 'w'), indent=2)
 ```
 
-Model ID format: `anthropic/{id}` — use the `id` field from the `/v1/models` response.
+Model ID format: use the `id` field from the `/v1/models` response directly (e.g. `anthropic/claude-sonnet-4-6`, `deepseek/deepseek-v4-flash`).
 
 After updating, tell the user: "Settings updated. The new model takes effect immediately — no restart needed."
