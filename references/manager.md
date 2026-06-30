@@ -90,3 +90,31 @@ bash manager/start_reconciler.sh
 Run via `start_reconciler.sh`, not `reconciler.py` directly — the wrapper restarts on crash and sends a Telegram alert on each exit.
 
 **Before starting the reconciler (or triggering a manual reconcile):** always show the user the pending order summary from `aggregate_portfolio()` + `compute_diff()` and ask for explicit confirmation. Only proceed if the user confirms.
+
+---
+
+## Additional Rules
+
+**Before running `manager/manager.py` for weight optimisation:** temporarily set `END = None` in every strategy file so the optimiser uses the latest data. After the run, restore each strategy's fixed past date (roughly one week ago) for normal cache-backed backtests.
+
+**Deleting a strategy:** delete only its own directory (e.g. `strategies/btc_kd_long/`). Never touch `manager/`.
+
+**Changing `account_value` (capital):** edit `portfolio_config.json["account_value"]` by hand — the ONLY way, and only when the user explicitly asks to change capital (never as a side effect of a weight update). Procedure: (1) the value is total account equity in the account currency (USD) — use the real figure, never a placeholder like 10000; (2) editing resizes every live position, so show the user the old → new value and get explicit confirmation BEFORE writing, same as `--apply`; (3) no restart needed — the reconciler re-reads the file on its next poll. `manager.py` never writes this field.
+
+**OKX `get_positions()` pitfall:** OKX positions API returns `ctVal` as `None` for some instrument types. Do NOT compute notional as `pos * markPx * ctVal` — use the `notionalUsd` field directly instead. Zero notional causes the position to be ignored and reconciliation skipped.
+
+**Account library — create `lib/account_{exchange}.py`:** To wire snapshot for an exchange, copy `lib/account.py` to `lib/account_{exchange}.py` and implement `get_equity(env)` and `get_positions(env)`. `snapshot.py` auto-discovers this file by name — **do NOT modify snapshot.py**. API keys go in `.env` (e.g. `okx_api_key`, `okx_secret_key`, `okx_passphrase`). Before writing, read the relevant skill reference under `skills/blave-quant/references/` for the correct balance and position endpoints.
+
+**`portfolio_config.json["messages"]`** — Telegram message templates for reconciler and watchdog. Keys: `order_buy`, `order_sell`, `order_close_long`, `order_close_short`, `order_error`, `watchdog_started`, `watchdog_restart`. Placeholders: `{symbol}`, `{amount}`, `{error}`, `{code}`. Edit these to match the user's preferred language when deploying.
+
+**`manager/snapshot.py`** — daily account equity snapshot. Reads unique exchanges from `portfolio_config.json["exchanges"]`, auto-imports `lib/account_{exchange}.py` per exchange, records to `manager/snapshots.jsonl`, sends Telegram report. Cron: `0 8 * * * cd /root/.openclaw/workspace && python3 manager/snapshot.py`. The `cd` is mandatory — cron runs from `/root` and all paths are relative; without it every file open fails silently before Telegram is reached.
+
+**Always start the reconciler via the watchdog wrapper in a tmux session**, not directly and never with `nohup &`. `nohup &` background processes are killed when the shell session ends:
+
+```
+tmux new-session -d -s reconciler 'cd /root/.openclaw/workspace && bash manager/start_reconciler.sh'
+```
+
+To check status: `tmux attach -t reconciler`. To stop: `tmux kill-session -t reconciler`.
+
+**Trace the full calculation chain before flagging an inconsistency.** If `state.json` shows a non-zero position but a field in `portfolio_config.json` (e.g. `weight=0`) seems contradictory, read `lib/portfolio.py` first. `contribution = account_value * leverage * weight * position` — a zero weight zeroes out the contribution by design. Do not report a bug until you have followed every variable through the aggregation logic.

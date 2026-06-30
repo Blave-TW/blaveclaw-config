@@ -411,3 +411,29 @@ Let `compute_signals` do per-rebalance ranking using only the lookback window av
 - Weight shifting — runner shifts by 1 bar
 - PnL computation — runner calls `precise_pnl` with the weight matrix
 - Chart / stats / notify — runner handles all output
+
+---
+
+## END Modes and WARMUP (Type A and C)
+
+**END modes — three valid states:**
+
+| Context | END value |
+|---|---|
+| `strategy.py` backtest (normal) | Fixed past date, e.g. `"2026-05-21"` (roughly one week ago) — **never a dynamic expression**. Guarantees cache hits on every re-run. |
+| `manager/manager.py` weight optimisation | Temporarily set `END = None` so the optimiser sees latest data. Restore the fixed date afterwards. |
+| Live mode | `END = None` |
+
+**WARMUP** (optional config) — number of bars to trim from the start of the backtest (warm-up period where indicators are not yet stable). Set to the sum of all rolling windows used. Runner automatically trims if present.
+
+**run() call signature (Type A):**
+
+```python
+run(locals(), fetch_data, compute_signals, send_telegram_fn=make_sender())
+```
+
+Runner handles everything else: backtest, chart, stats, notify, live execution.
+
+## Type C — Additional Rules
+
+**Taiwan stock universe** must be sampled by sector — never take `[:N]` from the raw list (codes are ordered by sector, a head-slice concentrates in cement/food/textile). Use the sector-stratified sampling helper in `references/twstock.md`.
