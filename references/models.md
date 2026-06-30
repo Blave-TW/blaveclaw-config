@@ -29,7 +29,7 @@ The 5-second delay ensures your reply is delivered before the gateway goes down.
 
 Available model IDs:
 - `anthropic/claude-haiku-4-5-20251001`
-- `anthropic/claude-sonnet-4-6`
+- `anthropic/claude-sonnet-5`
 - `anthropic/claude-opus-4-8`
 - `deepseek/deepseek-v4-flash` (peak hour 2x: Beijing 09-12 / 14-18)
 - `deepseek/deepseek-v4-pro` (peak hour 2x: Beijing 09-12 / 14-18)
