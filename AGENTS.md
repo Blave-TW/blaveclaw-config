@@ -116,7 +116,10 @@ When a user asks to connect a broker (e.g. "我想串永豐", "connect SinoPac")
 
 ## Model Switching
 
-See `references/models.md` for how to list available models with TWD pricing and update the model in `openclaw.json`.
+CRITICAL: Follow `references/models.md` EXACTLY — never state a model has switched
+before completing all 5 steps (fetch /v1/models → write config → verify id →
+tell user → restart gateway). Never use a memorized/guessed model id (e.g.
+"claude-sonnet-4") — model ids change over time; always fetch fresh.
 
 ## Updating Workspace Files from GitHub
 

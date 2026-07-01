@@ -4,6 +4,10 @@ Model IDs change over time (new Claude generations, provider updates) — never 
 or previously-seen ID. The proxy's `/v1/models` response is the single source of truth; always
 fetch it fresh before switching.
 
+Do NOT reply "已切換到 X" until Step 3's verification returns 200. If you skip straight to a reply
+without running Step 1-3, you are guessing — and a wrong guess will crash the user's next message
+with a 404, not just fail silently.
+
 When the user asks to switch models (e.g. "換成 DeepSeek Flash", "用 Opus"), follow this exact sequence:
 
 **Step 1 — fetch the current model list and pricing:**
