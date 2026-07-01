@@ -23,10 +23,20 @@ cfg['agents']['defaults']['model']['primary'] = '<id from /v1/models response>'
 json.dump(cfg, open('/root/.openclaw/openclaw.json', 'w'), indent=2)
 ```
 
-**Step 3 — tell the user the model switched and that the gateway is restarting:**
+**Step 3 — verify the exact id before restarting:**
+```bash
+curl -s -H "x-api-key: $KEY" https://api.blave.org/openclaw/proxy/v1/models/<id from Step 1>
+```
+This single-model lookup is the same pre-flight check the gateway itself runs internally before
+accepting a model. Accepts both the bare id (`claude-sonnet-5`) and the prefixed form
+(`anthropic/claude-sonnet-5`). If it returns 200, the switch will work after restart. If it 404s
+even though the id was present in the Step 1 list, do NOT proceed — the model isn't actually wired
+up on the proxy side yet. Tell the user the switch isn't available rather than reporting success.
+
+**Step 4 — tell the user the model switched and that the gateway is restarting:**
 Reply with something like: "已切換到 X，Gateway 重啟中，約 10 秒後生效 🔄"
 
-**Step 4 — trigger a delayed gateway restart (run this bash command last):**
+**Step 5 — trigger a delayed gateway restart (run this bash command last):**
 ```bash
 (sleep 5 && systemctl restart openclaw-gateway.service) &
 ```
