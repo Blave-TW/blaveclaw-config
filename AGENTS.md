@@ -91,6 +91,18 @@ All chart text must be in English — Chinese characters render as garbled boxes
 - Use `python3 file.py [args]` or `node file.js` directly
 - To run a strategy: `python3 strategies/my_strategy/strategy.py` with `workdir=/root/.openclaw/workspace` (Linux) or `workdir=C:\openclaw\workspace` (Windows)
 
+## Long-Running Processes & Memory
+
+**RAM on this machine is limited and shared with the agent runtime itself (check with `free -m`). A process that grows without bound will freeze the ENTIRE machine — the bot dies with it and the user is locked out.** (This has happened: an in-memory trade log grew to 1.9 GB and froze a machine for 24 hours.)
+
+When writing any process that runs continuously (live monitors, scanners, paper-trading engines):
+
+- **Every in-memory list/dict that grows per tick, per signal, or per trade MUST be bounded** — use `deque(maxlen=N)` or trim to the last N entries. No exceptions.
+- Records that must be kept forever go to disk (append to a `.jsonl` file), NOT into a Python list.
+- NEVER attach large snapshots (full feature caches, candle histories, whole DataFrames) to per-trade/per-signal records. Store IDs or the few fields you need.
+- Keep only the candles a computation needs (e.g. last 50 bars), not the full history.
+- After starting a long-running process, check its memory once (`ps -o rss= -p <pid>`) and tell the user roughly how much it uses; if it grows run over run, treat that as a bug and fix it before leaving it running.
+
 ## Backtest Output
 
 Do NOT call `bt.plot()` — heavy interactive HTML, not useful on Telegram.
