@@ -87,7 +87,7 @@ After flooring: if qty < min qty or `qty * price` < min notional → `return Fal
 bash manager/start_reconciler.sh
 ```
 
-Run via `start_reconciler.sh`, not `reconciler.py` directly — the wrapper restarts on crash and sends a Telegram alert on each exit.
+Run via `start_reconciler.sh` (Linux) / `start_reconciler_windows.ps1` (Windows) — never `reconciler.py` directly — the wrapper restarts on crash and sends a Telegram alert on each exit. Determine the OS first per `AGENTS.md`.
 
 **Before starting the reconciler (or triggering a manual reconcile):** always show the user the pending order summary from `aggregate_portfolio()` + `compute_diff()` and ask for explicit confirmation. Only proceed if the user confirms.
 
@@ -107,14 +107,23 @@ Run via `start_reconciler.sh`, not `reconciler.py` directly — the wrapper rest
 
 **`portfolio_config.json["messages"]`** — Telegram message templates for reconciler and watchdog. Keys: `order_buy`, `order_sell`, `order_close_long`, `order_close_short`, `order_error`, `watchdog_started`, `watchdog_restart`. Placeholders: `{symbol}`, `{amount}`, `{error}`, `{code}`. Edit these to match the user's preferred language when deploying.
 
-**`manager/snapshot.py`** — daily account equity snapshot. Reads unique exchanges from `portfolio_config.json["exchanges"]`, auto-imports `lib/account_{exchange}.py` per exchange, records to `manager/snapshots.jsonl`, sends Telegram report. Cron: `0 8 * * * cd /root/.openclaw/workspace && python3 manager/snapshot.py`. The `cd` is mandatory — cron runs from `/root` and all paths are relative; without it every file open fails silently before Telegram is reached.
+**`manager/snapshot.py`** — daily account equity snapshot. Reads unique exchanges from `portfolio_config.json["exchanges"]`, auto-imports `lib/account_{exchange}.py` per exchange, records to `manager/snapshots.jsonl`, sends Telegram report. Scheduled daily at 08:00 UTC — see `references/deployment.md` for the exact cron (Linux) / schtasks (Windows) entry. The working-directory prefix (`cd &&` / `cd /d &&`) is mandatory on both OSes — the scheduler does not run from the workspace by default and all paths in this repo are relative; without it every file open fails silently before Telegram is reached.
 
-**Always start the reconciler via the watchdog wrapper in a tmux session**, not directly and never with `nohup &`. `nohup &` background processes are killed when the shell session ends:
+**Always start the reconciler via the watchdog wrapper**, not `reconciler.py` directly and never with `nohup &`. `nohup &` background processes are killed when the shell session ends.
 
+**Linux — tmux session:**
 ```
 tmux new-session -d -s reconciler 'cd /root/.openclaw/workspace && bash manager/start_reconciler.sh'
 ```
-
 To check status: `tmux attach -t reconciler`. To stop: `tmux kill-session -t reconciler`.
+
+**Windows — NSSM service** (also survives instance reboot, unlike the Linux tmux session — a deliberate improvement, not a gap):
+```
+nssm install blaveclaw-reconciler powershell.exe "-ExecutionPolicy Bypass -File C:\openclaw\workspace\manager\start_reconciler_windows.ps1"
+nssm set blaveclaw-reconciler AppDirectory C:\openclaw\workspace
+nssm set blaveclaw-reconciler Start SERVICE_AUTO_START
+nssm start blaveclaw-reconciler
+```
+To check status: `nssm status blaveclaw-reconciler`. To stop: `nssm stop blaveclaw-reconciler` (add `nssm set blaveclaw-reconciler Start SERVICE_DEMAND_START` if it should not restart on next boot).
 
 **Trace the full calculation chain before flagging an inconsistency.** If `state.json` shows a non-zero position but a field in `portfolio_config.json` (e.g. `weight=0`) seems contradictory, read `lib/portfolio.py` first. `contribution = account_value * leverage * weight * position` — a zero weight zeroes out the contribution by design. Do not report a bug until you have followed every variable through the aggregation logic.

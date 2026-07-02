@@ -46,14 +46,14 @@ GET /openclaw/marketplace/strategies/{id}
    - `GET /openclaw/marketplace/my/official` — free official strategies (no purchase needed)
 2. Merge and deduplicate by id. Show the combined list to the user
 3. User picks one → `GET /openclaw/marketplace/strategies/{id}/code`
-4. Save code to `/tmp/<filename>.py`
+4. Save code to `tmp/<filename>.py`
 5. **Check for multi-strategy bundle** — scan the file for lines matching `# ===== STRATEGY \d+:`:
    - If found: split into separate files (see "Deploying a multi-strategy bundle" below), security scan and deploy each one individually
    - If not found: proceed as single strategy
-6. **Security scan** — run `python3 lib/security_check.py /tmp/<filename>.py`
+6. **Security scan** — run `python3 lib/security_check.py tmp/<filename>.py`
    - Exit 0 (clean) → move to `strategies/<filename>.py` and proceed
    - Exit 1 (warnings) → show findings to user, ask for confirmation; if confirmed, move to `strategies/` and run
-   - Exit 2 (critical) → show findings, delete `/tmp/<filename>.py`, do NOT run
+   - Exit 2 (critical) → show findings, delete `tmp/<filename>.py`, do NOT run
 7. `python3 strategies/<filename>.py`
 
 Purchases and shared-with-me are separate lists — checking only purchases will miss shared strategies.
@@ -63,7 +63,7 @@ Purchases and shared-with-me are separate lists — checking only purchases will
 When the downloaded code contains `# ===== STRATEGY N: <name> =====` markers, treat it as a bundle:
 
 1. Split the code at each `# ===== STRATEGY N:` line into N separate strings
-2. Save each to `/tmp/<name_slug>.py` (derive slug from the strategy name after the colon)
+2. Save each to `tmp/<name_slug>.py` (derive slug from the strategy name after the colon)
 3. Run `python3 lib/security_check.py` on **each** file separately
    - If any file exits 2 (critical) → delete that file, do NOT run it; continue with the others
    - If any file exits 1 (warnings) → show findings, ask user for confirmation before moving
@@ -109,11 +109,11 @@ Response: `[{id, title, description, category, shared_at}, ...]`
 **Flow when user says a strategy was shared with them, or asks what strategies they have access to:**
 1. `GET /openclaw/marketplace/my/shared-with-me` — show the list
 2. User picks one → `GET /openclaw/marketplace/strategies/{id}/code`
-3. Save code to `/tmp/<filename>.py` (NOT strategies/ yet)
-4. **Security scan** — run `python3 lib/security_check.py /tmp/<filename>.py`
+3. Save code to `tmp/<filename>.py` (NOT strategies/ yet)
+4. **Security scan** — run `python3 lib/security_check.py tmp/<filename>.py`
    - Exit 0 (clean) → move to `strategies/<filename>.py` and proceed
    - Exit 1 (warnings) → show findings to user, ask for confirmation; if confirmed, move to `strategies/` and run
-   - Exit 2 (critical) → show findings, delete `/tmp/<filename>.py`, do NOT run
+   - Exit 2 (critical) → show findings, delete `tmp/<filename>.py`, do NOT run
 
 ## Strategy report (performance data)
 

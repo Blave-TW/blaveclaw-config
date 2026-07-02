@@ -5,6 +5,8 @@ Usage:
     from lib.validation import mcpt
 """
 
+import os
+import tempfile
 import numpy as np
 import pandas as pd
 
@@ -81,7 +83,7 @@ def mcpt(
     return actual, p_value, dist
 
 
-def plot_mcpt(actual, dist, label="Strategy", output_path="/tmp/mcpt.png"):
+def plot_mcpt(actual, dist, label="Strategy", output_path=os.path.join(tempfile.gettempdir(), "mcpt.png")):
     """
     Plot MCPT Sharpe distribution with actual Sharpe marked.
 

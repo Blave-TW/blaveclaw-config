@@ -1,4 +1,6 @@
 import math
+import tempfile
+import os
 import numpy as np
 import pandas as pd
 import logging
@@ -135,7 +137,7 @@ def regime_analysis(df, result, vol_lookback=720, hours_per_year=8760):
     print('─' * len(hdr))
 
 
-def plot_regime(df, result, title='Regime Analysis', vol_lookback=720, hours_per_year=8760, output_path='/tmp/regime.png'):
+def plot_regime(df, result, title='Regime Analysis', vol_lookback=720, hours_per_year=8760, output_path=os.path.join(tempfile.gettempdir(), 'regime.png')):
     """Bar chart of ann_ret/sharpe/mdd by year, trend regime, volatility regime."""
     raw_groups = _build_regimes(
         result['strat_ret'], df['Close'].values, df.index, result['realized_vol'],
@@ -178,7 +180,7 @@ def plot_regime(df, result, title='Regime Analysis', vol_lookback=720, hours_per
     return output_path
 
 
-def plot_pnl(df, result, title='Strategy PnL', output_path='/tmp/pnl.png', extra_panels=None):
+def plot_pnl(df, result, title='Strategy PnL', output_path=os.path.join(tempfile.gettempdir(), 'pnl.png'), extra_panels=None):
     """Generic 2-panel PnL chart: price+return / drawdown.
     extra_panels: list of dicts [{'data': array, 'label': str, 'color': str, 'hlines': [(y, color, label)]}]
     """
@@ -295,7 +297,7 @@ def random_bh_benchmark(close_df, strat_total_ret, strat_sharpe, n=1000, seed=42
 
 
 
-def plot_pnl_portfolio(pf_ret, close_df, title='Portfolio PnL', output_path='/tmp/pnl.png',
+def plot_pnl_portfolio(pf_ret, close_df, title='Portfolio PnL', output_path=os.path.join(tempfile.gettempdir(), 'pnl.png'),
                        bench_pct=None):
     """2-panel PnL chart for Type C strategies. bench_pct: DataFrame with p5/p50/p95 columns."""
     pf_equity = np.cumprod(1 + pf_ret.values)
@@ -327,7 +329,7 @@ def plot_pnl_portfolio(pf_ret, close_df, title='Portfolio PnL', output_path='/tm
     return output_path
 
 
-def plot_candlestick(df, title='走勢圖', output_path='/tmp/candlestick.png',
+def plot_candlestick(df, title='走勢圖', output_path=os.path.join(tempfile.gettempdir(), 'candlestick.png'),
                      n_xticks=10, extra_lines=None):
     """
     Candlestick + volume chart using integer index so all bar widths are in the same unit.

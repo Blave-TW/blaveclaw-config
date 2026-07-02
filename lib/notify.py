@@ -1,8 +1,8 @@
 """
 Telegram notification helper.
 
-Reads bot token from /root/.openclaw/openclaw.json.
-Reads paired chat IDs from /root/.openclaw/credentials/telegram-default-allowFrom.json.
+Reads bot token from $OPENCLAW_HOME/openclaw.json.
+Reads paired chat IDs from $OPENCLAW_HOME/credentials/telegram-default-allowFrom.json.
 
 Usage:
     from lib.notify import make_sender
@@ -15,11 +15,15 @@ Usage:
 
 import json
 import os
+import platform
 import requests
 
 
-_CONFIG_PATH = "/root/.openclaw/openclaw.json"
-_ALLOW_FROM_PATH = "/root/.openclaw/credentials/telegram-default-allowFrom.json"
+OPENCLAW_HOME = os.environ.get("OPENCLAW_HOME") or (
+    r"C:\openclaw" if platform.system() == "Windows" else "/root/.openclaw"
+)
+_CONFIG_PATH = os.path.join(OPENCLAW_HOME, "openclaw.json")
+_ALLOW_FROM_PATH = os.path.join(OPENCLAW_HOME, "credentials", "telegram-default-allowFrom.json")
 
 
 def _load_config():

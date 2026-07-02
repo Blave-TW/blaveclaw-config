@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 import hashlib
 import hmac
+import os
+import platform
 import secrets
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
-GATEWAY_SECRET = open("/root/.openclaw/gateway_secret").read().strip()
+OPENCLAW_HOME = os.environ.get("OPENCLAW_HOME") or (
+    r"C:\openclaw" if platform.system() == "Windows" else "/root/.openclaw"
+)
+GATEWAY_SECRET = open(os.path.join(OPENCLAW_HOME, "gateway_secret")).read().strip()
 SESSION_MAX_AGE = 28800  # 8 hours
 valid_sessions = set()
 

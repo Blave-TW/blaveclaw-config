@@ -13,20 +13,17 @@ CRITICAL: You MUST NEVER deploy a live strategy or set up a cron job without exp
    - **`account_value`**: total USDT capital allocated to the portfolio
    - **`target_vol_pct`**: target annual volatility % (default 30%). If the user prefers to think in terms of acceptable MDD, use the approximation `target_vol ≈ MDD / 2` (e.g. willing to lose 20% → target_vol ≈ 10%). Show both the vol and the implied MDD so the user can decide.
    - Show current values from portfolio_config.json if it exists, and ask the user to confirm or update them before proceeding.
-5. Only after all confirmations: change `MODE = "live"`, update portfolio_config.json, and set up the cron jobs:
-   a. Add the strategy cron (see Cron Job Format below)
-   b. **Add the daily snapshot cron if not already present** — check with `crontab -l | grep snapshot` first:
-      ```
-      0 8 * * * cd /root/.openclaw/workspace && python3 manager/snapshot.py
-      ```
+5. Only after all confirmations: change `MODE = "live"`, update portfolio_config.json, and set up the schedule (cron on Linux, Scheduled Tasks on Windows — see OS check in `AGENTS.md`):
+   a. Add the strategy schedule entry (see Cron Job Format / Scheduled Task Format below)
+   b. **Add the daily snapshot schedule if not already present** — check with `crontab -l | grep snapshot` (Linux) or `schtasks /query /tn blaveclaw-snapshot` (Windows) first
    c. **Run snapshot immediately** to verify Telegram delivery: `python3 manager/snapshot.py`
       If the snapshot message does not arrive on Telegram, debug before considering deployment complete.
 
 Never assume the user wants to go live just because they described a strategy or said "let's try it."
-Even if the user says "deploy it" or "run it", always confirm with one message before touching cron or MODE = "live".
-Once deployed live, send a confirmation message with: strategy name, cron schedule, daily snapshot time (08:00 UTC), account_value, and target_vol_pct.
+Even if the user says "deploy it" or "run it", always confirm with one message before touching the schedule or MODE = "live".
+Once deployed live, send a confirmation message with: strategy name, schedule, daily snapshot time (08:00 UTC), account_value, and target_vol_pct.
 
-## Cron Job Format
+## Cron Job Format (Linux)
 **The `cd` is mandatory in every cron entry.** Cron runs from `/root` by default. All scripts in this repo use relative paths (`manager/`, `strategies/`, `lib/`, `cache/`). Without `cd`, every relative path resolves from `/root` → `FileNotFoundError` → the script crashes silently before sending any Telegram notification.
 
 **Two separate cron entries are required for every deployment:**
@@ -43,11 +40,26 @@ Once deployed live, send a confirmation message with: strategy name, cron schedu
 
 Never write `python3 strategies/<name>/strategy.py` alone — the `cd &&` prefix is not optional.
 
+## Scheduled Task Format (Windows)
+Same two entries, via `schtasks`. The `cd /d` is mandatory for the same reason as Linux's `cd &&` — all scripts use relative paths.
+
+1. Strategy execution task (hourly, mirrors `5 * * * *`):
+```
+schtasks /create /tn "blaveclaw-strategy-<name>" /tr "cmd /c cd /d C:\openclaw\workspace && python strategies\<name>\strategy.py" /sc hourly /mo 1 /st 00:05 /ru SYSTEM /f
+```
+
+2. Daily snapshot task (add once; mirrors `0 8 * * *`):
+```
+schtasks /create /tn "blaveclaw-snapshot" /tr "cmd /c cd /d C:\openclaw\workspace && python manager\snapshot.py" /sc daily /st 08:00 /ru SYSTEM /f
+```
+
+Check for an existing snapshot task with `schtasks /query /tn "blaveclaw-snapshot"` (non-zero exit if absent) before creating it.
+
 ## Type B (Everything else) — mandatory flow:
 1. Skip backtest entirely
 2. Ask the user to confirm before deploying: "Do you want to deploy this live? Reply YES to confirm."
 3. After YES, ask **Spot or futures/perpetual?** and **Align positions?** (same as Type A step 3) before writing any code.
-4. Only after all confirmations: set up the cron job, add the daily snapshot cron if not already present, and run `python3 manager/snapshot.py` immediately to verify Telegram delivery
+4. Only after all confirmations: set up the schedule (cron or Scheduled Task per above), add the daily snapshot schedule if not already present, and run `python3 manager/snapshot.py` immediately to verify Telegram delivery
 
 ## Live vs Backtest
 Live trading uses the SAME script as backtest — only `MODE` changes. Keep `START` the same long date range as backtest so the website report shows full history. Always keep `END = None` for live — setting it to a specific date will cap data fetch at that date and break live operation.
