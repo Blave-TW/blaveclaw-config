@@ -8,10 +8,12 @@ import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
-OPENCLAW_HOME = os.environ.get("OPENCLAW_HOME") or (
+# BLAVECLAW_HOME, not OPENCLAW_HOME — the openclaw product itself reads
+# OPENCLAW_HOME as a home-directory override, so reusing that name breaks it.
+BLAVECLAW_HOME = os.environ.get("BLAVECLAW_HOME") or (
     r"C:\openclaw" if platform.system() == "Windows" else "/root/.openclaw"
 )
-GATEWAY_SECRET = open(os.path.join(OPENCLAW_HOME, "gateway_secret")).read().strip()
+GATEWAY_SECRET = open(os.path.join(BLAVECLAW_HOME, "gateway_secret")).read().strip()
 SESSION_MAX_AGE = 28800  # 8 hours
 valid_sessions = set()
 

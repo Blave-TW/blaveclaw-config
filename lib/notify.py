@@ -1,8 +1,8 @@
 """
 Telegram notification helper.
 
-Reads bot token from $OPENCLAW_HOME/openclaw.json.
-Reads paired chat IDs from $OPENCLAW_HOME/credentials/telegram-default-allowFrom.json.
+Reads bot token from $BLAVECLAW_HOME/openclaw.json.
+Reads paired chat IDs from $BLAVECLAW_HOME/credentials/telegram-default-allowFrom.json.
 
 Usage:
     from lib.notify import make_sender
@@ -19,11 +19,14 @@ import platform
 import requests
 
 
-OPENCLAW_HOME = os.environ.get("OPENCLAW_HOME") or (
+# BLAVECLAW_HOME, not OPENCLAW_HOME — the openclaw product itself reads
+# OPENCLAW_HOME as a home-directory override (state dir becomes
+# $OPENCLAW_HOME/.openclaw), so reusing that name breaks the gateway.
+BLAVECLAW_HOME = os.environ.get("BLAVECLAW_HOME") or (
     r"C:\openclaw" if platform.system() == "Windows" else "/root/.openclaw"
 )
-_CONFIG_PATH = os.path.join(OPENCLAW_HOME, "openclaw.json")
-_ALLOW_FROM_PATH = os.path.join(OPENCLAW_HOME, "credentials", "telegram-default-allowFrom.json")
+_CONFIG_PATH = os.path.join(BLAVECLAW_HOME, "openclaw.json")
+_ALLOW_FROM_PATH = os.path.join(BLAVECLAW_HOME, "credentials", "telegram-default-allowFrom.json")
 
 
 def _load_config():
