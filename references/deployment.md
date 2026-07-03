@@ -26,11 +26,13 @@ Once deployed live, send a confirmation message with: strategy name, schedule, d
 ## Cron Job Format (Linux)
 **The `cd` is mandatory in every cron entry.** Cron runs from `/root` by default. All scripts in this repo use relative paths (`manager/`, `strategies/`, `lib/`, `cache/`). Without `cd`, every relative path resolves from `/root` → `FileNotFoundError` → the script crashes silently before sending any Telegram notification.
 
+**Always call `strategy.py` through `manager/run_strategy.sh`, never directly.** A crash inside `strategy.py` — including an import error at the top of the file, before `lib/runner.py` ever runs — otherwise has no path to notify the user: cron just swallows the non-zero exit. `run_strategy.sh` is the only layer that can catch a failure the Python side never got a chance to handle, and it sends the Telegram alert itself (via `manager/alert_failure.py`) rather than relying on the strategy's own code to do it.
+
 **Two separate cron entries are required for every deployment:**
 
 1. Strategy execution cron:
 ```
-5 * * * * cd /root/.openclaw/workspace && python3 strategies/<name>/strategy.py
+5 * * * * cd /root/.openclaw/workspace && bash manager/run_strategy.sh <name>
 ```
 
 2. Daily snapshot cron (add once; survives across strategy additions):
@@ -38,7 +40,7 @@ Once deployed live, send a confirmation message with: strategy name, schedule, d
 0 8 * * * cd /root/.openclaw/workspace && python3 manager/snapshot.py
 ```
 
-Never write `python3 strategies/<name>/strategy.py` alone — the `cd &&` prefix is not optional.
+Never write `python3 strategies/<name>/strategy.py` directly in a cron entry — always go through `manager/run_strategy.sh <name>`, and the `cd &&` prefix is still not optional.
 
 ## Scheduled Task Format (Windows)
 Same two entries, via `schtasks`. The `cd /d` is mandatory for the same reason as Linux's `cd &&` — all scripts use relative paths.
