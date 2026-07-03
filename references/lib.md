@@ -102,6 +102,10 @@ Never create a duplicate strategy folder just because you ran a scan.
 - `from lib.pnl import daily_returns_typeA, daily_returns_typeC` — extracts daily returns from pf_series (called automatically by runner, no manual use needed)
 - `from lib.pnl import load_all_stats` — reads all `strategies/*/stats.json` (including daily_returns) for use by manager
 
+**Exchange account libraries** (`lib/account_{exchange}.py` — equity + positions for `manager/snapshot.py`):
+- `lib/account_bingx.py` already ships implemented (swap/futures account) — do NOT rewrite it, extend it if spot/fund balance is needed
+- For any other exchange, copy `lib/account_TEMPLATE.py` — see `references/manager.md` § Account library
+
 **When writing new reusable logic** (new exchange order helper, new alpha data fetcher, etc.):
 - Add it to the appropriate `lib/` file first (or create a new one, e.g. `lib/orders_binance.py`)
 - Then import it in the strategy
