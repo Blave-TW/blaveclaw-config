@@ -485,6 +485,26 @@ def fetch_twstock_price(stock_id, start, end, headers):
     )
 
 
+def fetch_twstock_quote(stock_id, headers):
+    """台股即時報價快照（約 10 秒更新）. Returns a flat dict — NOT a DataFrame, since a quote
+    is a single point-in-time observation with no date range to index on. Keys: open/high/low/close
+    (today so far), change_price, change_rate, average_price, volume (latest tick), total_volume
+    (day cumulative), amount, total_amount, yesterday_volume, buy_price/buy_volume (best bid),
+    sell_price/sell_volume (best ask), volume_ratio, quote_time (full timestamp), stock_id,
+    tick_type (0=indeterminate/1=sell-initiated/2=buy-initiated).
+    No local cache — the server enforces a 10s Redis TTL; every call means "right now"."""
+    r = _retry_get(f'{BASE}/studio/market/twstock/quote/{stock_id}', headers=headers, timeout=30)
+    return r.json().get('data', {})
+
+
+def fetch_twstock_quote_batch(stock_ids, headers):
+    """Batch 即時報價（最多 50 檔）. Returns dict {stock_id: quote_dict}, same fields as
+    fetch_twstock_quote per entry. No local cache, same as the single-stock version."""
+    r = _retry_get(f'{BASE}/studio/market/twstock/quote', headers=headers,
+                    params={'stock_ids': ','.join(stock_ids)}, timeout=30)
+    return r.json().get('data', {})
+
+
 def _fetch_twstock_inst_raw(stock_id, start, end, headers):
     end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
     r = _retry_get(f'{BASE}/studio/market/twstock/institutional/{stock_id}',

@@ -23,6 +23,8 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 - `fetch_twstock_price(sid, start, end, headers)` → Open/High/Low/Close/Volume, **actual market prices**. Use when the user asks to plot or view a stock's trend — matches what they see on broker apps.
 - `fetch_twstock_price_adj(sid, start, end, headers)` → Open/Close, **dividend-adjusted backward prices**. Use for backtesting only — ensures returns are comparable across ex-dividend dates.
 - Never use `fetch_twstock_price_adj` just to draw a chart; the adjusted prices look different from real market prices and will confuse users.
+- `fetch_twstock_quote(sid, headers)` → dict, real-time last-quote snapshot (~10s refresh); no history, "now" only
+- `fetch_twstock_quote_batch(stock_ids, headers)` → dict `{stock_id: quote_dict}`; max 50 ids
 
 Taiwan stock data (universe, batch functions, fundamental factors, lookahead-bias table) — **`references/twstock.md`**
 

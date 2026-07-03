@@ -70,6 +70,42 @@ universe = sample_by_sector(by_sector, total=100)
 
 ---
 
+## Real-Time Quote (即時報價)
+
+| Function | Endpoint | When to use |
+|---|---|---|
+| `fetch_twstock_quote(sid, headers)` | `/twstock/quote/<sid>` | Single stock — current price check before a trade decision, "what's it trading at right now" |
+| `fetch_twstock_quote_batch(stock_ids, headers)` | `/twstock/quote` | Multiple stocks in one call (max 50) — checking several holdings at once |
+
+Both return a plain **dict** (or `{stock_id: dict}` for batch), not a DataFrame — there is
+no date range to index on, only the current snapshot. Refreshes approximately every 10
+seconds during market and post-market sessions; there is no history endpoint variant.
+
+```python
+quote = fetch_twstock_quote('2330', headers)
+# {'open': 2415.0, 'high': 2465.0, 'low': 2415.0, 'close': 2445.0,
+#  'change_price': -20.0, 'change_rate': -0.81, 'average_price': 2432.58,
+#  'volume': 4245, 'total_volume': 26403, 'amount': 10379025000, 'total_amount': 64227410000,
+#  'yesterday_volume': 27390, 'buy_price': 2445.0, 'buy_volume': 17,
+#  'sell_price': 2450.0, 'sell_volume': 11, 'volume_ratio': 0.96,
+#  'quote_time': '2026-07-03 14:30:00', 'stock_id': '2330', 'tick_type': 2}
+
+quotes = fetch_twstock_quote_batch(['2330', '2317'], headers)
+# {'2330': {...}, '2317': {...}}
+```
+
+**Notes:**
+- `buy_price`/`sell_price` are best bid/ask, not last-traded price — use `close` for last price.
+- `tick_type`: `0` = indeterminate, `1` = sell-initiated (賣盤成交), `2` = buy-initiated (買盤成交).
+- `quote_time` is a full timestamp (`YYYY-MM-DD HH:MM:SS`), unlike every other twstock
+  function's `date`, which is a bare calendar day — don't treat it as a date-only field.
+- No local caching by design — the server enforces a 10s Redis TTL, so calling this
+  repeatedly in a loop is fine and will pick up fresh data every ~10s; do not add your own
+  parquet/file cache on top, it would defeat the purpose.
+- Do not use for backtesting — no history exists. Use `fetch_twstock_price`/`fetch_twstock_price_adj` instead.
+
+---
+
 ## 台股分K（1分鐘 OHLCV）
 
 ```python
