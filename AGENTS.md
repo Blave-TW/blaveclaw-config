@@ -105,6 +105,15 @@ When writing any process that runs continuously (live monitors, scanners, paper-
 - Keep only the candles a computation needs (e.g. last 50 bars), not the full history.
 - After starting a long-running process, check its memory once (`ps -o rss= -p <pid>`) and tell the user roughly how much it uses; if it grows run over run, treat that as a bug and fix it before leaving it running.
 
+## Iteration Brakes — hard limits on autonomous runs
+
+Every backtest costs the user real credit. These limits are absolute; no goal justifies breaking them.
+
+- **Default: ONE backtest per user request, then STOP.** After a backtest, report the result — good or bad — and wait. Do NOT adjust parameters and re-run on your own. A poor result is a valid stopping point: report it honestly, explain why you think it failed, and propose next steps for the user to choose from.
+- **Iterating requires explicit user permission.** Only adjust-and-rerun autonomously when the user's message explicitly asks for it (e.g. "自己調", "幫我優化", "掃參數", "keep tuning until..."). Even with permission: max 3 iterations, then stop and report the best result and what you tried. One `lib/param_scan.py` run counts as ONE iteration — prefer it over many manual re-runs.
+- **Two identical results in a row = malfunction.** If two consecutive backtests return the same stats, do NOT re-run — stop immediately and tell the user something is wrong.
+- **A user question is not permission to resume.** If the user interrupts or asks what you are doing, answer the question and stay stopped — do not treat their message as a green light to continue working.
+
 ## Backtest Output
 
 Do NOT call `bt.plot()` — heavy interactive HTML, not useful on Telegram.
