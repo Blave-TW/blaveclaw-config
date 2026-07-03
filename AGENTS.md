@@ -67,6 +67,8 @@ All `lib/data.py` functions accept a `headers` dict. See `references/strategy-co
 
 **NEVER use** `X-API-KEY`, `X-SECRET-KEY`, or `Authorization: Bearer ...` — those return 403.
 
+**The Blave API base URL is ALWAYS `https://api.blave.org`** — never type it from memory (`api.blave.ai` does not exist and fails DNS). When constructing any Blave API call yourself, copy the URL from `references/marketplace.md` or `lib/data.py`.
+
 ## Shared Library (lib/)
 
 Import from `lib/` — never write these functions inline. Full function signatures: `references/lib.md`.
