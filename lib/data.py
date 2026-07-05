@@ -311,6 +311,13 @@ def fetch_whale_hunter(symbol, interval, start, end, headers, timeframe='24h', s
                         headers, start, end)
 
 
+def fetch_unusual_movement(symbol, interval, start, end, headers, timeframe='24h'):
+    """異常漲跌 Unusual Movement. Returns DataFrame with 'alpha' column."""
+    return _fetch_alpha('unusual_movement/get_alpha',
+                        {'symbol': symbol, 'period': interval, 'timeframe': timeframe},
+                        headers, start, end)
+
+
 def fetch_squeeze_momentum(symbol, start, end, headers):
     """擠壓動能 Squeeze Momentum (period fixed to 1d). Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('squeeze_momentum/get_alpha',

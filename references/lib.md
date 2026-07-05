@@ -12,6 +12,7 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 - `fetch_funding_rate(symbol, interval, start, end, headers)` → DataFrame with `alpha` (Binance only; alpha = funding rate × 100)
 - `fetch_taker_intensity(symbol, interval, start, end, headers, timeframe='24h')` → DataFrame with `alpha`
 - `fetch_whale_hunter(symbol, interval, start, end, headers, timeframe='24h', score_type='score_oi')` → DataFrame with `alpha`
+- `fetch_unusual_movement(symbol, interval, start, end, headers, timeframe='24h')` → DataFrame with `alpha`
 - `fetch_squeeze_momentum(symbol, start, end, headers)` → DataFrame with `alpha` (period fixed to 1d)
 - `fetch_liquidation(symbol, interval, start, end, headers, timeframe='24h')` → DataFrame with `alpha`
 - `fetch_market_direction(interval, start, end, headers)` → DataFrame with `alpha` (no symbol)
