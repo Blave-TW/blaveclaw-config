@@ -29,9 +29,11 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 
 Taiwan stock data (universe, batch functions, fundamental factors, lookahead-bias table) — **`references/twstock.md`**
 
-- `fetch_twfutures_ohlcv(symbol, schema, start, end, headers)` → Taiwan futures OHLCV DataFrame (Open/High/Low/Close/Volume); symbol: `'TXF'`; schema: `'1d'`/`'1m'`/`'5m'`/`'15m'`/`'30m'`/`'60m'`; Volume in contracts
+- `fetch_twfutures_ohlcv(symbol, schema, start, end, headers)` → Taiwan futures OHLCV DataFrame (Open/High/Low/Close/Volume); symbol: `'TXF'` or an individual stock futures id (股票期貨, e.g. `'CDF'`) currently backfilled with minute-line data — most of the 231 are NOT, unsupported symbol → 400; check `fetch_stock_futures_ohlcv_symbols()` first; schema: `'1d'`/`'1m'`/`'5m'`/`'15m'`/`'30m'`/`'60m'`; Volume in contracts
+- `fetch_stock_futures_ohlcv_symbols(headers)` → list of symbols currently allowed by `fetch_twfutures_ohlcv` (always includes `'TXF'` plus whatever stock futures ids currently have backfilled minute-line data); call this before relying on intraday data for a stock future
 - `fetch_twfutures_bid_ask_vol(start, end, headers)` → TXF 1-min bid/ask volume DataFrame (bid_vol, ask_vol, total_vol); bid_vol = 內盤 (seller-initiated), ask_vol = 外盤 (buyer-initiated); includes day + night sessions; max 31 days per chunk (auto-chunked)
 - `fetch_twfutures_pcr(start, end, headers)` → DataFrame with a single `pcr` column (daily, index `date`); official TAIFEX put/call ratio (OI-based, 買賣權未平倉量比率%); the official ratio — NOT the value derived from option institutional / large-trader data in `references/twfutures.md`.
+- `fetch_stock_futures_batch_daily(futures_ids, start, end, headers)` → dict `{futures_id: DataFrame}`; same fields as `fetch_twfutures_daily`; max 250 ids per call; `futures_ids` must be valid stock futures ids (股票期貨, e.g. `'CDF'`) — see `references/twfutures.md` for the minute-line-coverage caveat
 - `txf_settlement_mask(index)` → boolean Series, True on the last 1-min bar before TXF monthly settlement (3rd Wednesday of each month, 13:30 TWN). Use with intraday TXF strategies: `settle = txf_settlement_mask(df.index); signal[settle] = 0.0; return signal, settle`
 - **Data history ranges** (earliest available date per endpoint) are NOT listed here — they live in the `blave-quant` skill / Notion API doc, which auto-update on each box. This config is baked in at provision time (no live-update path), so a start date copied here would silently go stale. Check the skill before assuming an endpoint's earliest date.
 

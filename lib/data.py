@@ -1213,6 +1213,44 @@ def fetch_twfutures_bid_ask_vol(start, end, headers):
     return result
 
 
+def fetch_stock_futures_batch_daily(futures_ids, start, end, headers):
+    """Batch daily OHLCV/OI for individual stock futures (max 250 ids per call,
+    server-side parallel fetch + cache). Returns dict {futures_id: DataFrame}
+    for ids with data; ids that hit persistent upstream rate-limiting are
+    dropped and printed as a warning (a genuinely empty dataset for a valid id
+    is not an error, just an empty DataFrame — not omitted).
+
+    Same fields as fetch_twfutures_daily: date, futures_id, contract_date,
+    open, max, min, close, spread, spread_per, volume, settlement_price,
+    open_interest, trading_session. futures_ids must be valid stock futures
+    ids (股票期貨, e.g. 'CDF') — arbitrary ids are rejected (400).
+    """
+    r = _retry_get(
+        f'{BASE}/studio/market/twfutures/stock_futures/batch/daily',
+        headers=headers,
+        params={'futures_ids': ','.join(futures_ids), 'start': start, 'end': end},
+        timeout=120,
+    )
+    body = r.json()
+    failed = body.get('failed', [])
+    if failed:
+        print(f"[fetch_stock_futures_batch_daily] rate-limited after retries, dropped: {failed}")
+    return {fid: pd.DataFrame(rows) for fid, rows in body.get('data', {}).items()}
+
+
+def fetch_stock_futures_ohlcv_symbols(headers):
+    """Currently-allowed symbols for fetch_twfutures_ohlcv (intraday/minute-line
+    coverage) — always includes 'TXF' plus whichever individual stock futures
+    ids currently have backfilled Shioaji minute-line data (a dynamically-
+    growing subset of the 231 total). Returns a plain list of symbol strings.
+
+    Call this before fetch_twfutures_ohlcv on a stock future to check coverage
+    up front, instead of trial-and-erroring against the 400 response.
+    """
+    r = _retry_get(f'{BASE}/studio/market/twfutures/ohlcv/symbols', headers=headers, timeout=30)
+    return r.json().get('data', [])
+
+
 def txf_settlement_mask(index):
     """Return a boolean Series (same index) that is True on the last 1-min bar
     before TXF monthly settlement (3rd Wednesday of each month, 13:30 TWN).

@@ -190,6 +190,31 @@ oi_series = front_month.set_index("date")["open_interest"]
 
 ---
 
+## Stock Futures Batch Daily (個股期貨)
+
+231 Taiwan individual stock futures (股票期貨) — one contract per underlying listed common stock (e.g. `CDF` → 2330 台積電).
+
+```python
+from lib.data import fetch_stock_futures_batch_daily
+
+batch = fetch_stock_futures_batch_daily(['CDF', 'DHF'], "2025-01-01", "2025-05-30", hdrs)
+# dict {futures_id: DataFrame}, same fields as fetch_twfutures_daily (see above)
+```
+
+**Notes:**
+- `fetch_twfutures_daily(futures_id, ...)` (the generic function documented above) also works for any individual stock futures id — `fetch_stock_futures_batch_daily` is just the parallel/batch form (max 250 ids per call), matching `fetch_twstock_batch` for stocks.
+- **Daily OHLCV covers all 231 symbols.** Intraday/minute bars (`fetch_twfutures_ohlcv(symbol, schema, ...)`) do NOT — that same function also accepts individual stock futures ids as `symbol`, but only `TXF` plus whichever ones currently have backfilled minute-line data (a dynamically-growing subset, nowhere near all 231). Passing an unsupported symbol gets a 400.
+- **Check `fetch_stock_futures_ohlcv_symbols(hdrs)` first** to get the current list of symbols supported by `fetch_twfutures_ohlcv` — no need to trial-and-error against the 400:
+```python
+from lib.data import fetch_stock_futures_ohlcv_symbols, fetch_twfutures_ohlcv
+
+symbols = fetch_stock_futures_ohlcv_symbols(hdrs)  # e.g. ['CDF', 'TXF', ...]
+if 'CDF' in symbols:
+    df = fetch_twfutures_ohlcv('CDF', '1m', "2025-01-01", "2025-01-31", hdrs)
+```
+
+---
+
 ## Option Put/Call Ratio (TaiwanOptionPutCallRatio)
 
 Official TAIFEX daily put/call open-interest ratio (OI-based PCR), one row per day.
