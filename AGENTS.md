@@ -57,6 +57,8 @@ If unsure between A and C: Type A has ONE symbol and ONE position (long/short/fl
 
 **Type A:** uses `_add_indicators`, `fetch_data`, `compute_signals` three-layer architecture. Long AND short strategies require FOUR independent thresholds + stateful loop — see `references/strategy-code.md`.
 
+**FEE must reflect the real market — never 0, never left at the template placeholder.** `TEMPLATE_A.py`'s `FEE = 0.0005` is a placeholder, not a valid default; you MUST replace it with a realistic rate for the actual symbol/exchange being traded (e.g. Taiwan futures ≈ 0.03% round-trip incl. tax, Binance spot/perp taker ≈ 0.04–0.1%). Do not copy `FEE` verbatim from a reference/example strategy without checking it matches the new symbol's market — copying a crypto strategy's `FEE` into another crypto strategy is fine only if you have actually verified the rate, not just because the file happened to have that value. A backtest with `FEE = 0` silently overstates every return and Sharpe number — treat it as a bug, not a valid config value.
+
 **Type B:** BEFORE any exchange API call, read the relevant `skills/blave-quant/references/` file (e.g. `binance-skill.md`, `bybit-skill.md`) — wrong endpoints and missing broker headers cause silent failures.
 
 **Type C:** uses `TEMPLATE_C.py`; compute_signals returns `(weights_mat, price_df)`. Taiwan universe must be sampled by sector — see `references/strategy-code.md`.
@@ -110,6 +112,7 @@ When writing any process that runs continuously (live monitors, scanners, paper-
 Every backtest costs the user real credit. These limits are absolute; no goal justifies breaking them.
 
 - **Default: ONE backtest per user request, then STOP.** After a backtest, report the result — good or bad — and wait. Do NOT adjust parameters and re-run on your own. A poor result is a valid stopping point: report it honestly, explain why you think it failed, and propose next steps for the user to choose from.
+- **A poor result is not permission to widen scope.** If the user asked for one specific indicator/data source/symbol, build and test ONLY that. Do NOT add other alphas, indicators, or data sources on your own because the result was weak (e.g. do not turn a request for a single holder-concentration strategy into a 3-indicator composite just because the single-indicator Sharpe was low). Report the mediocre result and offer combining with other signals as a next-step option — let the user decide, don't decide for them.
 - **Iterating requires explicit user permission.** Only adjust-and-rerun autonomously when the user's message explicitly asks for it (e.g. "自己調", "幫我優化", "掃參數", "keep tuning until..."). Even with permission: max 3 iterations, then stop and report the best result and what you tried. One `lib/param_scan.py` run counts as ONE iteration — prefer it over many manual re-runs.
 - **Two identical results in a row = malfunction.** If two consecutive backtests return the same stats, do NOT re-run — stop immediately and tell the user something is wrong.
 - **A user question is not permission to resume.** If the user interrupts or asks what you are doing, answer the question and stay stopped — do not treat their message as a green light to continue working.
