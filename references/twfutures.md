@@ -212,6 +212,8 @@ symbols = fetch_stock_futures_ohlcv_symbols(hdrs)  # e.g. ['CDF', 'TXF', ...]
 if 'CDF' in symbols:
     df = fetch_twfutures_ohlcv('CDF', '1m', "2025-01-01", "2025-01-31", hdrs)
 ```
+- **Long-history intraday fetches are cheap** — for intraday spans >62 days, `fetch_twfutures_ohlcv` automatically switches to the server's 1m-parquet bulk export endpoint (`/studio/market/twfutures/ohlcv/<symbol>/export/<year>`, one request per calendar year, resampled locally to the requested schema) instead of chunked 28-day JSON fetches. Falls back to chunked fetches automatically if the export endpoint is unavailable. Fetching 100 symbols × multi-year 60m is a few hundred requests, not thousands.
+- The direct JSON endpoint's per-request date-range caps are schema-scaled: `1d` 3,650 / `60m` 365 / `30m` 186 / `15m` 93 / `5m` 62 / `1m` 31 days. The lib's auto-chunking already respects these — only relevant when calling the API directly.
 
 ---
 

@@ -935,69 +935,73 @@ def _mark_empty_months(prefix, sid, start, end):
             pd.DataFrame().to_parquet(path)
 
 
-def _fetch_twstock_cached_batch(prefix, endpoint, raw_fn, parse_fn, stock_ids, start, end, headers):
-    """Shared batch fetcher for monthly-cached 台股 datasets.
+def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids, start, end, headers,
+                         chunk_size=50, mark_empty_months=True):
+    """Shared batch fetcher for monthly-cached datasets (Taiwan stocks and stock futures).
 
-    Phase 1: symbols that already have a local cache are extended (current-month delta)
+    Phase 1: ids that already have a local cache are extended (current-month delta)
              concurrently — each one tops up its own parquet, so they parallelise freely.
-    Phase 2: the rest are fetched via the /batch/<endpoint> endpoint, 50 ids per request,
-             with the chunks issued concurrently.
+    Phase 2: the rest are fetched via batch_url, chunk_size ids per request, with the
+             chunks issued concurrently.
 
-    raw_fn(sid, start, end, headers) -> DataFrame   single-symbol fetch used by the cache
-    parse_fn(records) -> DataFrame                  one symbol's batch records -> cached frame
+    raw_fn(id, start, end, headers) -> DataFrame   single-id fetch used by the cache extender
+    parse_fn(records) -> DataFrame                 one id's batch records -> cached frame
     """
     results, uncached = {}, []
 
     to_extend = []
-    for sid in stock_ids:
-        cache_dir = _monthly_cache_dir(prefix, {'id': sid})
+    for _id in ids:
+        cache_dir = _monthly_cache_dir(prefix, {'id': _id})
         if cache_dir.exists() and list(cache_dir.glob('*.parquet')):
-            to_extend.append(sid)
+            to_extend.append(_id)
         else:
-            uncached.append(sid)
+            uncached.append(_id)
 
-    def _extend_one(sid):
+    def _extend_one(_id):
         return _extend_cache_monthly(
-            prefix, {'id': sid},
-            lambda s, e, _sid=sid: raw_fn(_sid, s, e, headers),
+            prefix, {'id': _id},
+            lambda s, e, _id=_id: raw_fn(_id, s, e, headers),
             start, end,
         )
 
     with ThreadPoolExecutor(max_workers=10) as pool:
-        futures = {pool.submit(_extend_one, sid): sid for sid in to_extend}
+        futures = {pool.submit(_extend_one, _id): _id for _id in to_extend}
         for future in as_completed(futures):
-            sid = futures[future]
+            _id = futures[future]
             try:
-                results[sid] = future.result()
+                results[_id] = future.result()
             except Exception:
-                uncached.append(sid)
+                uncached.append(_id)
 
-    chunks = [uncached[i:i + 50] for i in range(0, len(uncached), 50)]
+    chunks = [uncached[i:i + chunk_size] for i in range(0, len(uncached), chunk_size)]
 
     def _fetch_chunk(idx, chunk):
         partial = {}
         try:
-            params = {'stock_ids': ','.join(chunk)}
+            params = {id_param_name: ','.join(chunk)}
             if start:
                 params['start'] = start
             if end:
                 params['end'] = end
-            r = _retry_get(f'{BASE}/studio/market/twstock/batch/{endpoint}',
-                           headers=headers, params=params, timeout=120)
-            batch_data = r.json().get('data', {})
-            for sid, records in batch_data.items():
+            r = _retry_get(batch_url, headers=headers, params=params, timeout=120)
+            body = r.json()
+            failed = body.get('failed', [])
+            if failed:
+                print(f'  [batch] {batch_url} rate-limited after retries, dropped: {failed}')
+            batch_data = body.get('data', {})
+            for _id, records in batch_data.items():
                 if not records:
                     continue
                 df = parse_fn(records)
-                _save_monthly(prefix, {'id': sid}, df)
-                partial[sid] = df
+                _save_monthly(prefix, {'id': _id}, df)
+                partial[_id] = df
             # Mark every in-range past month with no data as an empty parquet, so
             # the next run is a cache hit instead of re-fetching the empty months.
-            if start:
-                for sid in chunk:
-                    _mark_empty_months(prefix, sid, start, end)
+            if start and mark_empty_months:
+                for _id in chunk:
+                    _mark_empty_months(prefix, _id, start, end)
         except Exception as e:
-            print(f'  [batch] {endpoint} chunk {idx + 1} error: {e}')
+            print(f'  [batch] {batch_url} chunk {idx + 1} error: {e}')
         return partial
 
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -1006,6 +1010,14 @@ def _fetch_twstock_cached_batch(prefix, endpoint, raw_fn, parse_fn, stock_ids, s
             results.update(future.result())
 
     return results
+
+
+def _fetch_twstock_cached_batch(prefix, endpoint, raw_fn, parse_fn, stock_ids, start, end, headers):
+    """Shared batch fetcher for monthly-cached 台股 datasets. Thin wrapper over
+    _fetch_batch_cached — kept for existing callers (stock_ids param name, 50/chunk)."""
+    return _fetch_batch_cached(
+        prefix, f'{BASE}/studio/market/twstock/batch/{endpoint}', 'stock_ids',
+        raw_fn, parse_fn, stock_ids, start, end, headers, chunk_size=50)
 
 
 def fetch_twstock_shareholding_batch(stock_ids, start, end, headers):
@@ -1115,6 +1127,90 @@ def _fetch_twfutures_raw(symbol, schema, start, end, headers):
     return df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float)
 
 
+class _ExportUnavailable(Exception):
+    """Bulk-export endpoint not deployed / symbol not served — fall back to chunked JSON."""
+
+
+_TW_FUTURES_RESAMPLE_RULES = {'5m': '5min', '15m': '15min', '30m': '30min', '60m': '60min'}
+
+
+def _fetch_twfutures_via_export(symbol, schema, start, end, headers):
+    """Fetch intraday OHLCV via the 1m-parquet bulk export endpoint
+    (GET /studio/market/twfutures/ohlcv/<symbol>/export/<year>) and resample locally.
+
+    One request per calendar year, zero server-side computation — the server just
+    streams its own year parquet. Resample semantics replicate the server's
+    (resample(rule).agg(first/max/min/last/sum), dropna on open), so the output is
+    interchangeable with _fetch_twfutures_raw's. Processes one year at a time to
+    keep peak memory at ~one year of 1m bars (~20MB), not the full span.
+
+    Raises _ExportUnavailable when the endpoint isn't deployed yet (or rejects the
+    symbol) so the caller can fall back to the chunked JSON path.
+    """
+    import io
+    s = datetime.strptime(start, '%Y-%m-%d')
+    e = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d')
+    rule = _TW_FUTURES_RESAMPLE_RULES.get(schema)  # None for '1m' — no resample
+
+    frames = []
+    for year in range(s.year, e.year + 1):
+        try:
+            # _retry_get backs off on 429/5xx — matters when downloading many
+            # year files in a row (100 symbols × 8 years brushes the rate limit)
+            r = _retry_get(
+                f'{BASE}/studio/market/twfutures/ohlcv/{symbol}/export/{year}',
+                headers=headers, timeout=120,
+            )
+        except requests.HTTPError as exc:
+            resp = exc.response
+            if resp is not None and resp.status_code == 404:
+                try:
+                    if resp.json().get('error') == 'no_data':
+                        continue  # valid year, just no data (e.g. before backfill start)
+                except ValueError:
+                    pass
+                raise _ExportUnavailable(f'export route missing for {symbol}/{year}')
+            raise _ExportUnavailable(f'export {symbol}/{year} -> '
+                                     f'{resp.status_code if resp is not None else exc}')
+
+        raw = pd.read_parquet(io.BytesIO(r.content))
+        if raw.empty:
+            continue
+        raw.index = pd.to_datetime(raw['ts'], utc=True)
+        data = raw[['open', 'high', 'low', 'close', 'volume']].sort_index()
+        data = data[~data.index.duplicated(keep='first')]
+        if rule:
+            data = data.resample(rule).agg(
+                open=('open', 'first'), high=('high', 'max'), low=('low', 'min'),
+                close=('close', 'last'), volume=('volume', 'sum'),
+            ).dropna(subset=['open'])
+        frames.append(data)
+
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames).sort_index()
+    df = df[(df.index >= pd.Timestamp(start, tz='UTC')) &
+            (df.index < pd.Timestamp(e.strftime('%Y-%m-%d'), tz='UTC') + pd.Timedelta(days=1))]
+    df = df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low',
+                             'close': 'Close', 'volume': 'Volume'})
+    df.index.name = 'time'
+    return df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float)
+
+
+def _fetch_twfutures_raw_smart(symbol, schema, start, end, headers):
+    """Long intraday spans → try the bulk-export path first (zero server CPU, one
+    request per year); short spans, '1d', or export-unavailable → chunked JSON API."""
+    if schema != '1d':
+        s = datetime.strptime(start, '%Y-%m-%d')
+        e = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d')
+        if (e - s).days > 62:
+            try:
+                return _fetch_twfutures_via_export(symbol, schema, start, end, headers)
+            except _ExportUnavailable as exc:
+                print(f'  [twfutures] export unavailable ({exc}); falling back to chunked fetch')
+    return _fetch_twfutures_raw(symbol, schema, start, end, headers)
+
+
 def fetch_twfutures_ohlcv(symbol, schema, start, end, headers):
     """台灣期貨 OHLCV. Returns DataFrame with Open/High/Low/Close/Volume/Amount columns.
 
@@ -1126,7 +1222,7 @@ def fetch_twfutures_ohlcv(symbol, schema, start, end, headers):
     """
     df = _extend_cache_monthly(
         f'twfutures_{schema}', {'symbol': symbol},
-        lambda s, e: _fetch_twfutures_raw(symbol, schema, s, e, headers),
+        lambda s, e: _fetch_twfutures_raw_smart(symbol, schema, s, e, headers),
         start, end,
     )
     if schema == '1d' and not df.empty:
@@ -1220,22 +1316,54 @@ def fetch_stock_futures_batch_daily(futures_ids, start, end, headers):
     dropped and printed as a warning (a genuinely empty dataset for a valid id
     is not an error, just an empty DataFrame — not omitted).
 
+    Locally cached per (futures_id, start, end) under cache/twfutures_stockfut/ —
+    an EXACT-range cache, not the monthly-delta cache the other twstock/twfutures
+    fetchers use. This dataset has multiple rows per day per id (every listed
+    contract month x trading_session), so the monthly cache's dedup-by-date would
+    silently collapse those down to one row per day. An exact-range cache avoids
+    that at the cost of not supporting incremental "extend to today" delta fetches —
+    fine for backtests, which per the END-modes convention re-run with a fixed
+    START/END anyway (re-run with the same START/END to get a cache hit; live mode
+    with END=None always re-fetches).
+
     Same fields as fetch_twfutures_daily: date, futures_id, contract_date,
     open, max, min, close, spread, spread_per, volume, settlement_price,
     open_interest, trading_session. futures_ids must be valid stock futures
     ids (股票期貨, e.g. 'CDF') — arbitrary ids are rejected (400).
     """
-    r = _retry_get(
-        f'{BASE}/studio/market/twfutures/stock_futures/batch/daily',
-        headers=headers,
-        params={'futures_ids': ','.join(futures_ids), 'start': start, 'end': end},
-        timeout=120,
-    )
-    body = r.json()
-    failed = body.get('failed', [])
-    if failed:
-        print(f"[fetch_stock_futures_batch_daily] rate-limited after retries, dropped: {failed}")
-    return {fid: pd.DataFrame(rows) for fid, rows in body.get('data', {}).items()}
+    end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
+    cache_dir = _CACHE_DIR / 'twfutures_stockfut'
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    results, to_fetch = {}, []
+    for fid in futures_ids:
+        path = cache_dir / f'{fid}__{start}__{end_str}.parquet'
+        if path.exists():
+            results[fid] = pd.read_parquet(path)
+        else:
+            to_fetch.append(fid)
+
+    def _fetch_chunk(chunk):
+        r = _retry_get(
+            f'{BASE}/studio/market/twfutures/stock_futures/batch/daily',
+            headers=headers,
+            params={'futures_ids': ','.join(chunk), 'start': start, 'end': end},
+            timeout=120,
+        )
+        body = r.json()
+        failed = body.get('failed', [])
+        if failed:
+            print(f"[fetch_stock_futures_batch_daily] rate-limited after retries, dropped: {failed}")
+        for fid, rows in body.get('data', {}).items():
+            df = pd.DataFrame(rows)
+            df.to_parquet(cache_dir / f'{fid}__{start}__{end_str}.parquet')
+            results[fid] = df
+
+    chunks = [to_fetch[i:i + 200] for i in range(0, len(to_fetch), 200)]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(_fetch_chunk, chunks))
+
+    return results
 
 
 def fetch_stock_futures_ohlcv_symbols(headers):
