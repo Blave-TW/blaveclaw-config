@@ -1233,6 +1233,32 @@ def fetch_twfutures_ohlcv(symbol, schema, start, end, headers):
     return df
 
 
+def fetch_twfutures_ohlcv_batch(symbols, schema, start, end, headers, max_workers=8):
+    """Batch fetch_twfutures_ohlcv across many symbols, concurrently.
+
+    Same per-symbol semantics (monthly cache, export-first for long intraday
+    spans, chunked fallback) — this just runs the symbols through a thread pool
+    so the per-request fixed overhead (auth round-trips) is amortised instead
+    of paid serially. Safe to parallelise: each symbol has its own cache dir.
+
+    Returns dict {symbol: DataFrame} for symbols that succeeded; failures are
+    dropped with a printed warning (mirrors fetch_stock_futures_batch_daily).
+    """
+    results = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(fetch_twfutures_ohlcv, sym, schema, start, end, headers): sym
+            for sym in symbols
+        }
+        for future in as_completed(futures):
+            sym = futures[future]
+            try:
+                results[sym] = future.result()
+            except Exception as e:
+                print(f"  [twfutures batch] skip {sym}: {e}")
+    return results
+
+
 def _fetch_twfutures_bid_ask_vol_raw(start, end, headers):
     """Fetch raw bid/ask vol for a date range (≤31 days per chunk)."""
     s = datetime.strptime(start, '%Y-%m-%d')
