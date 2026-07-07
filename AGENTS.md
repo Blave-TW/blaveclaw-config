@@ -138,8 +138,9 @@ Three rules to always remember:
 
 ## Broker Onboarding
 
-When a user asks to connect a broker (e.g. "我想串永豐", "connect SinoPac"), read the relevant reference first:
+When a user asks to connect a broker (e.g. "我想串永豐", "connect SinoPac", "我想串統一期貨"), read the relevant reference first:
 - **SinoPac (永豐金):** `references/sinopac-broker.md`
+- **President Futures (統一期貨):** `references/president-broker.md`
 
 ## Model Switching
 
