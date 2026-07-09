@@ -112,6 +112,21 @@ Never create a duplicate strategy folder just because you ran a scan.
 - `lib/account_bingx.py` already ships implemented (swap/futures account) — do NOT rewrite it, extend it if spot/fund balance is needed
 - For any other exchange, copy `lib/account_TEMPLATE.py` — see `references/manager.md` § Account library
 
+`lib/order_bingx.py` — **BingX swap (USDT-M perp) order execution. Ships implemented — NEVER hand-write BingX order calls in a strategy; import from here.** All functions take `env` (dotenv dict) first. `direction` is always the POSITION's direction (`'long'`/`'short'`); position mode (one-way vs hedge) is auto-detected.
+- `open_position(env, symbol, direction, qty, sl_price=, tp_price=, client_order_id=)` — **the recommended entry flow**: ONE atomic market order with SL/TP attached (no naked window), polled to FILLED, protection verified in open orders. Returns `{'entry': confirmed, 'protection': [...]}`. Raises `ProtectionFailed` if protection isn't visible after the fill — treat that as an ALERT-THE-USER-NOW event, never swallow it.
+- `place_market_order(...)` — confirmed market order; returns exchange-reported `avg_price` / `executed_qty` / `commission` (never report the intent — report these)
+- `place_limit_order(...)` — returns unconfirmed order with `order_id`; track via `confirm_order`
+- `confirm_order(env, symbol, order_id, timeout=15)` — polls to terminal state; raises `BingXError` on CANCELED/FAILED, `OrderNotConfirmed` on timeout (order may still fill — re-query, do NOT blindly resubmit)
+- `place_protective_orders(env, symbol, direction, qty=None, sl_price=, tp_price=)` — standalone SL/TP for an existing position; `qty=None` protects the whole position via `closePosition`; verified on-exchange, raises `ProtectionFailed` otherwise. Use for multi-level TPs or repairing protection.
+- `close_position(env, symbol, direction, qty)` — confirmed reduce-only market close
+- `get_order` / `get_open_orders` / `cancel_order` / `cancel_all_orders`
+- `get_fills(env, symbol, start_ms, end_ms)` — fill history (≤30 days; handles BingX's startTs/endTs + fill_orders quirks)
+- `format_qty` / `format_price` — precision flooring + min-qty/min-notional validation (raises instead of sending a doomed order)
+- `get_leverage` / `set_leverage`, `get_position_mode`, `claim_demo_funds` (VST)
+- Set `BINGX_DEMO=true` in `.env` to run the same code against VST paper trading
+- Always pass `client_order_id` (alphanumeric, ≤40 chars, unique per signal — e.g. `f"{strategy}{signal_ts:%Y%m%d%H%M%S}"`) so a resubmit is rejected by the exchange instead of doubling the position
+- Wire `manager/reconciler.py`'s `get_positions()` / `place_order()` through this lib + `lib/account_bingx.py` for BingX users
+
 **When writing new reusable logic** (new exchange order helper, new alpha data fetcher, etc.):
 - Add it to the appropriate `lib/` file first (or create a new one, e.g. `lib/orders_binance.py`)
 - Then import it in the strategy
