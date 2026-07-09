@@ -3,6 +3,16 @@
 ## Confirmation Required
 CRITICAL: You MUST NEVER deploy a live strategy or set up a cron job without explicit user confirmation.
 
+## No LLM in the Execution Loop
+
+Strategy execution MUST be scheduled as a system cron job (Linux) or Scheduled Task (Windows) that runs Python directly through `manager/run_strategy.sh` — NEVER as an OpenClaw agent cron that wakes the agent to "run the strategy and report the result".
+
+- Every agent wake-up burns the user's LLM credit (a full session trajectory per tick). A `*/5` agent cron costs orders of magnitude more than the identical system cron, for zero added value — the strategy script is deterministic Python and needs no reasoning to run.
+- Failure notification is already handled deterministically: `run_strategy.sh` catches crashes and sends the Telegram alert via `manager/alert_failure.py`. An agent cron adds no reliability.
+- Agent crons are reserved for work that genuinely needs reasoning: daily/weekly report narration, anomaly triage, reconcile summaries. Frequency: at most a few per day, never per tick.
+- If the same strategy has both a system cron AND an agent cron that runs it, that is a bug — remove the agent cron (keep the system one) after telling the user why.
+- If the user explicitly asks you to run the strategy on every tick via agent cron, explain the credit cost first and offer the system-cron path; only proceed if they still insist.
+
 ## Type A (Signal Strategy) — mandatory flow:
 1. Write the strategy with `MODE = "backtest"` and run a backtest — show the results
 2. Ask the user to confirm deployment: "Do you want to deploy this live? Reply YES to confirm."
