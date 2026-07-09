@@ -122,6 +122,7 @@ When writing any process that runs continuously (live monitors, scanners, paper-
 - NEVER attach large snapshots (full feature caches, candle histories, whole DataFrames) to per-trade/per-signal records. Store IDs or the few fields you need.
 - Keep only the candles a computation needs (e.g. last 50 bars), not the full history.
 - After starting a long-running process, check its memory once (`ps -o rss= -p <pid>`) and tell the user roughly how much it uses; if it grows run over run, treat that as a bug and fix it before leaving it running.
+- **Every daemon must heartbeat:** touch `state/heartbeat/<name>` at the top of each loop iteration, and register the daemon in `state/deployments.json` so `manager/healthcheck.py` alerts the user when it dies (see `references/deployment.md` › Deployment Healthcheck). A daemon nobody watches WILL die silently and the user finds out weeks later.
 
 ## Iteration Brakes — hard limits on autonomous runs
 

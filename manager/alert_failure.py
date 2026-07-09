@@ -34,9 +34,10 @@ def main():
 
     tail = output[-MAX_OUTPUT_CHARS:]
     msg = (
-        f"⚠️ 策略 {strategy_name} 執行失敗 (exit={exit_code})\n"
-        f"cron 排程仍會持續觸發，但這次沒有真的跑完策略邏輯（下單/訊號都不會發生），"
-        f"之後每小時可能重複發生同樣的錯誤，直到有人修好為止。\n\n{tail}"
+        f"⚠️ Strategy {strategy_name} failed (exit={exit_code})\n"
+        f"The schedule will keep firing, but this run did not complete — no orders "
+        f"or signals were produced. The same error will likely repeat on every run "
+        f"until it is fixed.\n\n{tail}"
     )
 
     try:

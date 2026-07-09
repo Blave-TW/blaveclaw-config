@@ -213,6 +213,14 @@ def run_snapshot():
     if position_lines:
         msg_parts += ['', '📋 Positions:'] + position_lines
 
+    try:
+        from manager.healthcheck import health_report
+        health_lines, _ = health_report()
+        if health_lines:
+            msg_parts += ['', '🩺 Deployments:'] + health_lines
+    except Exception as e:
+        logging.warning(f'[snapshot] deployment health failed: {e}')
+
     if errors:
         msg_parts += ['', '⚠️ Errors:'] + [f'  {e}' for e in errors]
 

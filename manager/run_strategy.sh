@@ -17,6 +17,11 @@ EXIT_CODE=$?
 if [ $EXIT_CODE -ne 0 ]; then
     echo "$OUTPUT" >> "strategies/$STRATEGY_NAME/strategy.log"
     python3 manager/alert_failure.py "$STRATEGY_NAME" "$EXIT_CODE" "$OUTPUT"
+else
+    # heartbeat for manager/healthcheck.py — "no fresh heartbeat" means the
+    # schedule itself stopped firing (crashes are alert_failure.py's job)
+    mkdir -p state/heartbeat
+    touch "state/heartbeat/$STRATEGY_NAME"
 fi
 
 exit $EXIT_CODE

@@ -26,12 +26,35 @@ Strategy execution MUST be scheduled as a system cron job (Linux) or Scheduled T
 5. Only after all confirmations: change `MODE = "live"`, update portfolio_config.json, and set up the schedule (cron on Linux, Scheduled Tasks on Windows — see OS check in `AGENTS.md`):
    a. Add the strategy schedule entry (see Cron Job Format / Scheduled Task Format below)
    b. **Add the daily snapshot schedule if not already present** — check with `crontab -l | grep snapshot` (Linux) or `schtasks /query /tn blaveclaw-snapshot` (Windows) first
-   c. **Run snapshot immediately** to verify Telegram delivery: `python3 manager/snapshot.py`
+   c. **Add the healthcheck schedule if not already present** and register the deployment — see Deployment Healthcheck below
+   d. **Run snapshot immediately** to verify Telegram delivery: `python3 manager/snapshot.py`
       If the snapshot message does not arrive on Telegram, debug before considering deployment complete.
 
 Never assume the user wants to go live just because they described a strategy or said "let's try it."
 Even if the user says "deploy it" or "run it", always confirm with one message before touching the schedule or MODE = "live".
-Once deployed live, send a confirmation message with: strategy name, schedule, daily snapshot time (08:00 UTC), account_value, and target_vol_pct.
+Once deployed live, send a confirmation message with: strategy name, schedule, daily snapshot time (08:00 UTC), account_value, target_vol_pct, and one line noting the healthcheck will alert them if the strategy stops running.
+
+## Deployment Healthcheck
+
+`manager/healthcheck.py` alerts the user when something that should be running has gone quiet — a lost cron entry, a dead daemon, or a deployment that was registered but never scheduled. It complements `alert_failure.py` (which only fires when a run happened and crashed). Heartbeats are written automatically: `run_strategy.sh` touches `state/heartbeat/<name>` on every successful run, and repo daemons (reconciler) touch their own each loop.
+
+At deployment time:
+
+1. **Add the healthcheck schedule once** (same "add once" pattern as the snapshot cron). Check first with `crontab -l | grep healthcheck` (Linux) or `schtasks /query /tn blaveclaw-healthcheck` (Windows):
+```
+*/30 * * * * cd /root/.openclaw/workspace && python3 manager/healthcheck.py
+```
+```
+schtasks /create /tn "blaveclaw-healthcheck" /tr "cmd /c cd /d C:\openclaw\workspace && python manager\healthcheck.py" /sc minute /mo 30 /ru SYSTEM /f
+```
+2. **Register the deployment** in `state/deployments.json` (create the file if missing):
+```json
+{"<strategy_name>": {"type": "cron", "expect_every_minutes": 60,
+                     "registered_at": "<UTC now, %Y-%m-%dT%H:%M:%S>"}}
+```
+Strategies scheduled through `run_strategy.sh` are also auto-registered by the healthcheck from crontab, so registration is a safety net, not a hard dependency — but daemons (e.g. reconciler, `{"type": "daemon", "expect_every_minutes": 5}`) MUST be registered manually or the healthcheck cannot see them.
+
+Alert behavior: at most one alert per deployment per 6 hours; a one-line recovery message when the heartbeat returns; deployment health also appears in the daily snapshot. Weekday-only schedules (day-of-week restricted cron) use a conservative 3-day threshold so weekends never false-alarm.
 
 ## Cron Job Format (Linux)
 **The `cd` is mandatory in every cron entry.** Cron runs from `/root` by default. All scripts in this repo use relative paths (`manager/`, `strategies/`, `lib/`, `cache/`). Without `cd`, every relative path resolves from `/root` → `FileNotFoundError` → the script crashes silently before sending any Telegram notification.

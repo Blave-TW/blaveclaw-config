@@ -128,4 +128,11 @@ nssm start blaveclaw-reconciler
 ```
 To check status: `nssm status blaveclaw-reconciler`. To stop: `nssm stop blaveclaw-reconciler` (add `nssm set blaveclaw-reconciler Start SERVICE_DEMAND_START` if it should not restart on next boot).
 
+**After starting the reconciler, register it for health monitoring** — add to `state/deployments.json` (create the file if missing):
+```json
+{"reconciler": {"type": "daemon", "expect_every_minutes": 5,
+                "registered_at": "<UTC now, %Y-%m-%dT%H:%M:%S>"}}
+```
+The reconciler touches `state/heartbeat/reconciler` on every poll loop; `manager/healthcheck.py` alerts the user if the heartbeat goes stale (see `references/deployment.md` › Deployment Healthcheck). Without this registration the healthcheck cannot see the daemon.
+
 **Trace the full calculation chain before flagging an inconsistency.** If `state.json` shows a non-zero position but a field in `portfolio_config.json` (e.g. `weight=0`) seems contradictory, read `lib/portfolio.py` first. `contribution = account_value * leverage * weight * position` — a zero weight zeroes out the contribution by design. Do not report a bug until you have followed every variable through the aggregation logic.

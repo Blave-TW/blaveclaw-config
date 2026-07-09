@@ -103,11 +103,18 @@ from lib.notify import make_sender as _make_sender
 send_telegram = _make_sender()
 
 
+HEARTBEAT_PATH = Path('state/heartbeat/reconciler')
+
+
 if __name__ == '__main__':
     logging.info(f"Reconciler started (poll={POLL_INTERVAL}s, threshold={THRESHOLD})")
     last_mtimes = {}
 
     while True:
+        # heartbeat for manager/healthcheck.py — a stale file means this daemon died
+        HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        HEARTBEAT_PATH.touch()
+
         current_mtimes = _active_state_mtimes()
         changed = [k for k in current_mtimes if current_mtimes[k] != last_mtimes.get(k)]
 
