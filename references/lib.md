@@ -112,6 +112,11 @@ Never create a duplicate strategy folder just because you ran a scan.
 - `lib/account_bingx.py` already ships implemented (swap/futures account) — do NOT rewrite it, extend it if spot/fund balance is needed
 - For any other exchange, copy `lib/account_TEMPLATE.py` — see `references/manager.md` § Account library
 
+`lib/guard.py` — **kill switch + order audit log.** Enforced inside `lib/order_*.py`'s transport layer — no caller opts in, nothing to wire:
+- If the file `state/HALT` exists, every ENTRY order raises `guard.Halted` before any network call. Reduce-only closes, SL/TP, and cancels still work (flattening must never be trapped). The file's existence is authoritative — malformed content still halts.
+- `trip_halt(reason, source)` — set it (user says 停 / healthcheck anomaly). `clear_halt(source)` — **only on explicit user instruction; NEVER clear a halt on your own initiative.** `halted()` / `halt_info()` — check state.
+- Every order attempt / outcome / denial is appended to `state/audit.jsonl` (fsynced). When the user asks "你到底下了什麼單", read this file — it is the record of what was actually sent, not what was intended.
+
 `lib/order_bingx.py` — **BingX swap (USDT-M perp) order execution. Ships implemented — NEVER hand-write BingX order calls in a strategy; import from here.** All functions take `env` (dotenv dict) first. `direction` is always the POSITION's direction (`'long'`/`'short'`); position mode (one-way vs hedge) is auto-detected.
 - `open_position(env, symbol, direction, qty, sl_price=, tp_price=, client_order_id=)` — **the recommended entry flow**: ONE atomic market order with SL/TP attached (no naked window), polled to FILLED, protection verified in open orders. Returns `{'entry': confirmed, 'protection': [...]}`. Raises `ProtectionFailed` if protection isn't visible after the fill — treat that as an ALERT-THE-USER-NOW event, never swallow it.
 - `place_market_order(...)` — confirmed market order; returns exchange-reported `avg_price` / `executed_qty` / `commission` (never report the intent — report these)

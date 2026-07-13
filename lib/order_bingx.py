@@ -22,6 +22,11 @@ layer caused naked positions, duplicate orders, and TP-reported-as-SL bugs):
 4. IDEMPOTENT. Pass `client_order_id` (unique per intent, alphanumeric only,
    e.g. "mystrat20260709120500") — resubmitting the same id is rejected by the
    exchange (error 101481) instead of opening a second position.
+5. HALTABLE + AUDITED. Every order-mutating request passes through lib/guard:
+   if state/HALT exists, entry orders raise guard.Halted BEFORE any network
+   call (reduce-only closes, SL/TP, and cancels still work — flattening must
+   never be trapped), and every attempt/outcome/denial is appended to
+   state/audit.jsonl. See lib/guard.py for semantics.
 
 Verified against ccxt's production parser + BingX official docs + two
 fleet-debugged implementations. Known quirks handled here so callers never
@@ -39,6 +44,8 @@ import time
 from decimal import Decimal, ROUND_DOWN
 
 import requests
+
+from lib import guard
 
 LIVE_URL = "https://open-api.bingx.com"
 LIVE_FALLBACK = "https://open-api.bingx.pro"
@@ -87,7 +94,74 @@ def _sign(secret_key, params):
     return canonical + f"&signature={sig}"
 
 
+# Order-mutating endpoints and how to classify their intent for the guard.
+_MUTATING_PATHS = {
+    ("POST", "/openApi/swap/v2/trade/order"): "place",
+    ("DELETE", "/openApi/swap/v2/trade/order"): "cancel",
+    ("DELETE", "/openApi/swap/v2/trade/allOpenOrders"): "cancel_all",
+    ("POST", "/openApi/swap/v2/trade/leverage"): "leverage",
+}
+
+_PROTECTIVE_TYPES = {"STOP_MARKET", "TAKE_PROFIT_MARKET", "STOP", "TAKE_PROFIT"}
+
+# Params worth keeping in the audit line (no secrets live in params — the
+# signature and timestamp are added later, inside _sign's own copy).
+_AUDIT_PARAM_KEYS = ("symbol", "side", "positionSide", "type", "quantity",
+                     "price", "stopPrice", "clientOrderID", "reduceOnly",
+                     "closePosition", "leverage", "orderId")
+
+
+def _order_intent(method, path, params):
+    """'entry' | 'reduce' | 'protective' | 'cancel' | 'cancel_all' |
+    'leverage' | None (not order-mutating). Hedge mode has no reduceOnly
+    flag — there, closing = side opposite to positionSide."""
+    kind = _MUTATING_PATHS.get((method, path))
+    if kind != "place":
+        return kind
+    p = params or {}
+    if p.get("type") in _PROTECTIVE_TYPES:
+        return "protective"
+    if str(p.get("reduceOnly", "")).lower() == "true" or \
+       str(p.get("closePosition", "")).lower() == "true":
+        return "reduce"
+    ps, side = p.get("positionSide"), p.get("side")
+    if (ps == "LONG" and side == "SELL") or (ps == "SHORT" and side == "BUY"):
+        return "reduce"
+    return "entry"
+
+
 def _request(method, path, env, params=None, signed=True, retries=3):
+    """Gate + audit wrapper around _send. Reads pass straight through;
+    order-mutating requests are halt-checked and audited (design rule 5)."""
+    intent = _order_intent(method, path, params)
+    if intent is None:
+        return _send(method, path, env, params, signed, retries)
+
+    fields = {k: params[k] for k in _AUDIT_PARAM_KEYS if k in (params or {})}
+    fields["intent"] = intent
+    fields["demo"] = _bases(env) == [DEMO_URL]
+
+    if intent == "entry" and guard.halted():
+        guard.audit("order_denied_halt", **fields)
+        raise guard.Halted(
+            f"state/HALT is set ({guard.halt_info()}) — entry order for "
+            f"{fields.get('symbol')} refused before reaching the exchange. "
+            f"Closes, SL/TP and cancels still work. Only the user may clear "
+            f"the halt (guard.clear_halt)."
+        )
+
+    guard.audit("order_attempt", **fields)
+    try:
+        data = _send(method, path, env, params, signed, retries)
+    except Exception as e:
+        guard.audit("order_error", error=str(e), **fields)
+        raise
+    order = (data or {}).get("order", {}) if isinstance(data, dict) else {}
+    guard.audit("order_ok", order_id=str(order.get("orderId", "")), **fields)
+    return data
+
+
+def _send(method, path, env, params=None, signed=True, retries=3):
     api_key = env.get("BINGX_API_KEY")
     secret_key = env.get("BINGX_SECRET_KEY")
     if signed and (not api_key or not secret_key):
@@ -393,7 +467,11 @@ def place_protective_orders(env, symbol, direction, qty=None, sl_price=None,
     position-size changes — prefer it unless doing partial TPs). Verifies the
     orders exist on the exchange before returning. Raises ProtectionFailed if
     placement or verification fails — the caller MUST alert the user (naked
-    position)."""
+    position).
+
+    VST quirk: the demo environment rejects closePosition=true with 109400
+    ("parameter quantity or stopPrice is must") — on BINGX_DEMO=true, pass an
+    explicit qty instead."""
     mode = get_position_mode(env)
     close_side = "SELL" if direction == "long" else "BUY"
     placed = {}

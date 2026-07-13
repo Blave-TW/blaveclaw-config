@@ -134,6 +134,16 @@ Every backtest costs the user real credit. These limits are absolute; no goal ju
 - **Two identical results in a row = malfunction.** If two consecutive backtests return the same stats, do NOT re-run — stop immediately and tell the user something is wrong.
 - **A user question is not permission to resume.** If the user interrupts or asks what you are doing, answer the question and stay stopped — do not treat their message as a green light to continue working.
 
+## Kill Switch (state/HALT)
+
+If `state/HALT` exists, `lib/order_*` refuses all NEW-EXPOSURE orders at the code level (closes, SL/TP, cancels still work). When the user says 停 / 全部停止 / stop trading:
+
+```
+python3 -c "from lib.guard import trip_halt; trip_halt('user request', 'user')"
+```
+
+Clearing (`clear_halt`) is ONLY done when the user explicitly asks to resume — never clear a halt on your own initiative, and never treat a user question as permission to clear it. Every order attempt/outcome/denial is logged to `state/audit.jsonl` — read it when the user asks what was actually sent to the exchange.
+
 ## Backtest Output
 
 Do NOT call `bt.plot()` — heavy interactive HTML, not useful on Telegram.
