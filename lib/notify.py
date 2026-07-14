@@ -52,6 +52,50 @@ def _load_config():
     return token, chat_ids
 
 
+# Telegram sendMessage hard limit. Messages longer than this are rejected
+# with HTTP 400, so _send_text splits them into chunks first.
+TELEGRAM_TEXT_LIMIT = 4096
+
+
+def _check_response(resp, api):
+    """Raise if the Telegram API rejected the call — a silently dropped
+    notification is worse than a crashed strategy (uid 31755's news digest
+    exceeded 4096 chars, got HTTP 400, and the script still reported Sent!)."""
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {}
+    if not (resp.ok and body.get("ok")):
+        desc = body.get("description") or resp.text[:200]
+        raise RuntimeError(f"Telegram {api} failed (HTTP {resp.status_code}): {desc}")
+
+
+def _split_message(msg):
+    """Split msg into chunks of at most TELEGRAM_TEXT_LIMIT chars,
+    breaking on line boundaries where possible."""
+    limit = TELEGRAM_TEXT_LIMIT
+    if len(msg) <= limit:
+        return [msg]
+    chunks = []
+    current = ""
+    for line in msg.split("\n"):
+        while len(line) > limit:  # single line longer than the limit: hard split
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
+        candidate = line if not current else current + "\n" + line
+        if len(candidate) > limit:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def make_sender(photo=False):
     """
     Returns a callable that broadcasts a Telegram message or photo
@@ -59,6 +103,9 @@ def make_sender(photo=False):
 
     photo=False → sender(text: str)
     photo=True  → sender(path: str)  (sends the image file at path)
+
+    Raises RuntimeError if Telegram rejects the send. Text messages longer
+    than TELEGRAM_TEXT_LIMIT are split into multiple messages automatically.
     """
     token, chat_ids = _load_config()
 
@@ -66,21 +113,24 @@ def make_sender(photo=False):
         def _send_photo(path: str) -> None:
             for chat_id in chat_ids:
                 with open(path, "rb") as f:
-                    requests.post(
+                    resp = requests.post(
                         f"https://api.telegram.org/bot{token}/sendPhoto",
                         data={"chat_id": chat_id},
                         files={"photo": f},
                         timeout=30,
                     )
+                _check_response(resp, "sendPhoto")
         return _send_photo
     else:
         def _send_text(msg: str) -> None:
             for chat_id in chat_ids:
-                requests.post(
-                    f"https://api.telegram.org/bot{token}/sendMessage",
-                    json={"chat_id": chat_id, "text": msg},
-                    timeout=30,
-                )
+                for chunk in _split_message(msg):
+                    resp = requests.post(
+                        f"https://api.telegram.org/bot{token}/sendMessage",
+                        json={"chat_id": chat_id, "text": chunk},
+                        timeout=30,
+                    )
+                    _check_response(resp, "sendMessage")
         return _send_text
 
 

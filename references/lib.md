@@ -94,6 +94,8 @@ Never create a duplicate strategy folder just because you ran a scan.
 - `from lib.notify import make_sender, send_text, send_photo`
 - `make_sender()` → text sender function (broadcasts to all paired chat IDs)
 - `make_sender(photo=True)` → photo sender function
+- Senders raise `RuntimeError` if Telegram rejects the send (never fails silently) — do not report a notification as sent unless the call returned without raising
+- Text messages longer than 4096 chars are split into multiple messages automatically (`TELEGRAM_TEXT_LIMIT`)
 - Use `send_telegram_fn=make_sender()` when calling `run()`
 - **CRITICAL — Pairing check (run at session start, before any other action):** Check pairing status first (see Telegram Pairing Check in `references/strategy-code.md`). If not paired: tell the user "Telegram is not paired yet. Please complete the pairing flow via the bot." Do not proceed with any strategy run or notification until pairing is confirmed.
 
