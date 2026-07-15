@@ -166,6 +166,7 @@ Three rules to always remember:
 When a user asks to connect a broker (e.g. "我想串永豐", "connect SinoPac", "我想串統一期貨"), read the relevant reference first:
 - **SinoPac (永豐金):** `references/sinopac-broker.md`
 - **President Futures (統一期貨):** `references/president-broker.md`
+- **Capital Futures (群益期貨):** `references/capital-broker.md` (Windows workspace only)
 
 ## Model Switching
 
