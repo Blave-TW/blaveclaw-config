@@ -1,15 +1,21 @@
-# Capital Futures (群益期貨) Broker — Agent Reference
+# Capital (群益) Broker — Agent Reference
 
-Use this document when a user asks to connect their Capital Futures (群益期貨) account to
-BlaveClaw for domestic TAIEX futures (台指期). The integration uses the official **Capital API**
+Use this document when a user asks to connect their **Capital Securities (群益證券)** and/or
+**Capital Futures (群益期貨)** account to BlaveClaw — same corporate group, same underlying API,
+one certificate covers both markets. The integration uses the official **Capital API**
 (`SKCOM.dll`, a Windows COM component) — **Windows-only**, so this broker requires a
 **Windows BlaveClaw workspace**. There is no cross-platform package (unlike SinoPac/President).
+
+Steps 1–6 (agreement, certificate, component install, login, accounts) are **shared** by both
+markets. Order placement diverges — see Step 7a (Futures) / Step 7b (Securities).
 
 Component download (login required): https://www.capital.com.tw/web/#/download/ApiTrading/ApiTradinginfo
 
 ---
 
 ## Supported Products
+
+**Futures (期貨):**
 
 | Product | `bstrStockNo` | Contract value | Notes |
 |---------|--------------|----------------|-------|
@@ -21,12 +27,15 @@ Month-specific codes like `TX03` also work but auto-roll to *next year's* March 
 prefer the near-month aliases, or the V2.13.54+ `bstrCIDTandem`(`FITX`) + `bstrSettlementMonth`
 (`yyyymm`) fields when a specific month is required.
 
+**Securities (證券):** any TWSE/TPEx-listed stock by its 4-digit ticker (e.g. `2330`) — 整股
+(1000-share lots) and 零股 (odd-lot, 1–999 shares) both supported, see Step 7b.
+
 ---
 
 ## Step 0 — Determine Scope & Platform
 
 **Ask the user:**
-> 你要交易大台（TXF）、小台（MXF）還是微台（TMF）？
+> 你要交易股票、期貨（大台/小台/微台），還是兩者都要？
 
 Then confirm the workspace is **Windows x64**. If the user is on a Linux workspace, this broker
 cannot run there — escalate to Blave ops for a Windows machine before continuing.
@@ -35,11 +44,17 @@ cannot run there — escalate to Blave ops for a Windows machine before continui
 
 ## Step 1 — Sign the API Agreement (user side, any device)
 
-1. User signs **期貨API服務下單聲明書** online: https://tradeweb.capital.com.tw/TSWEB/agreeList.aspx
-   (also available in 群益行動贏家 / 掌中財神 apps). Works from any browser incl. macOS.
-2. **Activation is next-day** (「簽署完之後，要明天才會生效」) — plan the onboarding across two days.
-3. Without it: no trading accounts from `GetUserAccount` (warning 2018/2019), no report connection,
-   and even the futures commodity list fails (error 3031).
+1. User signs the declaration(s) for whichever market(s) they want, on the same 同意書簽署 portal:
+   **證券API服務下單聲明書** (securities) and/or **期貨API服務下單聲明書** (futures) — two separate
+   checkbox items on one page: https://tradeweb.capital.com.tw/TSWEB/agreeList.aspx (also available
+   in 群益行動贏家 / 掌中財神 apps). Works from any browser incl. macOS.
+2. **Futures activation is confirmed next-day** (「簽署完之後，要明天才會生效」) — plan the onboarding
+   across two days. **Securities activation delay is unconfirmed** — no source pins the same
+   next-day wait for the securities declaration; treat as "may also be next-day" until tested.
+3. Without the relevant declaration signed: no trading accounts of that market from `GetUserAccount`
+   (warning 2018/2019), no report connection, and — for futures specifically — even the commodity
+   list fails (error 3031). Each market's declaration only unlocks that market's accounts; a user
+   who only signs the securities one won't get a futures account back, and vice versa.
 
 ---
 
@@ -168,34 +183,40 @@ import pythoncom, time
 order = comtypes.client.CreateObject(sk.SKOrderLib, interface=sk.ISKOrderLib)
 
 class OrderEvents:
-    accounts = []
+    futures_accounts = []
+    stock_accounts = []
     def OnAccount(self, bstrLogInID, bstrAccountData):
-        f = bstrAccountData.split(',')
-        if f[0] == 'TF':                                # TF = domestic futures account
-            OrderEvents.accounts.append(f[1] + f[3])    # broker id + 7-digit account
+        f = bstrAccountData.split(',')                       # market,branch,branch_name,account,...
+        account = f[1] + f[3]                                # branch/broker code (4) + account (7)
+        if f[0] == 'TF':                                     # TF = domestic futures
+            OrderEvents.futures_accounts.append(account)
+        elif f[0] == 'TS':                                   # TS = domestic securities
+            OrderEvents.stock_accounts.append(account)
 
 order_handler = comtypes.client.GetEvents(order, OrderEvents())
 
 order.SKOrderLib_Initialize()
 order.ReadCertByID(env['capital_id'])   # dual-factor cert check — skipping it → order error 1038
-order.GetUserAccount()                  # async, arrives via OnAccount
+order.GetUserAccount()                  # async, arrives via OnAccount (one event per account/market)
 
 deadline = time.time() + 10
-while not OrderEvents.accounts and time.time() < deadline:
+while not (OrderEvents.futures_accounts or OrderEvents.stock_accounts) and time.time() < deadline:
     pythoncom.PumpWaitingMessages()
     time.sleep(0.1)
-print("Futures account:", OrderEvents.accounts)
+print("Futures accounts:", OrderEvents.futures_accounts)
+print("Stock accounts:", OrderEvents.stock_accounts)
 ```
 
-Empty after 10s → agreement not yet active (next-day!) or no futures account under this ID.
+Empty for a market → that market's declaration isn't active yet (next-day for futures; unconfirmed
+for securities, see Step 1) or no account of that type exists under this ID.
 
 ---
 
-## Step 7 — Place Orders
+## Step 7a — Place Futures Orders
 
 ```python
 pOrder = sk.FUTUREORDER()
-pOrder.bstrFullAccount = OrderEvents.accounts[0]
+pOrder.bstrFullAccount = OrderEvents.futures_accounts[0]
 pOrder.bstrStockNo = 'TX00'     # near-month alias (MTX00 / TM0000 for mini/micro)
 pOrder.sBuySell = 0             # 0 = buy, 1 = sell
 pOrder.sTradeType = 1           # 0 = ROD, 1 = IOC, 2 = FOK
@@ -209,38 +230,83 @@ msg, ncode = order.SendFutureOrderCLR(env['capital_id'], False, pOrder)   # Fals
 print(ncode, msg)   # ncode 0 → msg is the 13-digit order sequence number
 ```
 
-**Order/fill reports:** call `reply.SKReplyLib_ConnectByID(env['capital_id'])` (0 = success), then
-`OnNewData(bstrUserID, bstrData)` fires with comma-separated fields — key ones: index 2 = type
-(`N`委託 `D`成交 `C`取消 `P`改價 `S`動態退單), index 3 = error flag (`N` ok / `Y` fail / `T` timeout),
-index 11 = fill price, index 23 = fill time. Field positions per community parser — verify against
-live data on first fill and pin them here.
-
 **Built-in throttle:** `SetMaxQty` / `SetMaxCount` cap per-second order flow; exceeding them locks
 that market's orders until `UnlockOrder`. 群益 also monitors API 異常下單 (looping orders) — keep
 order frequency sane by design.
 
 ---
 
+## Step 7b — Place Stock (Securities) Orders
+
+```python
+pOrder = sk.STOCKORDER()
+pOrder.bstrFullAccount = OrderEvents.stock_accounts[0]
+pOrder.bstrStockNo = '2330'      # 4-digit TWSE/TPEx ticker
+pOrder.sPrime = 0                # 0 = 上市上櫃, 1 = 興櫃
+pOrder.sPeriod = 0                # 0 = 盤中, 1 = 盤後, 2 = 零股, 4 = 盤中零股 (reduced struct, see below)
+pOrder.sFlag = 0                  # 0 = 現股, 1 = 融資, 2 = 融券, 3 = 無券
+pOrder.sBuySell = 0                # 0 = buy, 1 = sell
+pOrder.bstrPrice = '590.0'        # numeric string; or "M"/"H"/"L" (參考價/漲停/跌停)
+pOrder.nQty = 1                   # 整股(sPeriod 0/1) = 張數(1000股); 零股(sPeriod 2/4) = 1-999股
+pOrder.nTradeType = 0              # [逐筆交易] 0 = ROD, 1 = IOC, 2 = FOK
+pOrder.nSpecialTradeType = 2       # [逐筆交易] 1 = 市價 (bstrPrice=0), 2 = 限價 (bstrPrice required)
+
+msg, ncode = order.SendStockOrder(env['capital_id'], False, pOrder)   # note: NOT "...CLR" — futures-only suffix
+print(ncode, msg)   # ncode 0 → msg is the 13-digit order sequence number
+```
+
+**盤中零股 (`sPeriod=4`) uses a reduced struct** — only `sFlag=0`(現股), `sBuySell`, `bstrPrice`,
+`nQty`(1–999股); no `sPrime`/`nTradeType`/`nSpecialTradeType`. Same call, `SendStockOrder`; odd-lot
+orders during 13:40–14:30 (盤後零股 window) use `SendStockOddLotOrder` instead (same signature).
+
+**No day-trade flag on the order itself** — unlike futures' `sDayTrade`, 現股當沖 eligibility is a
+per-stock attribute (check via quote, `SKSTOCKLONG.nDayTrade`), and day-trading is just placing an
+offsetting `sFlag=0` order same-day, not a struct field.
+
+---
+
+## Order/Fill Reports (both markets)
+
+Same mechanism for futures and stocks: call `reply.SKReplyLib_ConnectByID(env['capital_id'])`
+(0 = success), then `OnNewData(bstrUserID, bstrData)` fires with comma-separated fields — key ones:
+index 1 = market type (`TF`/`TS`/...), index 2 = type (`N`委託 `D`成交 `C`取消 `P`改價 `S`動態退單),
+index 3 = error flag (`N` ok / `Y` fail / `T` timeout), index 11 = fill price, index 23 = fill time.
+Same indices for both markets (confirmed against the manual's shared-field section); securities
+orders additionally carry `BeforeQty`/`AfterQty` near the qty position. Field positions per
+manual + community parser — verify against live data on first fill and pin them here.
+
+---
+
 ## Step 8 — Wire into Portfolio
 
-`portfolio_config.json`:
+`portfolio_config.json` — futures and stock strategies both route through `"capital"`:
 
 ```json
 {
-  "exchanges": { "txf_strategy": "capital" },
+  "exchanges": {
+    "txf_strategy": "capital",
+    "tsmc_strategy": "capital"
+  },
   "asset_specs": {
     "txf_strategy": {
       "type": "futures_contracts",
       "contract_value": 200,
       "currency": "TWD",
       "lot_size": 1
+    },
+    "tsmc_strategy": {
+      "type": "tw_stock",
+      "lot_size": 1000,
+      "currency": "TWD",
+      "capital_symbol": "2330"
     }
   }
 }
 ```
 
-`contract_value`: 200 (TXF) / 50 (MXF) / 10 (TMF). Order library + reconciler wiring is one atomic
-task — see `references/manager.md`.
+`contract_value` (futures only): 200 (TXF) / 50 (MXF) / 10 (TMF). `lot_size` for stocks is 1000
+(整股/張) — for a strategy trading 零股 exclusively, use `lot_size: 1` and treat `nQty` as raw
+shares. Order library + reconciler wiring is one atomic task — see `references/manager.md`.
 
 ---
 
@@ -250,6 +316,10 @@ task — see `references/manager.md`.
 |--------|-----------------|
 | 台指期日盤 | 08:45 – 13:45 (Mon–Fri) |
 | 台指期夜盤 | 15:00 – 05:00 (Mon–Fri) |
+| 股票盤中 | 09:00 – 13:30 (Mon–Fri) |
+| 股票盤中零股 | 09:10 起，每 5 秒撮合一次，同盤中收盤 |
+| 股票盤後定價 | 14:00 – 14:30 |
+| 股票盤後零股 | 13:40 – 14:30（盤中零股未成交不會 carry over 到這個時段）|
 
 ---
 
@@ -257,11 +327,15 @@ task — see `references/manager.md`.
 
 - **No confirmed simulation environment.** A `morder1` sim server existed historically but its
   docs were removed and a "停止模擬平台服務" warning code exists — assume production-only. Validate
-  the order path with a 1-lot micro (TM0000) order the user approves, or an intentionally
-  rejected order (e.g. unfunded account → 保證金不足).
-- Agreement activation is **next-day**; certificate expires **yearly**; both are recurring
-  support cases, not one-time.
-- One cert per machine: expired leftover certs cause login error 600 — delete old ones.
+  the order path with a 1-lot micro futures order (TM0000) or a 1-share 零股 stock order the user
+  approves, or an intentionally rejected order (e.g. unfunded account → 保證金不足).
+- Futures agreement activation is **next-day**; securities activation delay is **unconfirmed**
+  (GAP — no source pins it, test on first real onboarding and update this doc). Certificate
+  expires **yearly**. All recurring support cases, not one-time.
+- **`SendStockOrder`, not `SendStockOrderCLR`** — unlike futures, there's no CLR-suffixed variant
+  for stocks; don't guess the futures naming pattern applies here.
+- One cert per machine, shared by both markets: expired leftover certs cause login error 600 —
+  delete old ones. Signing only one market's declaration doesn't require a second certificate.
 - No broker attribution headers — 群益 is the broker itself.
 - Every API version upgrade requires re-registration + comtypes cache deletion (Step 3.7).
 
@@ -269,11 +343,13 @@ task — see `references/manager.md`.
 
 ## Verification Checklist for Agent
 
-1. Windows x64 workspace + user signed 期貨API聲明書 (wait one day) → Step 1
+1. Windows x64 workspace + user signed the relevant declaration(s) (期貨/證券, wait ≥1 day for
+   futures) → Step 1
 2. Certificate issued on this machine via RDP (credentials from the web dashboard) → Step 2
 3. `SKCOMTester.exe` login OK → component/cert/agreement all good → Step 3
 4. Python login `code == 0` → Step 5
-5. `OnAccount` returns a TF account → Step 6
-6. One user-approved minimal live order (or intentional rejection) confirms the order path → Step 7
-7. `python manager/snapshot.py` → Telegram daily report includes the capital account
+5. `OnAccount` returns the expected account(s) (`TF` and/or `TS`) → Step 6
+6. One user-approved minimal live order per market being used (or intentional rejection)
+   confirms the order path → Step 7a / 7b
+7. `python manager/snapshot.py` → Telegram daily report includes the capital account(s)
 8. 用戶確認後，方可設定 reconciler 上線（參考 `references/deployment.md`）
