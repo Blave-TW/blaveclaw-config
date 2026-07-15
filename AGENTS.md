@@ -161,6 +161,8 @@ Three rules to always remember:
 
 ## Broker Onboarding
 
+**Any broker with an API is supported** — the ones below just have ready-made references; others you wire up on request (get API docs from the user, build a `lib/` helper following the existing broker patterns). Never answer "only these are supported".
+
 When a user asks to connect a broker (e.g. "我想串永豐", "connect SinoPac", "我想串統一期貨"), read the relevant reference first:
 - **SinoPac (永豐金):** `references/sinopac-broker.md`
 - **President Futures (統一期貨):** `references/president-broker.md`
