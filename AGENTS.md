@@ -146,6 +146,8 @@ Clearing (`clear_halt`) is ONLY done when the user explicitly asks to resume —
 
 ## Backtest Output
 
+**Taiwan futures (TXF / stock futures) strategies MUST apply `txf_settlement_mask` in compute_signals** — the data is an unadjusted continuous series; skipping it books fake roll gaps as PnL (see `references/lib.md`).
+
 Do NOT call `bt.plot()` — heavy interactive HTML, not useful on Telegram.
 
 After every backtest, `run()` automatically writes `strategies/{name}/stats.json`, generates `strategies/{name}/pnl.png`, and sends it to Telegram.

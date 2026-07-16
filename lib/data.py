@@ -198,6 +198,35 @@ def _save_monthly(prefix, params, df):
 
 # ── Kline ─────────────────────────────────────────────────────────────────────
 
+def _sanity_check_ohlc(df, label):
+    """Drop bars with impossible OHLC values (high<low, non-positive or NaN price).
+
+    Corrupt upstream/exchange data would otherwise silently propagate into every
+    indicator and signal computed on top of it — not a hypothetical, this is the
+    failure mode a strategy author can't see just by eyeballing a chart.
+
+    Called at READ time (on the assembled result, after the cache), never before
+    writing the cache: the cache must keep the raw upstream bars, so a transient
+    upstream glitch doesn't become a permanent hole in an immutable monthly
+    parquet, and bars already cached before this check existed are covered too.
+
+    Dropping leaves a gap in the bar series (shift/pct_change will span it) —
+    same as an exchange outage. The dropped timestamps are printed so the gap
+    is diagnosable; corrupt bars are strictly worse than a visible gap.
+    """
+    if df.empty:
+        return df
+    ohlc = df[['Open', 'High', 'Low', 'Close']]
+    bad = (df['High'] < df['Low']) | (ohlc <= 0).any(axis=1) | ohlc.isna().any(axis=1)
+    if bad.any():
+        ts = ', '.join(str(t) for t in df.index[bad][:5])
+        more = '' if int(bad.sum()) <= 5 else f' (+{int(bad.sum()) - 5} more)'
+        print(f"  ⚠️  {label}: dropped {int(bad.sum())} bar(s) with invalid OHLC "
+              f"(high<low, non-positive or NaN price) at: {ts}{more}")
+        df = df[~bad]
+    return df
+
+
 def _fetch_kline_raw(symbol, interval, start, end, headers):
     from concurrent.futures import ThreadPoolExecutor, as_completed
     s = datetime.strptime(start, '%Y-%m-%d')
@@ -233,11 +262,12 @@ def _fetch_kline_raw(symbol, interval, start, end, headers):
 
 def fetch_kline(symbol, interval, start, end, headers):
     """Fetch OHLCV kline data from Blave API with annual chunking and local cache."""
-    return _extend_cache_monthly(
+    df = _extend_cache_monthly(
         'kline', {'symbol': symbol, 'period': interval},
         lambda s, e: _fetch_kline_raw(symbol, interval, s, e, headers),
         start, end,
     )
+    return _sanity_check_ohlc(df, f'{symbol} {interval} kline')
 
 
 # ── Alpha data ────────────────────────────────────────────────────────────────
@@ -1406,13 +1436,22 @@ def fetch_stock_futures_ohlcv_symbols(headers):
 
 
 def txf_settlement_mask(index):
-    """Return a boolean Series (same index) that is True on the last 1-min bar
-    before TXF monthly settlement (3rd Wednesday of each month, 13:30 TWN).
+    """Return a boolean Series (same index) that is True on the last bar strictly
+    before each TAIFEX monthly settlement (3rd Wednesday, 13:30 TWN).
+
+    Interval-agnostic: 1m data marks the 13:29 bar, 60m data marks the 13:00 bar,
+    etc. Applies to every TAIFEX monthly-settled product — TXF and individual
+    stock futures share the same settlement calendar — and MUST be applied by any
+    strategy on `fetch_twfutures_*` data: the source is Shioaji's R1 continuous
+    near-month series, which switches contracts at settlement WITHOUT price
+    adjustment, so an unmasked position books the contract-basis gap as fake PnL
+    (measured 2018-2026 across 10 stock futures: mean +0.36%/roll, std 3.9%,
+    August dividend-season mean -1.9%).
 
     Usage in compute_signals:
         settle = txf_settlement_mask(df.index)
-        signal[settle] = 0.0
-        return signal, settle   # exec_at_close
+        signal[settle] = 0.0        # Type A;  Type C: weights.loc[settle] = 0.0
+        return signal, settle       # settle doubles as exec_at_close
     """
     import datetime
     import pytz
@@ -1428,27 +1467,29 @@ def txf_settlement_mask(index):
                     return d
             d = d + datetime.timedelta(days=1)
 
-    settlement_bars = set()
-    start = index.min().to_pydatetime()
-    end   = index.max().to_pydatetime()
+    mask  = pd.Series(False, index=index)
+    start = index.min()
+    end   = index.max()
+
     year, month = start.year, start.month
     while True:
         wed = _third_wed(year, month)
-        ts_settle = twn.localize(
-            datetime.datetime(wed.year, wed.month, wed.day, 13, 30)
-        ).astimezone(datetime.timezone.utc).replace(tzinfo=None)
+        ts_settle = pd.Timestamp(
+            twn.localize(datetime.datetime(wed.year, wed.month, wed.day, 13, 30))
+            .astimezone(pytz.utc)
+        )
+        if index.tz is None:
+            ts_settle = ts_settle.tz_localize(None)
         if ts_settle > end:
             break
-        last_bar = ts_settle - datetime.timedelta(minutes=1)
-        settlement_bars.add(last_bar)
+        # last bar with label strictly before the settlement moment; guard
+        # against marking a far-away bar when the symbol has a data gap
+        pos = index.searchsorted(ts_settle) - 1
+        if pos >= 0 and (ts_settle - index[pos]) <= pd.Timedelta(days=1):
+            mask.iloc[pos] = True
         month += 1
         if month > 12:
             month, year = 1, year + 1
-
-    mask = pd.Series(False, index=index)
-    for ts in settlement_bars:
-        if ts in index:
-            mask[ts] = True
     return mask
 
 

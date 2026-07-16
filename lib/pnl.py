@@ -11,11 +11,12 @@ def daily_returns_typeA(pf_ret):
 
 
 def daily_returns_typeC(pf_series):
-    """Extract daily returns from Type C portfolio series. Returns (dates_list, returns_list)."""
-    daily = pf_series.fillna(0)
-    dates = [d.strftime('%Y-%m-%d') for d in daily.index]
-    rets  = [0.0 if math.isnan(v) else round(float(v), 6) for v in daily.values]
-    return dates, rets
+    """Resample Type C per-bar returns to daily. Returns (dates_list, returns_list).
+
+    Must resample: Type C strategies can run on intraday bars (e.g. 60m), and
+    emitting one entry per bar produces duplicate date strings that crash
+    management_backtest's DataFrame merge (pandas duplicate-axis)."""
+    return daily_returns_typeA(pf_series)
 
 
 def load_all_stats():

@@ -108,6 +108,9 @@ def scan_grid(data, compute_signals_fn, row_vals, col_vals,
                 w_curr = np.vstack([np.zeros((1, k)), w_orig[:-1]])
                 w_prev = np.vstack([np.zeros((2, k)), w_orig[:-2]])
                 exec_s = np.zeros(n, dtype=bool)
+                if _opt:  # honour exec_at_close, same shift as lib/runner.py
+                    ea = np.asarray(_opt[0], dtype=bool)[warmup:]
+                    exec_s[1:] = ea[:-1]
                 pf_ret, *_ = precise_pnl(cl, op, w_curr, w_prev, exec_s, fee)
                 sharpe, *_ = compute_stats(pf_ret, pf['close'].index)
 
