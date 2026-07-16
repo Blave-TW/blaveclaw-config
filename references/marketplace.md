@@ -54,7 +54,11 @@ GET /openclaw/marketplace/strategies/{id}
    - Exit 0 (clean) → move to `strategies/<filename>.py` and proceed
    - Exit 1 (warnings) → show findings to user, ask for confirmation; if confirmed, move to `strategies/` and run
    - Exit 2 (critical) → show findings, delete `tmp/<filename>.py`, do NOT run
-7. `python3 strategies/<filename>.py`
+7. **Quality scan** (Type A and C — skip only Type B) — run `python3 lib/quality_check.py strategies/<filename>.py`
+   - Exit 0 (clean) → proceed
+   - Exit 1 (warnings) → show findings to user, ask for confirmation before running
+   - Exit 2 (critical) → show findings, do NOT run — a broken `compute_signals()` contract means the backtest about to run produces garbage results
+8. `python3 strategies/<filename>.py`
 
 Purchases and shared-with-me are separate lists — checking only purchases will miss shared strategies.
 
@@ -68,7 +72,8 @@ When the downloaded code contains `# ===== STRATEGY N: <name> =====` markers, tr
    - If any file exits 2 (critical) → delete that file, do NOT run it; continue with the others
    - If any file exits 1 (warnings) → show findings, ask user for confirmation before moving
 4. Move approved files to `strategies/<name_slug>.py`
-5. Run each: `python3 strategies/<name_slug>.py`
+5. Run `python3 lib/quality_check.py strategies/<name_slug>.py` on each Type A/C file (skip only Type B) — exit 1: confirm with user; exit 2: do NOT run that file
+6. Run each: `python3 strategies/<name_slug>.py`
 
 Example: a file containing two strategies marked as `# ===== STRATEGY 1: BTC SMA Cross =====` and `# ===== STRATEGY 2: ETH RSI Fade =====` should produce `strategies/btc_sma_cross.py` and `strategies/eth_rsi_fade.py`.
 
@@ -114,6 +119,7 @@ Response: `[{id, title, description, category, shared_at}, ...]`
    - Exit 0 (clean) → move to `strategies/<filename>.py` and proceed
    - Exit 1 (warnings) → show findings to user, ask for confirmation; if confirmed, move to `strategies/` and run
    - Exit 2 (critical) → show findings, delete `tmp/<filename>.py`, do NOT run
+5. **Quality scan** (Type A and C — skip only Type B) — run `python3 lib/quality_check.py strategies/<filename>.py`; exit 1: confirm with user before running; exit 2: do NOT run
 
 ## Strategy report (performance data)
 
@@ -181,6 +187,11 @@ Custom lib: lib/orders_bybit.py — place_order("BUY"|"SELL"|"SHORT"|"COVER"). R
 ```
 
 ## Submit a strategy for sale
+
+**Before submitting a Type A or C strategy** (skip only for Type B — no backtest, no FEE),
+run `python3 lib/quality_check.py strategies/<filename>.py` — catches a `FEE=0` backtest
+(inflates the Sharpe/return you're about to advertise to buyers) and an unfilled
+`compute_signals()` template. Fix any findings before calling the endpoint below.
 
 ```
 POST /openclaw/marketplace/strategies/submit

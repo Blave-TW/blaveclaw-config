@@ -8,6 +8,7 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 - `fetch_db_kline(dataset, symbol, schema, start, end, headers)` → CME/NYMEX/ICE OHLCV + `instrument_id` column; datasets: `GLBX.MDP3` (CL, GC), `IFEU.IMPACT` (BRN); schemas: `ohlcv-1m` / `ohlcv-1h` / `ohlcv-1d`
 - `settlement_signals_from_db(df, signal)` → returns `(signal, exec_at_close)`. For futures strategies using `fetch_db_kline`: call at the end of `compute_signals` and `return` the result directly. Forces `signal=0.0` on the last bar before each contract rollover, and marks those bars `exec_at_close=True` (executed at this-bar close, not next-bar open). Do NOT use `-1.0` for settlement — that opens a short position.
 - `fetch_kline(symbol, interval, start, end, headers)` → OHLCV DataFrame (Open/High/Low/Close/Volume)
+- OHLC fetchers (`fetch_kline`, `fetch_db_kline`, `fetch_twfutures_ohlcv`, `fetch_twstock_price`) drop bars with impossible values (high<low, non-positive or NaN price) at read time and print the dropped timestamps — a printed `⚠️ dropped N bar(s)` warning means upstream data was corrupt, not a fetch failure; the cache keeps the raw bars
 - `fetch_holder_concentration(symbol, interval, start, end, headers)` → DataFrame with `alpha` column
 - `fetch_funding_rate(symbol, interval, start, end, headers)` → DataFrame with `alpha` (Binance only; alpha = funding rate × 100)
 - `fetch_taker_intensity(symbol, interval, start, end, headers, timeframe='24h')` → DataFrame with `alpha`
@@ -89,6 +90,8 @@ Never create a duplicate strategy folder just because you ran a scan.
 - `from lib.validation import mcpt, plot_mcpt` — Monte Carlo Permutation Test; call `mcpt(close, position, n=2000, fee=..., target_vol=..., ...)` → `(actual_sharpe, p_value, dist)`
 - **All validation (MCPT, walk-forward, etc.) goes in a separate `validate.py` in the strategy folder** — never inside `strategy.py`.
 - Daily stock params: `periods_per_year=252`, `vol_window=60`, `max_lev=1.0`
+
+`lib/quality_check.py` — CLI, not an import: `python3 lib/quality_check.py strategies/<file>.py`. Static scan for a broken/unfilled `compute_signals()` contract (CRITICAL, exit 2) and `FEE=0` / non-constant `FEE` (WARNING, exit 1). Run on any Type A/C strategy before its first backtest and before marketplace submission (full flow: `references/marketplace.md`). Companion to `lib/security_check.py` (malicious-code scan for downloaded strategies — same exit-code convention).
 
 `lib/notify.py`:
 - `from lib.notify import make_sender, send_text, send_photo`

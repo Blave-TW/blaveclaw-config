@@ -214,7 +214,7 @@ def _sanity_check_ohlc(df, label):
     same as an exchange outage. The dropped timestamps are printed so the gap
     is diagnosable; corrupt bars are strictly worse than a visible gap.
     """
-    if df.empty:
+    if df.empty or not all(c in df.columns for c in ('Open', 'High', 'Low', 'Close')):
         return df
     ohlc = df[['Open', 'High', 'Low', 'Close']]
     bad = (df['High'] < df['Low']) | (ohlc <= 0).any(axis=1) | ohlc.isna().any(axis=1)
@@ -463,11 +463,12 @@ def settlement_signals_from_db(df, signal):
 def fetch_db_kline(dataset, symbol, schema, start, end, headers):
     """Fetch CME/NYMEX/ICE OHLCV with local cache."""
     slug = schema.replace('-', '')
-    return _extend_cache_monthly(
+    df = _extend_cache_monthly(
         f'db_{slug}', {'dataset': dataset.replace('.', ''), 'symbol': symbol},
         lambda s, e: _fetch_db_raw(dataset, symbol, schema, s, e, headers),
         start, end,
     )
+    return _sanity_check_ohlc(df, f'{symbol} {schema} db_kline')
 
 
 # ── Taiwan stock data ─────────────────────────────────────────────────────────
@@ -515,11 +516,12 @@ def fetch_twstock_price(stock_id, start, end, headers):
     """台股原始日K（未除權息）. Returns DataFrame with Open/High/Low/Close/Volume columns.
     Use for visualization/charting — matches prices users see on broker apps.
     Do NOT use for backtesting (dividends cause artificial price drops that distort signals)."""
-    return _extend_cache_monthly(
+    df = _extend_cache_monthly(
         'twstock_price_nonadj', {'id': stock_id},
         lambda s, e: _fetch_twstock_price_nonadj_raw(stock_id, s, e, headers),
         start, end,
     )
+    return _sanity_check_ohlc(df, f'{stock_id} twstock price')
 
 
 def fetch_twstock_quote(stock_id, headers):
@@ -1255,6 +1257,7 @@ def fetch_twfutures_ohlcv(symbol, schema, start, end, headers):
         lambda s, e: _fetch_twfutures_raw_smart(symbol, schema, s, e, headers),
         start, end,
     )
+    df = _sanity_check_ohlc(df, f'{symbol} {schema} twfutures')
     if schema == '1d' and not df.empty:
         # Cache stores naive UTC (midnight TWN = prev-day 16:00 UTC). Convert to Asia/Taipei
         # so the index date matches the actual trading date.
