@@ -71,11 +71,18 @@ RDP is a standing feature of Windows BlaveClaw machines — enabled at provision
 shown in the BlaveClaw web dashboard (「手動連線資訊」link: IP, Administrator, password + reset).
 
 1. Agent pre-downloads the issuance tool to the desktop (run as admin) so the user only has to
-   run the wizard:
+   run the wizard. **`www2.capital.com.tw` is a dead hostname as of 2026-07-16 (confirmed NXDOMAIN,
+   not just a 404) — do not use it:**
    ```powershell
-   Invoke-WebRequest 'https://www2.capital.com.tw/download/RAWinApp.exe' -OutFile "$env:PUBLIC\Desktop\RAWinApp.exe"
-   # if the direct URL 404s, fetch the current link from capital.com.tw 憑證專區 →「憑證申請/展延」
+   # DEAD, do not use:
+   # Invoke-WebRequest 'https://www2.capital.com.tw/download/RAWinApp.exe' -OutFile "$env:PUBLIC\Desktop\RAWinApp.exe"
    ```
+   There is no stable static URL for `RAWinApp.exe` — the certificate area generates the link
+   dynamically per visit, so this step can't be a hardcoded `Invoke-WebRequest` at all. Instead,
+   browse **https://www.capitalfutures.com.tw** (群益期貨官網) → 「客戶常用功能」→「憑證專區」→
+   「立即申請/展延」each time to reach the current download, and pull the .exe URL from there before
+   running the download. If the agent has no browser automation on this machine, do this step
+   inside the same RDP session with the user instead of pre-staging it silently.
 2. Tell the user (Telegram):
    > 請連進你的 BlaveClaw 機器桌面，跑一次群益的憑證精靈（約兩分鐘）：
    > 1. 到 Blave 網站的 BlaveClaw 頁面，點「開啟遠端桌面」——瀏覽器會直接開你的機器桌面，不用裝任何軟體
@@ -96,27 +103,52 @@ shown in the BlaveClaw web dashboard (「手動連線資訊」link: IP, Administ
    during issuance (issuance-time only — not needed at API runtime); **valid 1 year**, renew via
    the same RAWinApp flow (renewable from ~1 month before expiry) — warn the user it recurs.
 
-**POC CHECKPOINT (unverified):** the cert may be stored in the *interactive user's* cert store
-while strategies run under a different account (service context) — if login later fails with
-1045 `SK_ERROR_CERT_NOT_FOUND` / 600 / 1038, use RAWinApp's 憑證備份/匯入 to import the cert
-under the account that actually runs the strategy, or run the strategy under the RDP account.
-Verify on the first real onboarding and update this doc.
+**CONFIRMED (2026-07-16 POC, uid 12890):** SKCOM binds the certificate to the **Windows identity
+that issued it** (always `Administrator` here, since issuance happens via RDP), not to a cert
+store location. Exporting the cert and importing it into the `SYSTEM`/machine store does **not**
+fix login — `SKCenterLib_Login` still returns 602 (cert validation failure) because SKCOM checks
+the account identity, not just cert presence. **The only working fix: run the reconciler/strategy
+service as the `Administrator` account, not `LocalSystem`** — see the Capital exception in
+`references/manager.md`'s NSSM section (`nssm set ... ObjectName .\Administrator <password>`). Do
+not attempt cert export/import as a workaround; it was tested and does not resolve 602.
+
+**Also CONFIRMED: a *password logon* is required, not just the right account.** The same login
+script run as Administrator succeeds or fails depending on how the session was created:
+- SSH with public-key auth → **602** (Windows can't unlock the DPAPI-protected cert private key
+  without password-derived credentials)
+- Password-based logon (RDP, `schtasks /ru Administrator /rp <password>`, NSSM `ObjectName` with
+  password) → **code=0 success**
+
+Practical consequence for the agent: **you cannot run Capital login/order code directly from your
+own shell** (the gateway service context) or via SSH — it will 602 even though everything is
+installed correctly. Always execute Capital-touching scripts through a password-logon vehicle:
+the NSSM service (production path) or a one-shot `schtasks /create ... /ru Administrator
+/rp <password> /rl HIGHEST` + `/run` + `/delete` (ad-hoc testing path; password is in `.env` as
+`admin_password`, or `C:\openclaw\credentials\rdp_password.txt` on newer machines).
 
 ---
 
 ## Step 3 — Install the Capital API Component
 
-On the BlaveClaw machine (agent can do all of this):
+**Only the download itself needs the user (login-gated) — every step after that is agent-executed.
+Do not ask the user to extract, install, or register anything themselves; do not leave a zip on
+the desktop for the user to double-click.**
 
-1. Download the API zip from the download page above (user login required — do this during the
-   RDP session, or have the user forward the zip).
-2. Extract; keep `SKCOM.dll` together with its certificate/quote sub-components in one folder
-   (e.g. `C:\skcom\x64\`) — they must be co-located for registration to work.
-3. Install the Microsoft VC++ redistributable (`vc_redist.x64.exe`, bundled in the zip).
-4. Run `元件\x64\install.bat` **as administrator** (registers SKCOM.dll via regsvr32).
+1. The zip requires the user's own capital.com.tw login, so it can't be pre-staged like
+   `RAWinApp.exe` — during the same RDP message where you ask them to run the cert wizard, also
+   ask them to download this zip and forward it to you (or download it themselves in the RDP
+   session's browser to `$env:PUBLIC\Desktop\`), then hand control back to the agent.
+2. Once the zip is on the machine, agent extracts it via SSH/remote-exec — e.g.
+   `Expand-Archive -Path <zip> -DestinationPath C:\skcom\x64\` — keeping `SKCOM.dll` together
+   with its certificate/quote sub-components in one folder (they must be co-located for
+   registration to work).
+3. Agent installs the Microsoft VC++ redistributable (`vc_redist.x64.exe`, bundled in the zip),
+   silently: `Start-Process C:\skcom\x64\vc_redist.x64.exe -ArgumentList '/install','/quiet','/norestart' -Wait`.
+4. Agent runs `元件\x64\install.bat` **as administrator** (registers SKCOM.dll via regsvr32).
 5. **Bitness must match Python**: x64 Python ↔ x64 component (mismatch → "Class not registered").
-6. Verify with the bundled `SKCOMTester.exe` (login there proves cert + agreement + component all
-   work before writing any code).
+6. Agent verifies with the bundled `SKCOMTester.exe` CLI/silent mode if available; otherwise ask
+   the user to eyeball it during the same RDP session as a final check (login there proves cert +
+   agreement + component all work before writing any code).
 7. **On any later API version upgrade:** uninstall old version, re-register, and **delete the
    comtypes cache** (`site-packages/comtypes/gen/SKCOMLib.py` + the GUID-named module) — stale
    generated wrappers cause silent quote/order anomalies.

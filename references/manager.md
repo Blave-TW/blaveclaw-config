@@ -128,6 +128,20 @@ nssm start blaveclaw-reconciler
 ```
 To check status: `nssm status blaveclaw-reconciler`. To stop: `nssm stop blaveclaw-reconciler` (add `nssm set blaveclaw-reconciler Start SERVICE_DEMAND_START` if it should not restart on next boot).
 
+**Capital (群益) broker exception:** NSSM services default to running as `LocalSystem`. Capital's
+`SKCOM.dll` binds the certificate to the Windows identity that issued it (always `Administrator`
+on BlaveClaw machines — see `references/capital-broker.md` Step 2), so a service running as
+`LocalSystem` fails `SKCenterLib_Login` with error 602 even though the cert is correctly installed.
+If any portfolio in `portfolio_config.json["exchanges"]` uses `"capital"`, set the service identity
+to Administrator before starting it:
+```
+nssm set blaveclaw-reconciler ObjectName .\Administrator "<Administrator password>"
+```
+Read the password from `C:\openclaw\credentials\rdp_password.txt` on the machine itself (agent has
+local read access — no need to ask the user, they'd only be repeating what's already on their own
+「遠端桌面連線資訊」dashboard card). No certificate export/import needed — this replaces the old
+POC guidance about moving the cert to a different account store.
+
 **After starting the reconciler, register it for health monitoring** — add to `state/deployments.json` (create the file if missing):
 ```json
 {"reconciler": {"type": "daemon", "expect_every_minutes": 5,
