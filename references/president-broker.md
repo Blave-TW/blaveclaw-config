@@ -235,6 +235,11 @@ result = api.dtrade.order(order)
 print(result.issend, result.errorcode, result.errormsg, result.seq)
 ```
 
+**`issend=True` only means the request left the machine — it is NOT order acceptance.** Always
+confirm `orderstatus == '委託成功'` via a reply report (either channel below) before reporting an
+order as placed; a rejected order otherwise fails silently (this exact class of bug cost three
+rounds of lost orders on SinoPac — see `references/sinopac-broker.md` § Field-Verified Lessons).
+
 **Fill/order reports** arrive two ways:
 1. **Push callbacks** — set `api.dtrade.on_reply` / `api.dtrade.on_match` before placing orders;
    they fire immediately with the full report object (`orderstatus`, e.g. `'委託成功'`).

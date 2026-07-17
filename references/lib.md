@@ -137,6 +137,14 @@ Never create a duplicate strategy folder just because you ran a scan.
 - Always pass `client_order_id` (alphanumeric, ≤40 chars, unique per signal — e.g. `f"{strategy}{signal_ts:%Y%m%d%H%M%S}"`) so a resubmit is rejected by the exchange instead of doubling the position
 - Wire `manager/reconciler.py`'s `get_positions()` / `place_order()` through this lib + `lib/account_bingx.py` for BingX users
 
+`lib/order_sinopac.py` — **SinoPac (永豐金) Taiwan stock odd-lot order execution (Shioaji). Ships implemented — NEVER hand-write Shioaji order calls; import from here.** All functions take `env` (dotenv dict) first. Harvested from the first live TW-stock deployment, which lost three rounds of orders to silent rejections (see `references/sinopac-broker.md` § Field-Verified Lessons — read it before any SinoPac work). Requires `SINOPAC_LIVE=true` in `.env` for real orders; without it Shioaji runs in simulation mode against a fake account.
+- `place_order_sinopac(env, symbol, signed_diff, client_tag=)` — **the reconciler entry point**: signed_diff in TWD (>0 buy, <0 sell), converted to shares at last price and split into ≤999-share odd-lot MKT orders, each polled to acknowledgement. Returns `{'orders', 'filled_qty', 'target_qty', ...}`, or `False` if the diff is under one share (skip).
+- `place_odd_lot_order(env, symbol, 'buy'|'sell', shares, client_tag=)` — one confirmed odd-lot order (1-999 shares). Returns exchange-reported `status` / `filled_qty` / `avg_fill_price` / `msg` — report those, never the intent. Raises `SinopacError` on rejection (with the broker's message), `OrderNotConfirmed` if never acknowledged (query again, do NOT blindly resubmit).
+- `client_tag`: ≤6 alphanumeric chars (Shioaji `custom_field`), unique per intent — a same-day resubmit with the same tag raises `DuplicateOrder` locally (Shioaji has no exchange-side clientOrderId dedup).
+- `get_sinopac_positions(env)` — `{symbol: {'side': 'long', 'size': TWD}}` (reconciler shape, odd-lot-aware via `unit=Share`); `get_account_balance(env)` — settlement balance in TWD, raises on failure.
+- Buy orders pass through `lib/guard` (halt + audit) like BingX; sells are never trapped. Login + CA activation happen on first call and fail loudly if the CA certificate isn't activated.
+- Futures (TXF) are NOT covered yet — raw-Shioaji pattern with mandatory confirmation is in `references/sinopac-broker.md`; harvest into this lib after the first live futures deployment.
+
 **When writing new reusable logic** (new exchange order helper, new alpha data fetcher, etc.):
 - Add it to the appropriate `lib/` file first (or create a new one, e.g. `lib/orders_binance.py`)
 - Then import it in the strategy

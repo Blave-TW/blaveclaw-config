@@ -2,6 +2,11 @@
 
 Use this document when a user asks to connect their SinoPac account to BlaveClaw.
 
+**Stock order placement is implemented in `lib/order_sinopac.py` — import it, never hand-write
+Shioaji order calls in a strategy or one-off script.** Every rule in the Field-Verified Lessons
+section below was learned from real rejected orders on a live account; the lib encodes all of
+them.
+
 ---
 
 ## Supported Products
@@ -9,7 +14,43 @@ Use this document when a user asks to connect their SinoPac account to BlaveClaw
 | Product | Symbol Example | Notes |
 |---------|---------------|-------|
 | 台灣期貨 TXF | `TXFR1` | 台指期近月，1 口 = 200 × 指數點位 (TWD) |
-| 台灣股票 Stocks | `2330` (TSE) | 最小單位 1 張 = 1000 股 |
+| 台灣股票 Stocks | `2330` (TSE) | Board lot (整股) = 1000 shares; odd lot (零股) = 1-999 shares. `lib/order_sinopac.py` trades odd lot. |
+
+---
+
+## Field-Verified Lessons (live account, 2026-07)
+
+The first live Taiwan-stock deployment lost **three rounds of orders to silent rejections** —
+Shioaji's `place_order` does not raise on rejection; a dead order just sits with status `Failed`
+or never leaves `PendingSubmit`. Each lesson below cost a real debugging round:
+
+1. **`SINOPAC_LIVE=true` must be set in `.env`, or nothing is real.** Without it the connection
+   runs in simulation mode against a fake account whose holdings have nothing to do with the
+   user's real account (the simulation account showed 24 fake positions worth $24.4M while the
+   real account was empty; sell orders bounced with 「集保賣出餘股數不足」 against holdings that
+   didn't exist). Never diagnose position mismatches before confirming which mode you're in.
+2. **CA certificate must be activated, and activation happens AFTER `login()`.** Live orders
+   before activation fail with `CA not activated for: <person_id>`. If `activate_ca()` itself
+   fails, the user must first activate the certificate in SinoPac's desktop app — the agent
+   cannot do this remotely. `lib/order_sinopac.py` raises at connect time so this surfaces
+   before the first order, not as a rejected order.
+3. **Enums, never strings.** An order built with the bare string `"MKT"` as `order_type` was
+   silently rejected — it never entered the broker's system and sat unnoticed for 13 hours. Use
+   `sj.OrderType.ROD`, `sj.StockPriceType.MKT`, `sj.StockOrderLot.Odd` (stocks) /
+   `sj.FuturesPriceType.MKT`, `sj.FuturesOCType.Auto` (futures).
+4. **Share counts under 1000 MUST be odd-lot orders.** A Common-lot (整股) order's `quantity` is
+   in 張 (1000-share board lots); submitting a share count (e.g. 66 shares of 2303) as a
+   Common-lot order silently vanishes. Use `order_lot=sj.StockOrderLot.Odd`
+   (verified live on Shioaji 1.5.4; the enum also has `IntradayOdd`, which the verified
+   deployment did not use).
+5. **Always confirm against order status, never trust `place_order`'s return.** Poll
+   `api.update_status(account)` + `api.list_trades()` until the order is acknowledged
+   (`Submitted`/`Filled`); `Failed`/`Cancelled`/`Inactive` means rejected — read `status.msg`.
+   All three incidents above would have been caught immediately by this check.
+6. **Warning-flagged stocks (警示股)** may require pre-funded settlement (「警示股預收條件」) —
+   surface the status message to the user instead of retrying.
+7. **Orders placed outside market hours rest as `PendingSubmit`/`PreSubmitted` until the next
+   session.** That is not a rejection — report it honestly rather than resubmitting.
 
 ---
 
@@ -18,28 +59,33 @@ Use this document when a user asks to connect their SinoPac account to BlaveClaw
 **Ask the user first:**
 > 你要交易台灣期貨（台指期 TXF）還是台灣股票？或兩者都要？
 
-- 期貨帳號 → 查 `futopt_account`，保證金用 `margin()` → `equity`
-- 股票帳號 → 查 `stock_account`，帳戶餘額用 `account_balance()`
-- 大多數用戶同一個帳號就有兩種
+- Futures account → `futopt_account`; margin via `margin()` → `equity`
+- Stock account → `stock_account`; balance via `account_balance()`
+- Most users have both under the same login
 
 ---
 
 ## Step 1 — Apply for API Key
 
-**URL:** https://eservice.sinotrade.com.tw/  
+**URL:** https://eservice.sinotrade.com.tw/
 (永豐金證券 e-MANAGER 開發人員中心)
 
 **Steps:**
-1. 登入永豐金 e-MANAGER（需要有效的永豐金帳號）
-2. 進入「API 金鑰管理」
-3. 點「申請 API 金鑰」
-4. 記錄下 `API Key` 和 `Secret Key`（頁面離開後 Secret Key 不再顯示）
-5. **數位憑證（正式環境必須）：**
-   - 下載並安裝永豐金 CA 憑證
-   - 記住憑證密碼（`sinopac_ca_passwd`）
-   - 憑證檔案路徑通常在 `~/.shioaji/` 或用戶指定位置
+1. Log in to e-MANAGER (requires an active SinoPac account)
+2. Open「API 金鑰管理」
+3. Click「申請 API 金鑰」
+4. Record the `API Key` and `Secret Key` (the Secret Key is not shown again after leaving the page)
+5. **Digital certificate (CA, required for live trading):**
+   - Download and install the SinoPac CA certificate
+   - Remember the certificate password (`sinopac_ca_passwd`)
+   - Certificate file usually lands in `~/.shioaji/` or a user-chosen path
+   - The CA password defaults to the user's national ID (身分證字號), which is why
+     `sinopac_person_id` can usually be omitted (the lib falls back to `sinopac_ca_passwd`)
+   - If live orders later fail with `CA not activated`, the user must activate the certificate
+     in SinoPac's desktop app (e-Leader/iLeader) first
 
-**Simulation Mode:** 不需要 CA 憑證，可先用 `simulation=True` 測試連線。
+**Simulation mode:** no CA needed; test connectivity with `simulation=True` — but remember
+lesson 1: simulation account state is fake.
 
 ---
 
@@ -49,10 +95,9 @@ Use this document when a user asks to connect their SinoPac account to BlaveClaw
 > 請提供你的永豐 API Key 和 Secret Key（從 e-MANAGER 取得）。
 > 如果你有數位憑證，也請告訴我憑證檔案的路徑和密碼。
 
-收到後，agent 直接寫入 `.env`，不需要用戶自行編輯：
+The agent writes `.env` directly — the user never edits files:
 
 ```python
-# Agent 執行：append keys to .env
 with open('.env', 'a') as f:
     f.write(f"\nsinopac_api_key={api_key}\n")
     f.write(f"sinopac_secret_key={secret_key}\n")
@@ -61,13 +106,14 @@ with open('.env', 'a') as f:
         f.write(f"sinopac_ca_passwd={ca_passwd}\n")
 ```
 
-確認寫入後告知用戶金鑰已存好，不會再顯示。
+For live trading, additionally set `SINOPAC_LIVE=true` — **only after the user has explicitly
+confirmed they want real orders.** Confirm the keys are stored and will not be displayed again.
 
 ---
 
 ## Step 3 — Test Connection
 
-用 `simulation=True` 驗證帳號：
+Verify the account with `simulation=True`:
 
 ```python
 import shioaji as sj
@@ -86,18 +132,23 @@ print("Futures account:", api.futopt_account)
 api.logout()
 ```
 
-**成功**：印出 accounts list，包含 stock/futopt 帳號。  
-**失敗常見原因：** API Key 未開通、密碼錯誤、系統時間偏移（誤差 > 30 秒會 timeout）。
+**Success:** prints the accounts list with stock/futopt accounts.
+**Common failures:** API key not enabled, wrong secret, system clock drift (>30 s → login
+timeout).
 
-測試正式環境（加 CA cert）：
+Live-mode connection (login, then CA activation — order matters, lesson 2):
+
 ```python
 api = sj.Shioaji(simulation=False)
 accounts = api.login(
     api_key=env['sinopac_api_key'],
     secret_key=env['sinopac_secret_key'],
-    ca_path=env.get('sinopac_ca_path'),
-    ca_passwd=env.get('sinopac_ca_passwd'),
     fetch_contract=True,
+)
+api.activate_ca(
+    ca_path=env['sinopac_ca_path'],
+    ca_passwd=env['sinopac_ca_passwd'],
+    person_id=env.get('sinopac_person_id') or env['sinopac_ca_passwd'],
 )
 ```
 
@@ -106,17 +157,17 @@ accounts = api.login(
 ## Step 4 — Check Account Equity & Positions
 
 ```python
-# 期貨帳戶淨值
+# Futures account equity
 margin = api.margin(account=api.futopt_account)
 print("Futures equity:", margin.equity, "TWD")
 
-# 股票帳戶餘額
+# Stock account balance
 balance = api.account_balance(account=api.stock_account)
 print("Stock balance:", balance[0].acc_balance if balance else 0, "TWD")
 
-# 查部位
+# Positions — unit=Share so odd-lot holdings are counted in shares
 fut_positions = api.list_positions(api.futopt_account)
-stk_positions = api.list_positions(api.stock_account)
+stk_positions = api.list_positions(api.stock_account, unit=sj.Unit.Share)
 print("Futures positions:", fut_positions)
 print("Stock positions:", stk_positions)
 ```
@@ -125,7 +176,7 @@ print("Stock positions:", stk_positions)
 
 ## Step 5 — Wire into Portfolio
 
-在 `portfolio_config.json` 的 `exchanges` 加入 sinopac 路由：
+Add a sinopac route in `portfolio_config.json`'s `exchanges`:
 
 ```json
 {
@@ -152,6 +203,10 @@ print("Stock positions:", stk_positions)
 }
 ```
 
+Wire `manager/reconciler.py`'s `get_positions()` / `place_order()` through
+`lib/order_sinopac.py` (`get_sinopac_positions` / `place_order_sinopac`) — see
+`references/lib.md` § order_sinopac.
+
 ---
 
 ## Trading Hours
@@ -164,34 +219,48 @@ print("Stock positions:", stk_positions)
 
 ---
 
-## Order Types
+## Order Placement
 
-### TXF 期貨委託
+### Stocks — use the lib, do not hand-roll
+
 ```python
-contract = api.Contracts.Futures.TXF.TXFR1  # 近月合約
-order = api.FuturesOrder(
-    action="Buy",       # "Buy" or "Sell"
-    price=0,            # 0 for market order
-    quantity=1,         # 口數
-    price_type="MKT",   # MKT = 市價
-    order_type="IOC",   # IOC for market orders
-    octype="Auto",      # Auto = 系統自動判斷開/平倉; "New" = 強制開倉; "Cover" = 強制平倉
-)
-trade = api.place_order(contract, order)
+from dotenv import dotenv_values
+from lib.order_sinopac import place_order_sinopac, get_sinopac_positions
+
+env = dotenv_values('.env')
+
+# Reconciler-style: diff in TWD (>0 buy, <0 sell); splits into ≤999-share
+# odd-lot market orders, polls each to acknowledgement, raises SinopacError
+# on rejection (with the broker's message) instead of failing silently.
+result = place_order_sinopac(env, '2330', 10_000, client_tag='twm7')
 ```
 
-### 股票委託
+For a single odd-lot order with explicit share count, use
+`place_odd_lot_order(env, symbol, 'buy'|'sell', shares, client_tag=...)`. Both functions
+return exchange-confirmed fill data (`status`, `filled_qty`, `avg_fill_price`, `msg`) —
+report those numbers, never the intent. Full API: `references/lib.md`.
+
+### TXF futures (raw Shioaji — no lib yet, not live-verified)
+
 ```python
-contract = api.Contracts.Stocks.TSE["2330"]
+contract = api.Contracts.Futures.TXF.TXFR1  # near-month, auto-rolls
 order = api.Order(
-    action="Buy",       # "Buy" or "Sell"
-    price=0,            # 0 for market order (需確認是否開放)
-    quantity=1,         # 張數（1 張 = 1000 股）
-    price_type="MKT",
-    order_type="IOC",
+    action=sj.Action.Buy,
+    price=0,                                # 0 for market order
+    quantity=1,                             # 口數
+    price_type=sj.FuturesPriceType.MKT,     # enum, never the string "MKT" (lesson 3)
+    order_type=sj.OrderType.IOC,            # IOC for market orders
+    octype=sj.FuturesOCType.Auto,           # Auto = open/close decided by system
+    account=api.futopt_account,
 )
 trade = api.place_order(contract, order)
+# MANDATORY: confirm — place_order does not raise on rejection (lesson 5)
+api.update_status(api.futopt_account)
+assert str(trade.status.status) not in ('Failed', 'Cancelled', 'Inactive'), trade.status.msg
 ```
+
+No futures deployment has run live yet — when one does, harvest the working pattern into
+`lib/order_sinopac.py` alongside the stock functions.
 
 ---
 
@@ -199,26 +268,29 @@ trade = api.place_order(contract, order)
 
 | Limit | Value |
 |-------|-------|
-| 最大並發連線 | 5 個 |
-| 報價查詢速率 | 50 次 / 5 秒 |
-| 委託速率 | 250 次 / 10 秒 |
-| 超速處置 | 暫停 1 分鐘 |
-| 時間誤差上限 | 30,000 ms（超過登入 timeout） |
+| Max concurrent connections | 5 |
+| Quote query rate | 50 / 5 s |
+| Order rate | 250 / 10 s |
+| Over-rate penalty | 1-minute suspension |
+| Max clock drift | 30,000 ms (login timeout beyond this) |
 
-**注意事項：**
-- 模擬模式 (`simulation=True`) 無法收到委託回報 callbacks；正式帳號才有
-- `fetch_contract=True` 登入時下載所有合約資料（約 5-10 秒），必須等完成才能查合約
-- 同一帳號同時只能有一個 Shioaji 連線；多程序需各自 login/logout
-- 系統時間必須準確；NTP 同步或手動校正可解決 timeout 問題
-- 夜盤台指期結算後隔天會換近月合約代碼，`TXFR1` 永遠指向最近月（自動 roll）
+**Notes:**
+- Simulation mode (`simulation=True`) receives no order-report callbacks; only live accounts do
+- `fetch_contract=True` downloads all contract data at login (~5-10 s); contract lookups fail
+  until it completes
+- One Shioaji connection per account at a time; multi-process setups must each login/logout
+- System clock must be accurate — NTP sync fixes login timeouts
+- `TXFR1` always points to the near-month contract (auto-rolls after settlement)
 
 ---
 
 ## Verification Checklist for Agent
 
-在確認用戶完成設定後，依序執行：
-1. 連線測試（simulation mode）→ 看到 accounts list
-2. 查詢帳戶淨值 → 確認 equity > 0
-3. 查詢部位 → 確認無例外
-4. 執行 `python3 manager/snapshot.py` → Telegram 收到含 sinopac equity 的日報
-5. 用戶確認後，方可設定 reconciler 上線（參考 `references/deployment.md`）
+After the user completes setup, in order:
+1. Connection test (simulation mode) → accounts list visible
+2. Query account equity → confirm equity > 0
+3. Query positions → no exceptions
+4. Run `python3 manager/snapshot.py` → Telegram daily report includes sinopac equity
+5. Only after the user confirms: enable the reconciler (see `references/deployment.md`).
+   Live orders go through `lib/order_sinopac.py`, which requires `SINOPAC_LIVE=true` and an
+   activated CA certificate (lessons 1-2).
