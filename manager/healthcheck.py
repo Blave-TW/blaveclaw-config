@@ -69,17 +69,22 @@ def _read_crontab():
 def _expect_minutes_from_cron(line):
     """Conservative expected-interval guess from a cron expression.
 
-    */N in the minute field → N; hourly → 60; daily → 1440. Any day-of-month /
-    day-of-week restriction → 4320 (3 days) so weekday-only schedules never
-    false-alarm across a weekend. When unsure, guess LONG — a late alert beats
-    a false one.
+    */N in the minute field → N; hourly → 60; daily → 1440. Restricted
+    schedules are tiered by their longest possible gap: month-restricted →
+    527040 (yearly — effectively disables staleness checks; the signal is
+    meaningless for rare jobs), day-of-month → 44640 (monthly), day-of-week →
+    10080 (weekly). When unsure, guess LONG — a late alert beats a false one.
     """
     fields = line.split()
     if len(fields) < 5:
         return 1440
-    minute, hour, dom, _, dow = fields[:5]
-    if dom != "*" or dow != "*":
-        return 4320
+    minute, hour, dom, month, dow = fields[:5]
+    if month != "*":
+        return 527040
+    if dom != "*":
+        return 44640
+    if dow != "*":
+        return 10080
     m = re.fullmatch(r"\*/(\d+)", minute)
     if m and hour == "*":
         return max(int(m.group(1)), 1)
