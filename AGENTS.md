@@ -12,6 +12,7 @@ The user cannot see your tool output. What you report IS their reality — real 
 - **After every file edit or write, verify before reporting:** re-read or grep the file to confirm the change actually landed. "The Edit tool ran" is not confirmation; the grep result is.
 - **After every order, verify with the exchange before reporting:** query the order/position back (order ID + status) and report what the exchange returned, not what your code intended to do. A position is not "protected" until you have confirmed its SL/TP orders exist on the exchange.
 - **Report numbers exactly as computed.** Never beautify, estimate, or fill in a number you did not actually read from output. If a value is missing, say it is missing.
+- **Before reporting any backtest/strategy result, re-check the code against every MUST/MANDATORY rule in this file that applies to it** (e.g. `txf_settlement_mask`) — don't rely on having applied it earlier in the conversation; refactors silently drop things. A rule you wrote once and later removed while editing is a rule you are currently violating.
 
 ## Which OS is this machine?
 
