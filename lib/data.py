@@ -270,6 +270,32 @@ def fetch_kline(symbol, interval, start, end, headers):
     return _sanity_check_ohlc(df, f'{symbol} {interval} kline')
 
 
+def fetch_kline_batch(symbols, interval, start, end, headers):
+    """Batch fetch OHLCV kline for many symbols via /kline/batch (chunk_size=100).
+    Returns dict {symbol: DataFrame(Open, High, Low, Close, Volume)}.
+
+    Uses the same monthly cache dir naming as fetch_kline ('kline_{interval}_{symbol}')
+    so single-symbol and batch calls share cache — a symbol already cached via
+    fetch_kline is a warm hit here too, and vice versa. Warm ids are extended through
+    the batch endpoint too (not one call per symbol) — see _fetch_batch_cached."""
+    def _parse(records):
+        df = pd.DataFrame(records)
+        df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
+        df = df.set_index('time').sort_index()
+        df = df[~df.index.duplicated(keep='first')]
+        df = df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'})
+        df['Volume'] = 0
+        return df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float)
+
+    results = _fetch_batch_cached(
+        f'kline_{interval}', f'{BASE}/kline/batch?period={interval}', 'symbols',
+        lambda sid, s, e, hdrs: _fetch_kline_raw(sid, interval, s, e, hdrs),
+        _parse, symbols, start, end, headers,
+        chunk_size=100, start_param='start_date', end_param='end_date',
+    )
+    return {sid: _sanity_check_ohlc(df, f'{sid} {interval} kline') for sid, df in results.items()}
+
+
 # ── Alpha data ────────────────────────────────────────────────────────────────
 
 def _fetch_alpha_raw(endpoint, params, headers, start, end):
@@ -968,7 +994,7 @@ def _mark_empty_months(prefix, sid, start, end):
 
 
 def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids, start, end, headers,
-                         chunk_size=50, mark_empty_months=True):
+                         chunk_size=50, mark_empty_months=True, start_param='start', end_param='end'):
     """Shared batch fetcher for monthly-cached datasets (Taiwan stocks and stock futures).
 
     Phase 1: ids that already have a local cache are extended (current-month delta).
@@ -1005,7 +1031,7 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
         def _fetch_chunk(idx, chunk):
             partial = {}
             try:
-                params = {id_param_name: ','.join(chunk), 'start': range_start, 'end': range_end}
+                params = {id_param_name: ','.join(chunk), start_param: range_start, end_param: range_end}
                 r = _retry_get(batch_url, headers=headers, params=params, timeout=120)
                 body = r.json()
                 failed = body.get('failed', [])
@@ -1013,7 +1039,8 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
                     print(f'  [batch] {batch_url} rate-limited after retries, dropped: {failed}')
                 for _id, records in body.get('data', {}).items():
                     if records:
-                        partial[_id] = parse_fn(records)
+                        df = _normalise_index(parse_fn(records))
+                        partial[_id] = df[~df.index.duplicated(keep='last')].sort_index()
             except Exception as e:
                 print(f'  [batch] {batch_url} chunk {idx + 1} error: {e}')
             return partial
@@ -1067,9 +1094,14 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
                 uncached.append(_id)
 
     fetched = _fetch_batch_range(uncached, start, end)
+    end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
+    start_ts = pd.Timestamp(start)
+    end_ts = pd.Timestamp(end_str) + pd.Timedelta(days=1)
     for _id, df in fetched.items():
         _save_monthly(prefix, {'id': _id}, df)
-        results[_id] = df
+        # match _extend_cache_monthly's own [start, end] clamp so both phases return
+        # the same range regardless of how much extra the raw fetch pulled back
+        results[_id] = df[(df.index >= start_ts) & (df.index < end_ts)]
     # Mark every in-range past month with no data as an empty parquet, so the next
     # run is a cache hit instead of re-fetching the empty months.
     if start and mark_empty_months:
