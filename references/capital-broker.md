@@ -153,9 +153,10 @@ the desktop for the user to double-click.**
    comtypes cache** (`site-packages/comtypes/gen/SKCOMLib.py` + the GUID-named module) — stale
    generated wrappers cause silent quote/order anomalies.
 
-Python packages: `pip install comtypes pywin32`. BlaveClaw Windows workspaces ship Python 3.14 —
-comtypes/pywin32 support there is unverified; if imports fail, install Python 3.12 x64 alongside
-and use it for this integration.
+Python packages: `pip install comtypes pywin32`. Verified on a BlaveClaw Windows workspace's
+Python 3.14 (2026-07-17, medium_win POC box): comtypes 1.4.16 + pywin32 312 install cleanly and
+COM CreateObject / Dispatch / message pump all work. (SKCOM.dll itself untested there — the zip
+is login-gated; confirm `GetModule` on first real onboarding.)
 
 ---
 
