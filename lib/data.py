@@ -971,12 +971,19 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
                          chunk_size=50, mark_empty_months=True):
     """Shared batch fetcher for monthly-cached datasets (Taiwan stocks and stock futures).
 
-    Phase 1: ids that already have a local cache are extended (current-month delta)
-             concurrently — each one tops up its own parquet, so they parallelise freely.
-    Phase 2: the rest are fetched via batch_url, chunk_size ids per request, with the
-             chunks issued concurrently.
+    Phase 1: ids that already have a local cache are extended (current-month delta).
+             The delta itself is fetched through batch_url in chunk_size-id chunks — NOT
+             one request per id — then handed to _extend_cache_monthly for the merge/write.
+             (Previously this phase called raw_fn per id individually: on a warm run with
+             ids in the hundreds that meant that many single-id HTTP calls, each paying
+             api_plan_required's full auth cost — bcrypt check + 2 uncached MySQL lookups
+             + 2 Redis rate-limit hits — independently, which is what actually made warm
+             runs slow, not the local parquet reads. See twstock_momentum backtest timeout,
+             2026-07.)
+    Phase 2: ids with no local cache yet are fetched the same way, chunk_size ids per
+             request, full requested range.
 
-    raw_fn(id, start, end, headers) -> DataFrame   single-id fetch used by the cache extender
+    raw_fn(id, start, end, headers) -> DataFrame   single-id fallback (missing past months)
     parse_fn(records) -> DataFrame                 one id's batch records -> cached frame
     """
     results, uncached = {}, []
@@ -989,10 +996,64 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
         else:
             uncached.append(_id)
 
+    def _fetch_batch_range(id_list, range_start, range_end):
+        """chunk_size ids per request, chunks issued concurrently. Returns {id: DataFrame},
+        missing/empty ids simply absent (caller treats absence as 'no data')."""
+        out = {}
+        chunks = [id_list[i:i + chunk_size] for i in range(0, len(id_list), chunk_size)]
+
+        def _fetch_chunk(idx, chunk):
+            partial = {}
+            try:
+                params = {id_param_name: ','.join(chunk), 'start': range_start, 'end': range_end}
+                r = _retry_get(batch_url, headers=headers, params=params, timeout=120)
+                body = r.json()
+                failed = body.get('failed', [])
+                if failed:
+                    print(f'  [batch] {batch_url} rate-limited after retries, dropped: {failed}')
+                for _id, records in body.get('data', {}).items():
+                    if records:
+                        partial[_id] = parse_fn(records)
+            except Exception as e:
+                print(f'  [batch] {batch_url} chunk {idx + 1} error: {e}')
+            return partial
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(_fetch_chunk, idx, chunk) for idx, chunk in enumerate(chunks)]
+            for future in as_completed(futures):
+                out.update(future.result())
+        return out
+
+    # Pre-fetch the current-month delta for every to_extend id in one batched pass
+    # instead of per-id inside _extend_one below. _extend_cache_monthly always asks
+    # for (last_cached_ts, tomorrow) which falls inside the current month, so a single
+    # current-month-start..tomorrow batch fetch covers it — the extra days before each
+    # id's own last_ts are harmless, _extend_cache_monthly dedupes by index (keep='last').
+    current_month_batch = {}
+    if to_extend:
+        now = datetime.utcnow()
+        current_ym = now.strftime('%Y-%m')
+        tomorrow = (now + timedelta(days=1)).strftime('%Y-%m-%d')
+        current_month_batch = _fetch_batch_range(to_extend, f'{current_ym}-01', tomorrow)
+
+    def _make_fetch_fn(_id):
+        def _fetch(s, e):
+            # Present-month delta (the common case): serve from the pre-fetched batch
+            # instead of an individual single-id call.
+            if s[:7] == datetime.utcnow().strftime('%Y-%m'):
+                df = current_month_batch.get(_id)
+                if df is None:
+                    return pd.DataFrame()
+                return df[df.index >= s]
+            # Missing past months (rare — a partially-cached id) fall back to the
+            # single-id fetch; not worth batching for an edge case.
+            return raw_fn(_id, s, e, headers)
+        return _fetch
+
     def _extend_one(_id):
         return _extend_cache_monthly(
             prefix, {'id': _id},
-            lambda s, e, _id=_id: raw_fn(_id, s, e, headers),
+            _make_fetch_fn(_id),
             start, end,
         )
 
@@ -1005,41 +1066,15 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
             except Exception:
                 uncached.append(_id)
 
-    chunks = [uncached[i:i + chunk_size] for i in range(0, len(uncached), chunk_size)]
-
-    def _fetch_chunk(idx, chunk):
-        partial = {}
-        try:
-            params = {id_param_name: ','.join(chunk)}
-            if start:
-                params['start'] = start
-            if end:
-                params['end'] = end
-            r = _retry_get(batch_url, headers=headers, params=params, timeout=120)
-            body = r.json()
-            failed = body.get('failed', [])
-            if failed:
-                print(f'  [batch] {batch_url} rate-limited after retries, dropped: {failed}')
-            batch_data = body.get('data', {})
-            for _id, records in batch_data.items():
-                if not records:
-                    continue
-                df = parse_fn(records)
-                _save_monthly(prefix, {'id': _id}, df)
-                partial[_id] = df
-            # Mark every in-range past month with no data as an empty parquet, so
-            # the next run is a cache hit instead of re-fetching the empty months.
-            if start and mark_empty_months:
-                for _id in chunk:
-                    _mark_empty_months(prefix, _id, start, end)
-        except Exception as e:
-            print(f'  [batch] {batch_url} chunk {idx + 1} error: {e}')
-        return partial
-
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = [pool.submit(_fetch_chunk, idx, chunk) for idx, chunk in enumerate(chunks)]
-        for future in as_completed(futures):
-            results.update(future.result())
+    fetched = _fetch_batch_range(uncached, start, end)
+    for _id, df in fetched.items():
+        _save_monthly(prefix, {'id': _id}, df)
+        results[_id] = df
+    # Mark every in-range past month with no data as an empty parquet, so the next
+    # run is a cache hit instead of re-fetching the empty months.
+    if start and mark_empty_months:
+        for _id in uncached:
+            _mark_empty_months(prefix, _id, start, end)
 
     return results
 
