@@ -102,6 +102,8 @@ Key rules:
 
 **The user is on Telegram — the ONLY way to let them SEE an image is `send_photo`.** Standard flow: fetch → plot → `plt.savefig(path)` → `send_photo(path)`. Ad-hoc charts → `tmp/` (workspace-relative — works on both Linux and Windows); strategy artifacts → `strategies/{name}/`. Note: `pnl.png` and `heatmap.png` are auto-sent by `run()` and `plot_heatmap()`.
 
+**Never confuse looking at an image with sending it.** Using `read` on a chart file only feeds it to your own vision — the user never receives it. Only report "sent"/"傳送" after `send_photo` actually ran; if it wasn't called, call it before replying.
+
 All chart text must be in English — Chinese characters render as garbled boxes. `tight_layout()` does not accept `hspace`/`wspace` on this matplotlib version. See `references/charts.md` for code examples.
 
 ## Shell Commands
