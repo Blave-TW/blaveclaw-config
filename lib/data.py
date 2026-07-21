@@ -34,13 +34,24 @@ _CACHE_DIR = Path(__file__).parent.parent / 'cache'
 def _retry_get(url, max_retries=6, **kwargs):
     """GET with exponential backoff on transient failures (2, 4, 8, 16, 32, 64 s).
 
-    Retries 429 (Blave per-IP rate limit, 500/5min) and 5xx (incl. 503, which the
-    API returns when upstream FinMind itself rate-limits). 403 is NOT retried — the
-    API returns it only for a missing/invalid api-key, a permanent error that
-    backing off would just delay surfacing.
+    Retries 429 (Blave per-IP rate limit, 500/5min), 5xx (incl. 503, which the
+    API returns when upstream FinMind itself rate-limits), and connection/read
+    timeouts (a slow batch endpoint under load — e.g. a big multi-symbol crypto
+    kline request — reads exactly like this; previously an unlucky timeout just
+    silently dropped that whole chunk's symbols with no retry). 403 is NOT
+    retried — the API returns it only for a missing/invalid api-key, a permanent
+    error that backing off would just delay surfacing.
     """
     for attempt in range(max_retries):
-        r = requests.get(url, **kwargs)
+        try:
+            r = requests.get(url, **kwargs)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            if attempt == max_retries - 1:
+                raise
+            wait = 2 ** (attempt + 1)
+            print(f"  {type(e).__name__} transient — retrying in {wait}s ({url.split('/')[-2]}/{url.split('/')[-1]})")
+            time.sleep(wait)
+            continue
         if r.status_code != 429 and r.status_code < 500:
             r.raise_for_status()
             return r
@@ -271,7 +282,7 @@ def fetch_kline(symbol, interval, start, end, headers):
 
 
 def fetch_kline_batch(symbols, interval, start, end, headers):
-    """Batch fetch OHLCV kline for many symbols via /kline/batch (chunk_size=100).
+    """Batch fetch OHLCV kline for many symbols via /kline/batch (chunk_size=20).
     Returns dict {symbol: DataFrame(Open, High, Low, Close, Volume)}.
 
     Uses the same monthly cache dir naming as fetch_kline ('kline_{interval}_{symbol}')
@@ -291,7 +302,7 @@ def fetch_kline_batch(symbols, interval, start, end, headers):
         f'kline_{interval}', f'{BASE}/kline/batch?period={interval}', 'symbols',
         lambda sid, s, e, hdrs: _fetch_kline_raw(sid, interval, s, e, hdrs),
         _parse, symbols, start, end, headers,
-        chunk_size=100, start_param='start_date', end_param='end_date',
+        chunk_size=20, start_param='start_date', end_param='end_date', date_chunk_days=365,
     )
     return {sid: _sanity_check_ohlc(df, f'{sid} {interval} kline') for sid, df in results.items()}
 
@@ -994,7 +1005,8 @@ def _mark_empty_months(prefix, sid, start, end):
 
 
 def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids, start, end, headers,
-                         chunk_size=50, mark_empty_months=True, start_param='start', end_param='end'):
+                         chunk_size=50, mark_empty_months=True, start_param='start', end_param='end',
+                         date_chunk_days=None):
     """Shared batch fetcher for monthly-cached datasets (Taiwan stocks and stock futures).
 
     Phase 1: ids that already have a local cache are extended (current-month delta).
@@ -1022,16 +1034,36 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
         else:
             uncached.append(_id)
 
-    def _fetch_batch_range(id_list, range_start, range_end):
-        """chunk_size ids per request, chunks issued concurrently. Returns {id: DataFrame},
-        missing/empty ids simply absent (caller treats absence as 'no data')."""
-        out = {}
-        chunks = [id_list[i:i + chunk_size] for i in range(0, len(id_list), chunk_size)]
+    def _date_spans(range_start, range_end):
+        """Split [range_start, range_end] into <= date_chunk_days pieces. Some batch
+        endpoints (crypto /kline*) silently clamp an over-long single request to their
+        own max window instead of erroring — chunking client-side is the only way to
+        actually get the full requested range back."""
+        if not date_chunk_days:
+            return [(range_start, range_end)]
+        s = datetime.strptime(range_start, '%Y-%m-%d')
+        e = datetime.utcnow() if not range_end else datetime.strptime(range_end, '%Y-%m-%d')
+        spans, cursor = [], s
+        while cursor <= e:
+            span_end = min(cursor + timedelta(days=date_chunk_days), e)
+            spans.append((cursor.strftime('%Y-%m-%d'), span_end.strftime('%Y-%m-%d')))
+            cursor = span_end + timedelta(days=1)
+        return spans
 
-        def _fetch_chunk(idx, chunk):
+    def _fetch_batch_range(id_list, range_start, range_end):
+        """chunk_size ids per request x date_chunk_days-sized date spans, all issued
+        concurrently. Returns {id: DataFrame} merged across spans, missing/empty ids
+        simply absent (caller treats absence as 'no data')."""
+        out = {}
+        id_chunks = [id_list[i:i + chunk_size] for i in range(0, len(id_list), chunk_size)]
+        date_spans = _date_spans(range_start, range_end)
+        jobs = [(idx, chunk, span) for idx, chunk in enumerate(id_chunks) for span in date_spans]
+
+        def _fetch_chunk(idx, chunk, span):
+            span_start, span_end = span
             partial = {}
             try:
-                params = {id_param_name: ','.join(chunk), start_param: range_start, end_param: range_end}
+                params = {id_param_name: ','.join(chunk), start_param: span_start, end_param: span_end}
                 r = _retry_get(batch_url, headers=headers, params=params, timeout=120)
                 body = r.json()
                 failed = body.get('failed', [])
@@ -1039,16 +1071,19 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
                     print(f'  [batch] {batch_url} rate-limited after retries, dropped: {failed}')
                 for _id, records in body.get('data', {}).items():
                     if records:
-                        df = _normalise_index(parse_fn(records))
-                        partial[_id] = df[~df.index.duplicated(keep='last')].sort_index()
+                        partial[_id] = _normalise_index(parse_fn(records))
             except Exception as e:
-                print(f'  [batch] {batch_url} chunk {idx + 1} error: {e}')
+                print(f'  [batch] {batch_url} chunk {idx + 1} {span}: error: {e}')
             return partial
 
         with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = [pool.submit(_fetch_chunk, idx, chunk) for idx, chunk in enumerate(chunks)]
+            futures = [pool.submit(_fetch_chunk, idx, chunk, span) for idx, chunk, span in jobs]
             for future in as_completed(futures):
-                out.update(future.result())
+                for _id, df in future.result().items():
+                    out[_id] = pd.concat([out[_id], df]) if _id in out else df
+
+        for _id, df in out.items():
+            out[_id] = df[~df.index.duplicated(keep='last')].sort_index()
         return out
 
     # Pre-fetch the current-month delta for every to_extend id in one batched pass
