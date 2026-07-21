@@ -13,7 +13,7 @@ Tell your agent:
 > - `AGENTS.md`, `CLAUDE.md` — replace wholesale (these are config, not user-edited)
 > - `references/` — for each file, check if a local version exists; if it does, read both and patch in anything missing; if it does not, copy it in
 > - `strategies/TEMPLATE_A.py`, `strategies/TEMPLATE_C.py` — replace wholesale
-> - `lib/` — add any canonical files that are missing locally; **never touch** `lib/order_*.py` or `lib/account_*.py` (user-created); if you modified a canonical file (e.g. `lib/runner.py`), read both versions and manually merge the new changes in
+> - `lib/` — add any canonical files that are missing locally; if you modified a canonical file (e.g. `lib/runner.py`), read both versions and manually merge the new changes in. For `lib/order_*.py` / `lib/account_*.py`, the name alone doesn't tell you if it's user-created: if that exact filename exists in the reference clone (e.g. `order_bingx.py`, `order_sinopac.py`, `account_bingx.py`, `account_TEMPLATE.py`), merge it like any other canonical file; **never touch** one that does not exist in the reference clone — that's the user's own exchange integration
 > - `manager/` — replace wholesale (user edits live in `portfolio_config.json`, not in the scripts)
 > - `examples/` — replace wholesale
 >

@@ -178,11 +178,9 @@ before completing all 5 steps (fetch /v1/models → write config → verify id �
 tell user → restart gateway). Never use a memorized/guessed model id (e.g.
 "claude-sonnet-4") — model ids change over time; always fetch fresh.
 
-## Updating Workspace Files from GitHub
+## Updating Workspace Files (Config + Skill)
 
-The canonical source is https://github.com/Blave-TW/blaveclaw-config. When the user shares a link, treat it as **reference material** — read it and selectively incorporate what is relevant. Do NOT overwrite local files wholesale.
-
-`lib/` may contain user-customised helpers (exchange order logic, custom fetchers) not in the repo. When in doubt, add missing functions rather than replacing the file.
+When the user says anything like 更新 blaveclaw / 更新系統 / update blaveclaw / update workspace — no link required — follow `references/updating.md` exactly.
 
 ## Response Style
 
