@@ -58,6 +58,40 @@ const PATCHES = [
 \t\t}
 \t\tconst needsSeparateText = Boolean(followUpText);`,
 	},
+	// #98220 / #101250: createReplySessionInitializationRevision compares the ENTIRE
+	// session-store entry (JSON.stringify of all ~35 fields — including background
+	// bookkeeping like updatedAt/status/startedAt/endedAt/token usage that gets
+	// rewritten on every turn). Any such write between snapshot and commit makes the
+	// revision look "stale" even though session identity never changed, so reply-
+	// session init throws "reply session initialization conflicted" and the Telegram
+	// gateway spool-retries the same update forever — session is effectively dead
+	// until the gateway is restarted, with no auto-recovery and no user-visible error
+	// (message just goes unanswered). Reproduces on plain conversation, not just
+	// slash commands or rapid-fire bursts; upstream reports show it can trigger
+	// after as little as one turn.
+	// Fix: narrow the revision to sessionId + sessionFile only (the only fields that
+	// actually identify session identity), backported verbatim from the equivalent
+	// logic already shipped in openclaw 2026.7.1 (upstream PR #96847 + the 7.1
+	// session-accessor). We are NOT upgrading to 7.1 (2026-07-16 eval: skip, 60+
+	// crash-loop regressions upgrading long-lived 6.11 installs), so this stays a
+	// standalone backport until we move to a stable release that already has it.
+	// Verified against openclaw 2026.6.11 on a throwaway Lightsail test instance
+	// (uid 29026, 2026-07-22): pre-patch reproduced a 60+ minute wedge from normal
+	// chat (no slash command involved); post-patch, 0 conflicts across a 10-message
+	// rapid-fire burst that reliably wedged the pre-patch build within one exchange.
+	{
+		id: "session-init-revision-narrow",
+		old: `function createReplySessionInitializationRevision(entry) {
+\treturn JSON.stringify(entry ?? null);
+}`,
+		new: `function createReplySessionInitializationRevision(entry) {
+\t// Blave patch session-init-revision-narrow (openclaw #98220, fixed upstream in 7.1)
+\tif (!entry) return JSON.stringify(null);
+\tconst revisionEntry = { sessionId: entry.sessionId };
+\tif (entry.sessionFile !== void 0) revisionEntry.sessionFile = entry.sessionFile;
+\treturn JSON.stringify(revisionEntry);
+}`,
+	},
 ];
 
 function log(msg) {
