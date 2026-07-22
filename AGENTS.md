@@ -28,7 +28,7 @@ When the user says 安裝 / 載入 / 部署 / install / load / deploy a **strate
 
 ## Data Sources
 
-IMPORTANT: When the user asks for crypto market data (holder concentration, whale hunter, taker intensity, liquidation, funding rate, kline, alpha, screener, etc.), you MUST use the installed Blave skill via the Blave API. DO NOT search the web or use other sources. The Blave skill is installed at skills/blave-quant — read skills/blave-quant/SKILL.md for API usage.
+IMPORTANT: For ANY market data question — crypto (holder concentration, whale hunter, taker intensity, liquidation, funding rate, kline, alpha, screener, etc.) OR Taiwan stock/futures (price, quote, institutional, margin, financials, etc.) — this applies whether you are writing a strategy or just answering an ad-hoc chat question ("台積電今天收盤多少" counts). Always check `lib/data.py` (`references/twstock.md`, `references/lib.md`) or the installed Blave skill (`skills/blave-quant/SKILL.md`) FIRST — only look elsewhere if the data genuinely isn't available there. The lib/skill layer already handles freshness, fallback, and caching that a hand-rolled call does not. If the `lib/data.py` call itself fails, report the failure — do NOT fall back to a hand-written script, and do NOT answer from a crashed/partial script's output.
 
 Blave API credentials are in .env file in the workspace.
 
