@@ -123,7 +123,8 @@ Response: `[{id, title, description, category, shared_at}, ...]`
 
 ## Strategy report (performance data)
 
-> **Admin only (user_id == 1)** for official strategies. Community strategy owners can submit their own report.
+> **Admin only (user_id == 1)** — for ALL strategies, official or community. Sellers cannot submit
+> their own report; they send numbers to admin out-of-band.
 
 Get backtest performance for a strategy:
 ```
@@ -131,26 +132,21 @@ GET /openclaw/marketplace/strategies/{id}/report
 ```
 Response: `{total_return, annual_return, sharpe, max_drawdown, pnl_image_url, backtest_start, backtest_end}`
 
-Submit metrics:
+Submit metrics + optional P&L chart image in one call:
 ```
 POST /openclaw/marketplace/strategies/{id}/report
-Body: {symbol, interval, total_return, annual_return, sharpe, max_drawdown, backtest_start, backtest_end}
-```
-All fields required. **Do not include `pnl_curve`** — P&L chart is displayed as an uploaded image, not rendered from data.
-
-Upload P&L chart image (displayed in strategy modal):
-```
-POST /openclaw/marketplace/strategies/{id}/report/image
 Content-Type: multipart/form-data
-Field: image = pnl.png
+Fields: total_return, annual_return, sharpe, max_drawdown, backtest_start, backtest_end (all required)
+        symbol, interval (optional)
+        image = pnl.png (optional file field)
 ```
-Response: `{"status": "ok", "pnl_image_url": "https://..."}`
+**Do not include `pnl_curve`** — P&L chart is displayed as an uploaded image, not rendered from data.
+Response: `{"status": "ok", "strategy_id": ..., "pnl_image_url": "https://..." | null}`
 
 **Admin flow — after running backtest:**
 1. `python3 strategies/{name}/strategy.py` → generates `strategies/{name}/pnl.png` + `strategies/{name}/stats.json`
 2. Read `stats.json` for metrics. Compute `annual_return` from total return + date range if not present.
-3. POST metrics to `POST /strategies/{id}/report`
-4. POST `strategies/{name}/pnl.png` to `POST /strategies/{id}/report/image`
+3. POST metrics + `strategies/{name}/pnl.png` together to `POST /strategies/{id}/report` (multipart)
 
 ## Admin endpoints (user_id == 1 only)
 
