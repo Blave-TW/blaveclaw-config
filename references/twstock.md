@@ -1,28 +1,30 @@
 # 台股資料 — Taiwan Stock Data
 
-> 台股資料（日K、三大法人、融資融券、股權分級、財報、月營收、分點買賣超）由 [FinMind](https://finmindtrade.com) 提供。
+> 台股資料（日K、三大法人、融資融券、股權分級、財報、月營收、分點買賣超）由 [FinMind](https://finmindtrade.com) 提供；
+> 股票清單/基本資料（industry_code、listing_date）例外，來自 TWSE/TPEx 官方公司資料，非 FinMind。
 
 **⚠️ 一律優先用下面這些 `lib/data.py` 函式(不只是寫策略時,單純聊天問答也一樣),函式裡沒有的資料才去外面找。** `lib/data.py` 已經做好新鮮度、fallback、cache,手寫腳本沒有這層保護,拿到舊資料或直接崩潰都有可能。若 `lib/data.py` 的呼叫本身失敗,回報失敗,不要改用手寫腳本、更不要拿崩潰前的部分輸出當答案。
 
 ## 股票池（Universe）建立
 
-使用 TWSE 公開 API（無需認證）：
+用 `fetch_twstock_list(headers)`（見 `lib/data.py`）—— 回傳 DataFrame，index 為 `stock_id`，
+欄位 `name`、`close`、`industry_code`、`listing_date`（`YYYY-MM-DD`）。涵蓋上市 + 上櫃全市場
+（含 ETF，`industry_code`/`listing_date` 為 `None`）。基本資料一天更新一次，函式內建 1 天快取。
 
 ```python
-import requests
+df = fetch_twstock_list(headers)
 
-r = requests.get('https://openapi.twse.com.tw/v1/opendata/t187ap03_L', timeout=15)
+# 全部普通股（排除 ETF / 無產業別的證券）
+universe = df[df['industry_code'].notna()].index.tolist()
 
-# 全部上市普通股（排除 ETF / 權證）
-universe = [item['公司代號'].strip() for item in r.json()]
-
-# 依產業別篩選（例如半導體 '20' + 電腦及周邊 '21'）
-tech = [item['公司代號'].strip() for item in r.json() if item['產業別'] in ('20', '21')]
+# 依產業別篩選（例如半導體 '24' + 電腦及周邊 '25'）
+tech = df[df['industry_code'].isin(['24', '25'])].index.tolist()
 ```
 
-欄位：`公司代號`（需 `.strip()`）、`公司簡稱`、`產業別`、`上市日期`（YYYYMMDD）
-
-產業別代碼速查：`20` 半導體、`21` 電腦及周邊、`22` 光電、`23` 通信網路、`24` 電子零組件、`25` 電子通路、`26` 資訊服務、`27` 其他電子、`33` 金融保險、`31` 航運
+`industry_code` 是 TWSE/TPEx 原始數字代碼（passthrough，不是解碼過的名稱）。常用代碼：
+`15` 航運業、`17` 金融保險業、`22` 生技醫療業、`24` 半導體業、`25` 電腦及週邊設備業、
+`26` 光電業、`27` 通信網路業、`28` 電子零組件業、`29` 電子通路業、`30` 資訊服務業、
+`31` 其他電子業（完整清單見 TWSE/TPEx 公司基本資料;上面這份是常見科技/金融產業子集,不是全部)。
 
 **⚠️ Universe 抽樣規則 — 必須分散產業**
 
@@ -31,13 +33,13 @@ tech = [item['公司代號'].strip() for item in r.json() if item['產業別'] i
 ```python
 import random, collections
 
-r = requests.get('https://openapi.twse.com.tw/v1/opendata/t187ap03_L', timeout=15)
-stocks = r.json()
+df = fetch_twstock_list(headers)
+stocks = df[df['industry_code'].notna()]  # 排除 ETF 等無產業別的證券
 
 # 依產業別分組
 by_sector = collections.defaultdict(list)
-for item in stocks:
-    by_sector[item['產業別']].append(item['公司代號'].strip())
+for stock_id, row in stocks.iterrows():
+    by_sector[row['industry_code']].append(stock_id)
 
 # 每個產業等比例抽樣，合計 N 支
 def sample_by_sector(by_sector, total=100, seed=42):
@@ -57,6 +59,10 @@ universe = sample_by_sector(by_sector, total=100)
 ```
 
 固定 `seed` 確保回測可重現。若用戶有指定產業，改用產業篩選後再抽樣。
+
+單支股票基本資料查詢用 `fetch_twstock_info(stock_id, headers)` —— 回傳
+`{stock_id, name, close, industry_code, listing_date}` 或 `None`（查無此股）；內部直接查
+`fetch_twstock_list` 的快取結果，不另外打 API。
 
 ---
 

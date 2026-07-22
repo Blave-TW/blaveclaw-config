@@ -932,6 +932,42 @@ def fetch_twstock_monthly_revenue(stock_id, headers):
     return _fetch_fundamental('twstock_rev', 'monthly_revenue', stock_id, headers)
 
 
+def _twstock_list_cache_path():
+    return _CACHE_DIR / 'twstock_list.parquet'
+
+
+def fetch_twstock_list(headers):
+    """全市場股票清單（上市+上櫃，含 ETF）。DataFrame indexed by stock_id, columns:
+    name, close, industry_code, listing_date (YYYY-MM-DD). Basic company data, not a
+    time series — refreshed once a day: single-file cache like fundamentals (see
+    references/cache.md), just 1-day TTL instead of 30-day.
+    ETFs and other non-company securities have industry_code/listing_date = None/NaN
+    (use .notna() to filter, not `is not None` — parquet round-trips None as NaN).
+    industry_code is TWSE/TPEx's raw numeric 產業別 code (e.g. '24'=半導體業), not a
+    decoded name — group/filter by it, don't assume a fixed label mapping."""
+    path = _twstock_list_cache_path()
+    df = _load_fundamental_cache(path, max_age_days=1)
+    if df is not None:
+        return df
+    r = _retry_get(f'{BASE}/studio/market/twstock/list', headers=headers, timeout=60)
+    data = r.json().get('data', [])
+    if not data:
+        return pd.DataFrame()
+    df = pd.DataFrame(data).set_index('stock_id')
+    _save_fundamental_cache(path, df)
+    return df
+
+
+def fetch_twstock_info(stock_id, headers):
+    """單支股票基本資料: {stock_id, name, close, industry_code, listing_date}, or None
+    if not currently listed. Looks up within fetch_twstock_list's cached universe
+    (same 1-day-fresh data) instead of a separate network call."""
+    df = fetch_twstock_list(headers)
+    if df.empty or stock_id not in df.index:
+        return None
+    return {'stock_id': stock_id, **df.loc[stock_id].to_dict()}
+
+
 def _fetch_fundamental_batch(prefix, endpoint, stock_ids, headers):
     """Batch fetch fundamental data. Returns dict {stock_id: DataFrame}.
     Uses cache first; fetches uncached stocks in chunks of 50 via batch API."""
