@@ -4,7 +4,8 @@
 # Telegram. Cron alone silently swallows non-zero exits; this is the only
 # layer that can catch a failure the Python side never got a chance to.
 #
-# Usage (in crontab): cd /root/.openclaw/workspace && bash manager/run_strategy.sh <strategy_name>
+# Usage (in crontab): cd $BLAVECLAW_HOME/workspace && bash manager/run_strategy.sh <strategy_name>
+# ($BLAVECLAW_HOME defaults to /root/.openclaw if unset — see references/deployment.md)
 set -uo pipefail
 
 STRATEGY_NAME="${1:?usage: run_strategy.sh <strategy_name>}"

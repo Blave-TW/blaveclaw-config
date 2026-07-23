@@ -1,6 +1,7 @@
 #!/bin/bash
 # Watchdog wrapper — restarts reconciler.py on crash and sends Telegram alert.
-# Usage: cd /root/.openclaw/workspace && bash manager/start_reconciler.sh
+# Usage: cd $BLAVECLAW_HOME/workspace && bash manager/start_reconciler.sh
+# ($BLAVECLAW_HOME defaults to /root/.openclaw if unset — see references/deployment.md)
 
 WORKSPACE="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$WORKSPACE"

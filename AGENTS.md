@@ -112,7 +112,7 @@ All chart text must be in English — Chinese characters render as garbled boxes
 - **NEVER write `except Exception: pass`** — always `except Exception as e: print(f"Error: {e}")`
 - NEVER chain commands with `&&`, `||`, or `;` — run ONE command at a time
 - Use `python3 file.py [args]` or `node file.js` directly
-- To run a strategy: `python3 strategies/my_strategy/strategy.py` with `workdir=/root/.openclaw/workspace` (Linux) or `workdir=C:\openclaw\workspace` (Windows)
+- To run a strategy: `python3 strategies/my_strategy/strategy.py` with `workdir=$BLAVECLAW_HOME/workspace` — `$BLAVECLAW_HOME` defaults to `/root/.openclaw` (Linux) / `C:\openclaw` (Windows) when unset, same resolution as `lib/notify.py`; some runtimes set it to a different path
 
 ## Long-Running Processes & Memory
 

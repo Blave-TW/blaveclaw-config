@@ -42,11 +42,12 @@ At deployment time:
 
 1. **Add the healthcheck schedule once** (same "add once" pattern as the snapshot cron). Check first with `crontab -l | grep healthcheck` (Linux) or `schtasks /query /tn blaveclaw-healthcheck` (Windows):
 ```
-*/30 * * * * cd /root/.openclaw/workspace && python3 manager/healthcheck.py
+*/30 * * * * cd $BLAVECLAW_HOME/workspace && python3 manager/healthcheck.py
 ```
 ```
-schtasks /create /tn "blaveclaw-healthcheck" /tr "cmd /c cd /d C:\openclaw\workspace && python manager\healthcheck.py" /sc minute /mo 30 /ru SYSTEM /f
+schtasks /create /tn "blaveclaw-healthcheck" /tr "cmd /c cd /d %BLAVECLAW_HOME%\workspace && python manager\healthcheck.py" /sc minute /mo 30 /ru SYSTEM /f
 ```
+(`$BLAVECLAW_HOME` / `%BLAVECLAW_HOME%` — see the note above "Cron Job Format" below for how to resolve and set this once.)
 2. **Register the deployment** in `state/deployments.json` (create the file if missing):
 ```json
 {"<strategy_name>": {"type": "cron", "expect_every_minutes": 60,
@@ -59,33 +60,42 @@ Alert behavior: at most one alert per deployment per 6 hours; a one-line recover
 ## Cron Job Format (Linux)
 **The `cd` is mandatory in every cron entry.** Cron runs from `/root` by default. All scripts in this repo use relative paths (`manager/`, `strategies/`, `lib/`, `cache/`). Without `cd`, every relative path resolves from `/root` → `FileNotFoundError` → the script crashes silently before sending any Telegram notification.
 
+**Resolve `$BLAVECLAW_HOME` before writing any cron entry** — workspace root is `$BLAVECLAW_HOME/workspace`, not a fixed path. This is the same env var `lib/notify.py`/`auth_service.py` already use: if `BLAVECLAW_HOME` is set in your shell environment, use it; if not, it defaults to `/root/.openclaw`. Every cron entry below writes `$BLAVECLAW_HOME` literally into the line — set it once at the top of the crontab so all entries (present and future) expand it the same way:
+```
+BLAVECLAW_HOME=/root/.openclaw
+*/30 * * * * cd $BLAVECLAW_HOME/workspace && python3 manager/healthcheck.py
+5 * * * * cd $BLAVECLAW_HOME/workspace && bash manager/run_strategy.sh <name>
+0 8 * * * cd $BLAVECLAW_HOME/workspace && python3 manager/snapshot.py
+```
+(check `crontab -l` first — if a `BLAVECLAW_HOME=` line already exists, don't add a second one; if this runtime's own `BLAVECLAW_HOME` differs from `/root/.openclaw`, use that value instead — never assume, resolve it from the actual environment on this machine.)
+
 **Always call `strategy.py` through `manager/run_strategy.sh`, never directly.** A crash inside `strategy.py` — including an import error at the top of the file, before `lib/runner.py` ever runs — otherwise has no path to notify the user: cron just swallows the non-zero exit. `run_strategy.sh` is the only layer that can catch a failure the Python side never got a chance to handle, and it sends the Telegram alert itself (via `manager/alert_failure.py`) rather than relying on the strategy's own code to do it.
 
 **Two separate cron entries are required for every deployment:**
 
 1. Strategy execution cron:
 ```
-5 * * * * cd /root/.openclaw/workspace && bash manager/run_strategy.sh <name>
+5 * * * * cd $BLAVECLAW_HOME/workspace && bash manager/run_strategy.sh <name>
 ```
 
 2. Daily snapshot cron (add once; survives across strategy additions):
 ```
-0 8 * * * cd /root/.openclaw/workspace && python3 manager/snapshot.py
+0 8 * * * cd $BLAVECLAW_HOME/workspace && python3 manager/snapshot.py
 ```
 
 Never write `python3 strategies/<name>/strategy.py` directly in a cron entry — always go through `manager/run_strategy.sh <name>`, and the `cd &&` prefix is still not optional.
 
 ## Scheduled Task Format (Windows)
-Same two entries, via `schtasks`. The `cd /d` is mandatory for the same reason as Linux's `cd &&` — all scripts use relative paths.
+Same two entries, via `schtasks`. The `cd /d` is mandatory for the same reason as Linux's `cd &&` — all scripts use relative paths. Resolve `%BLAVECLAW_HOME%` the same way as Linux (defaults to `C:\openclaw` if unset) rather than assuming a fixed path.
 
 1. Strategy execution task (hourly, mirrors `5 * * * *`):
 ```
-schtasks /create /tn "blaveclaw-strategy-<name>" /tr "cmd /c cd /d C:\openclaw\workspace && python strategies\<name>\strategy.py" /sc hourly /mo 1 /st 00:05 /ru SYSTEM /f
+schtasks /create /tn "blaveclaw-strategy-<name>" /tr "cmd /c cd /d %BLAVECLAW_HOME%\workspace && python strategies\<name>\strategy.py" /sc hourly /mo 1 /st 00:05 /ru SYSTEM /f
 ```
 
 2. Daily snapshot task (add once; mirrors `0 8 * * *`):
 ```
-schtasks /create /tn "blaveclaw-snapshot" /tr "cmd /c cd /d C:\openclaw\workspace && python manager\snapshot.py" /sc daily /st 08:00 /ru SYSTEM /f
+schtasks /create /tn "blaveclaw-snapshot" /tr "cmd /c cd /d %BLAVECLAW_HOME%\workspace && python manager\snapshot.py" /sc daily /st 08:00 /ru SYSTEM /f
 ```
 
 Check for an existing snapshot task with `schtasks /query /tn "blaveclaw-snapshot"` (non-zero exit if absent) before creating it.

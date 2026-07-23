@@ -115,17 +115,19 @@ Run via `start_reconciler.sh` (Linux) / `start_reconciler_windows.ps1` (Windows)
 
 **Linux — tmux session:**
 ```
-tmux new-session -d -s reconciler 'cd /root/.openclaw/workspace && bash manager/start_reconciler.sh'
+tmux new-session -d -s reconciler 'cd $BLAVECLAW_HOME/workspace && bash manager/start_reconciler.sh'
 ```
+(resolve `$BLAVECLAW_HOME` first — same env var as `references/deployment.md`'s cron entries; defaults to `/root/.openclaw` if unset)
 To check status: `tmux attach -t reconciler`. To stop: `tmux kill-session -t reconciler`.
 
 **Windows — NSSM service** (also survives instance reboot, unlike the Linux tmux session — a deliberate improvement, not a gap):
 ```
-nssm install blaveclaw-reconciler powershell.exe "-ExecutionPolicy Bypass -File C:\openclaw\workspace\manager\start_reconciler_windows.ps1"
-nssm set blaveclaw-reconciler AppDirectory C:\openclaw\workspace
+nssm install blaveclaw-reconciler powershell.exe "-ExecutionPolicy Bypass -File %BLAVECLAW_HOME%\workspace\manager\start_reconciler_windows.ps1"
+nssm set blaveclaw-reconciler AppDirectory %BLAVECLAW_HOME%\workspace
 nssm set blaveclaw-reconciler Start SERVICE_AUTO_START
 nssm start blaveclaw-reconciler
 ```
+(`%BLAVECLAW_HOME%` — resolve the actual env var on this machine before running these commands, don't type the literal placeholder; defaults to `C:\openclaw` if unset)
 To check status: `nssm status blaveclaw-reconciler`. To stop: `nssm stop blaveclaw-reconciler` (add `nssm set blaveclaw-reconciler Start SERVICE_DEMAND_START` if it should not restart on next boot).
 
 **Capital (群益) broker exception:** NSSM services default to running as `LocalSystem`. Capital's

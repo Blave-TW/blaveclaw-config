@@ -308,8 +308,13 @@ The runner builds this automatically — only needed when calling lib functions 
 Run this at session start, before any strategy run or notification:
 
 ```python
-import json, os
-allow_path = "/root/.openclaw/credentials/telegram-default-allowFrom.json"
+import json, os, platform
+# Same BLAVECLAW_HOME resolution as lib/notify.py — don't hardcode /root/.openclaw,
+# some runtimes set this env var to a different path.
+blaveclaw_home = os.environ.get("BLAVECLAW_HOME") or (
+    r"C:\openclaw" if platform.system() == "Windows" else "/root/.openclaw"
+)
+allow_path = os.path.join(blaveclaw_home, "credentials", "telegram-default-allowFrom.json")
 paired = (
     os.path.exists(allow_path)
     and bool(json.load(open(allow_path)).get("allowFrom"))

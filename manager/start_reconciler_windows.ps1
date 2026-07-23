@@ -5,10 +5,11 @@
 #   powershell -ExecutionPolicy Bypass -File manager\start_reconciler_windows.ps1
 #
 # Intended supervision (NSSM, survives reboot — see references/manager.md):
-#   nssm install blaveclaw-reconciler powershell.exe "-ExecutionPolicy Bypass -File C:\openclaw\workspace\manager\start_reconciler_windows.ps1"
-#   nssm set blaveclaw-reconciler AppDirectory C:\openclaw\workspace
+#   nssm install blaveclaw-reconciler powershell.exe "-ExecutionPolicy Bypass -File %BLAVECLAW_HOME%\workspace\manager\start_reconciler_windows.ps1"
+#   nssm set blaveclaw-reconciler AppDirectory %BLAVECLAW_HOME%\workspace
 #   nssm set blaveclaw-reconciler Start SERVICE_AUTO_START
 #   nssm start blaveclaw-reconciler
+# (%BLAVECLAW_HOME% defaults to C:\openclaw if unset — see references/deployment.md)
 
 $Workspace = Split-Path -Parent $PSScriptRoot
 Set-Location $Workspace

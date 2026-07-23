@@ -15,7 +15,8 @@ Data model (all under state/, which the nightly config sync never overwrites):
   state/healthcheck_alerts.json  last-alert timestamps (cooldown bookkeeping)
 
 Cron (add ONCE, like the snapshot cron — see references/deployment.md):
-  */30 * * * * cd /root/.openclaw/workspace && python3 manager/healthcheck.py
+  */30 * * * * cd $BLAVECLAW_HOME/workspace && python3 manager/healthcheck.py
+  ($BLAVECLAW_HOME defaults to /root/.openclaw if unset)
 
 Self-healing: any `run_strategy.sh <name>` entry found in crontab is
 auto-registered, so strategies deployed before this healthcheck existed are
