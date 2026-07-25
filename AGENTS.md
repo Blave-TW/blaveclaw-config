@@ -55,6 +55,8 @@ These are not user strategies. User strategies live in `strategies/`.
 
 Classify BEFORE writing any code. Full code rules and patterns: `references/strategy-code.md`.
 
+When creating a strategy, always set `DISPLAY_NAME` (plain-language name — what it trades + does, in the user's language) and `DESCRIPTION` (one plain sentence) alongside `STRATEGY_NAME` — details in `references/strategy-code.md` › *Naming & description*.
+
 ```
 Does the strategy trade ONE fixed symbol on a fixed interval?
   → YES → Type A  (lib/runner.py + TEMPLATE_A.py) — backtest REQUIRED

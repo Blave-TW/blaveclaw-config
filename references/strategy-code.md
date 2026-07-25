@@ -7,12 +7,28 @@ CRITICAL: Every Type A strategy MUST be based on `strategies/TEMPLATE_A.py`. Cop
 ## Steps
 
 1. Copy `strategies/TEMPLATE_A.py` to `strategies/[strategy_name]/strategy.py`
-2. Set config at the top: `STRATEGY_NAME`, `SYMBOL`, `EXCHANGE`, `INTERVAL`, `START`
+2. Set config at the top: `STRATEGY_NAME`, `DISPLAY_NAME`, `DESCRIPTION`, `SYMBOL`, `EXCHANGE`, `INTERVAL`, `START` (see *Naming & description* below)
 3. Fill in the three marked sections:
    - `_add_indicators(df, p1, p2)` — add indicator columns, parameterized for scan
    - `fetch_data(hdrs)` — fetch kline, call `_add_indicators` with module params
    - `compute_signals(df)` — vectorized signal logic, returns pd.Series
 4. Run: `python3 strategies/[strategy_name]/strategy.py`
+
+## Naming & description
+
+Every strategy (Type A, B, and C) sets three name/label fields at the top of the file:
+
+- `STRATEGY_NAME` — the **technical id**: lowercase, snake_case, used for the directory, files, and reporting key. Keep it stable; nothing user-facing depends on it. (e.g. `doge_holder_conc`)
+- `DISPLAY_NAME` — the **human-facing name** shown in the workspace strategy list. Write it in plain language: *what it trades + what it does*, NOT the engineer id or a raw indicator name. Use the language the user is conversing in (Chinese users → Chinese). Examples: `doge_holder_conc` → `"DOGE 大戶持倉集中度"`, `rsi_bb_reversal` → `"RSI＋布林通道反轉"`, `supertrend_sol` → `"SOL SuperTrend 順勢"`.
+- `DESCRIPTION` — **one plain sentence** the user could read months later and remember what this strategy does, e.g. `"追蹤 DOGE 大戶持倉集中度,集中度升高時進場做多"`. One line, no jargon dump.
+
+```python
+STRATEGY_NAME = "doge_holder_conc"
+DISPLAY_NAME  = "DOGE 大戶持倉集中度"
+DESCRIPTION   = "追蹤 DOGE 大戶持倉集中度,集中度升高時進場做多"
+```
+
+Always set `DISPLAY_NAME` and `DESCRIPTION` when creating a strategy — the workspace shows the technical id only as a fallback when they are missing.
 
 ## Signal Contract
 
@@ -332,7 +348,7 @@ CRITICAL: Every Type C strategy MUST be based on `strategies/TEMPLATE_C.py`. Cop
 ### Steps
 
 1. Copy `strategies/TEMPLATE_C.py` to `strategies/[strategy_name]/strategy.py`
-2. Set config: `STRATEGY_NAME`, `UNIVERSE`, `SIGNAL_WINDOW`, `WARMUP`, `FEE`, `START`
+2. Set config: `STRATEGY_NAME`, `DISPLAY_NAME`, `DESCRIPTION`, `UNIVERSE`, `SIGNAL_WINDOW`, `WARMUP`, `FEE`, `START` (see *Naming & description* above)
 3. Fill in three sections:
    - `fetch_data(hdrs)` — fetches close/open/signal data for all UNIVERSE symbols; returns a **tuple**
    - helpers (e.g. `_compute_weights`, `_rebalance_mask`) — signal → weight conversion
