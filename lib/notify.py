@@ -134,6 +134,38 @@ def make_sender(photo=False):
         return _send_text
 
 
+def report_photo_web(path, caption=None):
+    """Blave Agent (web delivery): mirror an image into the workspace chat as a base64
+    'image' chunk, so a backtest/param-scan chart shows up in the conversation. No-op
+    when the web env isn't set (Telegram-only / openclaw machines) — this is called
+    unconditionally next to the existing Telegram send, so it must never crash a run.
+    The runtime (agent_turn, web delivery) provides these env vars."""
+    url = os.environ.get("BLAVE_WEB_REPORT_URL")
+    token = os.environ.get("BLAVE_WEB_REPORT_TOKEN")
+    if not (url and token):
+        return
+    try:
+        import base64
+        import mimetypes
+        if os.path.getsize(path) > 3 * 1024 * 1024:  # don't push a huge file through chat
+            return
+        with open(path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+        chunk = {
+            "type": "image",
+            "mime": mimetypes.guess_type(path)[0] or "image/png",
+            "b64": b64,
+        }
+        if caption:
+            chunk["caption"] = caption
+        sess = os.environ.get("BLAVE_WEB_SESSION")
+        if sess:
+            chunk["session_id"] = sess
+        requests.post(url, json=chunk, headers={"x-api-key": f"proxy-{token}"}, timeout=30)
+    except Exception as e:  # best-effort — a failed image push must not fail the strategy
+        print(f"[notify] web photo push failed: {e}")
+
+
 def send_text(msg: str) -> None:
     """Convenience: send a text message without constructing a sender."""
     make_sender()(msg)

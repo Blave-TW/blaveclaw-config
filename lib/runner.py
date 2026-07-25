@@ -144,6 +144,10 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
 
         plot_pnl(df, result_d, title=strategy_name,
                  output_path=str(out_dir / 'pnl.png'))
+        # Mirror the chart into the web workspace chat (no-op off web); separate from
+        # the Telegram gate below so it shows regardless of send_telegram_fn.
+        from lib.notify import report_photo_web
+        report_photo_web(str(out_dir / 'pnl.png'))
 
         if mode == 'backtest':
             if send_telegram_fn:
@@ -253,6 +257,10 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         plot_pnl_portfolio(pf_series, close_df, title=strategy_name,
                            output_path=str(out_dir / 'pnl.png'),
                            bench_pct=bench_pct)
+        # Mirror into the web workspace chat (no-op off web), regardless of the
+        # Telegram gate below.
+        from lib.notify import report_photo_web
+        report_photo_web(str(out_dir / 'pnl.png'))
 
         if send_telegram_fn:
             from lib.notify import send_photo

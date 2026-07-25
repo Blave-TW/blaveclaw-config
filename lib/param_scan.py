@@ -270,6 +270,11 @@ def plot_heatmap(
     plt.close()
     print(f"Heatmap saved: {output_path}")
 
+    # Mirror the heatmap into the web workspace chat (no-op off web), regardless of
+    # the Telegram gate below — this is the chart the user asked to see.
+    from lib.notify import report_photo_web
+    report_photo_web(output_path)
+
     if send_telegram:
         try:
             from lib.notify import send_photo
