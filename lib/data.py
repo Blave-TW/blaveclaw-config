@@ -627,6 +627,27 @@ def fetch_twstock_shareholding(stock_id, start, end, headers):
     )
 
 
+def _fetch_twstock_per_raw(stock_id, start, end, headers):
+    end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
+    r = _retry_get(f'{BASE}/studio/market/twstock/per/{stock_id}',
+                   headers=headers, params={'start': start, 'end': end_str}, timeout=60)
+    data = r.json().get('data', [])
+    if not data:
+        return pd.DataFrame()
+    df = pd.DataFrame(data)
+    df['date'] = pd.to_datetime(df['date'])
+    return df.set_index('date').sort_index()
+
+
+def fetch_twstock_per(stock_id, start, end, headers):
+    """台股每日本益比 / 股價淨值比 / 殖利率. Columns: dividend_yield, PER, PBR. Data from 2005-10-01."""
+    return _extend_cache_monthly(
+        'twstock_per', {'id': stock_id},
+        lambda s, e: _fetch_twstock_per_raw(stock_id, s, e, headers),
+        start, end,
+    )
+
+
 def _broker_day_cache_path(stock_id, date_str):
     """cache/twstock_broker_stock_<stock_id>/<date>.parquet"""
     d = _CACHE_DIR / f'twstock_broker_stock_{stock_id}'

@@ -215,25 +215,19 @@ bank_net = (df.groupby("bank_name")["buy"].sum() - df.groupby("bank_name")["sell
 
 ## PE / PB / 殖利率
 
-```python
-import requests
+用 `fetch_twstock_per(stock_id, start, end, headers)`（見 `lib/data.py`）—— DatetimeIndex
+（與價格／法人等 fetcher 對齊，可直接 reindex），欄位 `dividend_yield`、`PER`、`PBR`，
+資料從 2005-10-01 起。
 
-def fetch_twstock_per(stock_id: str, start: str, end: str, headers: dict) -> pd.DataFrame:
-    """欄位：date, dividend_yield, PER, PBR。資料從 2005-10-01 起。"""
-    r = requests.get(
-        f"https://api.blave.org/studio/market/twstock/per/{stock_id}",
-        params={"start": start, "end": end},
-        headers=headers,
-        timeout=60,
-    )
-    r.raise_for_status()
-    data = r.json().get("data", [])
-    if not data:
-        return pd.DataFrame()
-    df = pd.DataFrame(data).set_index("date")
-    df.index = pd.to_datetime(df.index)   # 對齊價格/法人等 batch fetcher 的 DatetimeIndex；否則 reindex 全 NaN
-    return df.sort_index()
+```python
+from lib.data import fetch_twstock_per
+
+per = fetch_twstock_per("2408", "2026-01-01", "2026-07-28", hdrs)
+latest = per.iloc[-1]        # dividend_yield / PER / PBR
 ```
+
+當日資料在盤後直接取自 TWSE／TPEx 官方報表；上櫃比上市晚幾小時發布，未發布時退回 FinMind
+（會慢一天）。ETF 沒有 PE 資料——官方報表與 FinMind 都不含，回傳空 DataFrame。
 
 ---
 
