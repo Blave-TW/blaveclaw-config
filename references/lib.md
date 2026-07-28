@@ -4,6 +4,14 @@ The workspace has a shared library at `lib/`. Use it to avoid duplicating code a
 
 **Always import these — never write them inline:**
 
+Every `fetch_*` function takes `headers` as its auth argument. Build it once from the workspace `.env` — the keys are lowercase, and the header names are `api-key` / `secret-key` (not `X-API-KEY`, and there is no request signing):
+
+```python
+from dotenv import dotenv_values
+env  = dotenv_values()   # run from the workspace root, or pass the .env path
+hdrs = {'api-key': env.get('blave_api_key', ''), 'secret-key': env.get('blave_secret_key', '')}
+```
+
 `lib/data.py` — all data fetching (chunking + cache built-in):
 - `fetch_db_kline(dataset, symbol, schema, start, end, headers)` → CME/NYMEX/ICE OHLCV + `instrument_id` column; datasets: `GLBX.MDP3` (CL, GC), `IFEU.IMPACT` (BRN); schemas: `ohlcv-1m` / `ohlcv-1h` / `ohlcv-1d`
 - `settlement_signals_from_db(df, signal)` → returns `(signal, exec_at_close)`. For futures strategies using `fetch_db_kline`: call at the end of `compute_signals` and `return` the result directly. Forces `signal=0.0` on the last bar before each contract rollover, and marks those bars `exec_at_close=True` (executed at this-bar close, not next-bar open). Do NOT use `-1.0` for settlement — that opens a short position.
