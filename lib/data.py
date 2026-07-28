@@ -1783,3 +1783,82 @@ def fetch_twstock_trader_flows(trader_id, start, end, headers,
         return pd.DataFrame(columns=['date', 'stock_id', 'net']).set_index(['date', 'stock_id'])
     result = pd.concat(frames, ignore_index=True)
     return result.groupby(['date', 'stock_id'])['net'].sum().to_frame()
+
+
+def fetch_economic_calendar(headers, start=None, end=None, countries=None,
+                            max_priority=None, limit=None, lang='zh'):
+    """總經事件行事曆（授權資料源）—— 事件時間、市場預期值、前值、實際值。
+
+    **這是總經事件與其數字的唯一來源。** 任何「本週有什麼重要事件」「這個數據預期多少 /
+    前值多少」的問題都用這支，不要自己上網搜、更不要憑記憶寫數字：實測 agent 自行搜尋會
+    整張抄到內容農場的錯誤表格（把已公布的實際值當成預期值），沒抄到的欄位再用訓練資料
+    填空，連「前值」這種唯一解的數字都會寫錯，也會把 A 指標的數字安到 B 指標上。
+    查不到的欄位就說查不到，不要填。
+
+    資料只涵蓋前後約五週（滾動窗口，非歷史庫）；超出範圍的區間回空 DataFrame，不是錯誤。
+
+    start / end: 'YYYY-MM-DD' 台北日期，含頭含尾（省略 = 不限）。
+    countries:   ISO 兩碼 list，如 ['US', 'CN', 'TW']（省略 = 全部）。
+    max_priority: 只回 priority <= 此值。**priority 1 最重要、3 最不重要**（1 是非農、
+                 利率決議這種級別）—— 所以「只要最重要的事件」是 max_priority=1，不是 3。
+    limit:       筆數上限（依事件時間排序後截斷）。
+    lang:        指標與國名的顯示語言，'zh'（預設）或 'en'。伺服器只換掉對照表裡有的
+                 名稱，沒收錄的維持原本的中文，所以 'en' 會拿到中英混雜的結果。
+
+    Returns DataFrame sorted by event time, one row per event:
+      datetime      台北時間（time 為 null 的事件用當日 00:00）
+      date / time   台北日期、'HH:MM'（部分事件沒有公布時間，time 為 None）
+      country       ISO 兩碼 / country_name 中文國名
+      subject       指標名稱；subject_title 是期別，如 '<7月>'、'<2季>'
+      predict       市場預期（consensus）；未提供為 None
+      last          前值
+      real          實際值；尚未公布為 None
+      unit          單位（'%'、'point'、'億USD' …）
+      priority      1~3，1 最重要
+    """
+    params = {'lang': lang}
+    if start:
+        params['start'] = start
+    if end:
+        params['end'] = end
+    if countries:
+        params['country'] = ','.join(countries)
+    if max_priority is not None:
+        params['max_priority'] = max_priority
+    if limit is not None:
+        params['limit'] = limit
+
+    r = _retry_get(f'{BASE}/studio/market/anue/economic_calendar',
+                   headers=headers, params=params, timeout=60)
+    payload = r.json()
+    data = payload.get('data', []) if isinstance(payload, dict) else payload
+    if not data:
+        return pd.DataFrame(columns=['datetime', 'date', 'time', 'country', 'country_name',
+                                     'subject_title', 'subject', 'predict', 'last', 'real',
+                                     'unit', 'priority'])
+
+    df = pd.DataFrame(data).rename(columns={
+        'countryId': 'country', 'countryName': 'country_name', 'subjectTitle': 'subject_title',
+    })
+    # startDate 是事件當天（台北日期）的 epoch 秒；time 是台北時間的 'HH:MM'
+    df['date'] = pd.to_datetime(df['startDate'], unit='s').dt.normalize()
+    df['datetime'] = df['date'] + pd.to_timedelta(
+        df['time'].fillna('00:00') + ':00'
+    )
+    # Re-apply the filters locally: this workspace and the API deploy on separate
+    # schedules, so an older server silently ignores the query params and hands
+    # back all ~1,400 rows. Filtering here keeps the contract true either way.
+    if start:
+        df = df[df['date'] >= pd.Timestamp(start)]
+    if end:
+        df = df[df['date'] <= pd.Timestamp(end)]
+    if countries:
+        wanted = {c.upper() for c in countries}
+        df = df[df['country'].str.upper().isin(wanted)]
+    if max_priority is not None:
+        df = df[df['priority'] <= max_priority]  # 上游 1 最重要、3 最不重要
+
+    cols = ['datetime', 'date', 'time', 'country', 'country_name', 'subject_title',
+            'subject', 'predict', 'last', 'real', 'unit', 'priority']
+    df = df[[c for c in cols if c in df.columns]].sort_values('datetime').reset_index(drop=True)
+    return df.head(limit) if limit else df
