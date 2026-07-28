@@ -272,6 +272,41 @@ avg_fee = df.groupby("date").apply(lambda x: x["value"].sum() / x["volume"].sum(
 
 ---
 
+## Market-wide data (大盤)
+
+Whole-market series — no `stock_id` dimension. Use these for index level, market breadth /
+turnover, and market-wide institutional or margin flows; the per-stock `fetch_twstock_*`
+functions above answer a different question and must not be summed as a substitute.
+
+```python
+from lib.data import (
+    fetch_twmarket_index,          # (start, end, headers, index_id='TAIEX') → Open/High/Low/Close
+    fetch_twmarket_turnover,       # (start, end, headers) → volume, value, trades
+    fetch_twmarket_institutional,  # (start, end, headers) → foreign, investment_trust, dealer, total
+    fetch_twmarket_margin,         # (start, end, headers) → margin/short balances
+)
+
+taiex = fetch_twmarket_index("2024-01-01", "2026-07-28", hdrs)   # DatetimeIndex, daily
+```
+
+| Function | Columns | Units | Since |
+|---|---|---|---|
+| `fetch_twmarket_index` | `Open` `High` `Low` `Close` | index points | 1999-01-05 |
+| `fetch_twmarket_turnover` | `volume` `value` `trades` | shares / TWD / count | 1990-01-04 |
+| `fetch_twmarket_institutional` | `foreign` `investment_trust` `dealer` `total` | TWD, net (buy - sell) | 2004-04-07 |
+| `fetch_twmarket_margin` | `margin_balance` `margin_balance_prev` `margin_balance_value` `short_balance` `short_balance_prev` | lots (張), except `margin_balance_value` in TWD | 2001-01-03 |
+
+Notes:
+- `TAIEX` is the only supported `index_id`; any other value returns 400. The index carries no
+  volume column — market turnover comes from `fetch_twmarket_turnover`, keyed on the same dates.
+- In `fetch_twmarket_institutional`, 外資自營商 (foreign dealers' own account) is counted in
+  `dealer`, not in `foreign` — the same bucketing FinMind uses.
+- Margin balances are whole-market; `margin_balance_value` is the only TWD column, the rest are lots.
+- TXO put/call ratio is a futures/options dataset — see `fetch_twfutures_pcr` in
+  `references/twfutures.md`, not here.
+
+---
+
 ## Batch 資料函式
 
 所有台股資料一律用 batch 函式（即使只有 1 支），回傳 `dict {stock_id: DataFrame}`，超過 50 支自動切塊：
