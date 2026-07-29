@@ -8,9 +8,14 @@ Updates manager/portfolio_config.json.
 Usage:
     python3 manager/manager.py [--lookback 365] [--notify]
     python3 manager/manager.py --apply   # actually write portfolio_config.json
+    python3 manager/manager.py --allocator my_method   # use allocators/my_method/
 
 Default is DRY-RUN: weights are computed and printed but portfolio_config.json
 is NOT touched. Pass --apply only after the user has confirmed the new weights.
+
+The slope/std optimiser below is the DEFAULT weighting method, not the only
+one. `--allocator <name>` swaps in allocators/<name>/allocator.py instead —
+see references/allocator-code.md.
 
 This command ONLY recomputes weights / leverage. It never changes
 account_value — that is the live position-sizing base (see lib/portfolio.py:
@@ -26,6 +31,7 @@ from scipy.optimize import minimize
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lib.pnl import load_all_stats
+from lib import allocator as allocator_lib
 
 # ── Config ────────────────────────────────────────────────────────────────────
 LOOKBACK   = 365   # days of history used for weight optimization
@@ -112,6 +118,7 @@ def main():
     parser.add_argument('--target-vol', type=float, default=TARGET_VOL, help=f'Target annual volatility for leverage (default {TARGET_VOL})')
     parser.add_argument('--notify',     action='store_true',             default=NOTIFY, help='Send Telegram notification after update')
     parser.add_argument('--apply',      action='store_true', help='Write the new weights to portfolio_config.json (default: dry-run, file untouched)')
+    parser.add_argument('--allocator',  type=str, default=None, help='Weight with allocators/<name>/allocator.py instead of the built-in slope/std optimiser')
     args = parser.parse_args()
 
     np.random.seed(42)
@@ -130,8 +137,18 @@ def main():
 
     ret_df = pd.DataFrame(series_map).sort_index().fillna(0)
 
-    # Portfolio optimization: maximize slope/std of R·w
-    weights = optimize_weights(ret_df, args.lookback)
+    # Portfolio weighting: the built-in slope/std optimiser, or a user allocator.
+    # A named allocator that fails to load raises — never silently fall back to
+    # the built-in, or a typo would quietly trade on different weights.
+    if args.allocator:
+        mod = allocator_lib.load(args.allocator)
+        method = getattr(mod, 'DISPLAY_NAME', args.allocator)
+        weights = allocator_lib.clean(
+            mod.allocate(ret_df, args.lookback), list(ret_df.columns)
+        )
+    else:
+        method = 'built-in slope/std'
+        weights = optimize_weights(ret_df, args.lookback)
 
     # Individual scores for display
     scores = {
@@ -159,6 +176,10 @@ def main():
     cfg.setdefault('asset_specs', {})
 
     cfg['weights'] = weights
+    # Which method produced these weights. Nothing downstream reads it — it is
+    # there so the workspace (and the next person to look) can tell whether the
+    # live weights came from the built-in optimiser or a user allocator.
+    cfg['allocator'] = args.allocator
 
     # Portfolio volatility and Sharpe
     active_names = [k for k, v in weights.items() if v > 0]
@@ -189,7 +210,7 @@ def main():
             json.dump(cfg, f, indent=2)
 
     # Print summary
-    print(f'\nBlaveClaw Strategy Manager  (lookback={args.lookback}d)')
+    print(f'\nBlaveClaw Strategy Manager  (lookback={args.lookback}d, method={method})')
     print(f'{"Strategy":<28} {"Indiv Score":>12} {"Weight":>8} {"Sharpe":>8} {"MDD%":>8} {"Symbol":<16}')
     print('-' * 86)
     for name in sorted(weights, key=lambda x: weights[x], reverse=True):
@@ -214,7 +235,7 @@ def main():
         try:
             from lib.notify import send_text
             action = 'Portfolio updated' if args.apply else 'Proposed weights (DRY RUN, config not modified)'
-            lines = [f'[BlaveClaw Manager] {action} (lookback={args.lookback}d)']
+            lines = [f'[BlaveClaw Manager] {action} (lookback={args.lookback}d, method={method})']
             for name, w in sorted(weights.items(), key=lambda x: x[1], reverse=True):
                 sharpe = valid[name].get('Sharpe Ratio') or 0.0
                 lines.append(f'  {name}: {w:.1%}  Sharpe {sharpe:.2f}')

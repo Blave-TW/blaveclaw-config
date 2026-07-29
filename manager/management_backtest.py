@@ -10,6 +10,15 @@ Compares against N random static Dirichlet-weighted portfolios.
 Usage:
     python3 manager/management_backtest.py [--lookback 365] [--random-n 1000] [--output manager]
     # outputs: manager/pnl.png + manager/stats.json
+
+    python3 manager/management_backtest.py --allocator my_method
+    # walk-forwards allocators/my_method/allocator.py instead of the built-in
+    # optimiser; outputs default to allocators/my_method/ so each method keeps
+    # its own stats.json + pnl.png the way each strategy does.
+
+This is the gate for using ANY weighting method live: it answers "does this
+method beat randomly-drawn weights out of sample", which a single in-sample
+weight calculation cannot.
 """
 # ── Config ────────────────────────────────────────────────────────────────────
 LOOKBACK  = 365   # days of history used to optimize weights each step
@@ -17,7 +26,7 @@ RANDOM_N  = 1000  # number of random portfolios for benchmark comparison
 OUTPUT    = 'manager'  # output folder (saves pnl.png + report.json inside)
 # ─────────────────────────────────────────────────────────────────────────────
 
-import argparse, json, math, sys
+import argparse, json, math, os, sys
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -29,20 +38,26 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lib.pnl import load_all_stats
+from lib import allocator as allocator_lib
 
 sys.path.insert(0, str(Path(__file__).parent))
 from manager import optimize_weights
 
 
-def rolling_managed_returns(ret_df: pd.DataFrame, lookback: int):
+def rolling_managed_returns(ret_df: pd.DataFrame, lookback: int, allocate_fn=None):
     """
     Walk-forward: for each day i >= lookback, optimize weights on
     ret_df.iloc[i-lookback:i], then record ret_df.iloc[i] @ weights.
+
+    allocate_fn(window, lookback) -> {strategy: weight}; defaults to the
+    built-in slope/std optimiser. This is the whole plug point — everything
+    else here (the OOS loop, the random benchmark, the stats) is method-agnostic.
 
     Returns:
         managed_ret:     pd.Series of OOS daily returns
         weights_history: pd.DataFrame of shape (OOS days, strategies)
     """
+    allocate_fn = allocate_fn or optimize_weights
     values     = ret_df.values
     dates      = ret_df.index
     names      = list(ret_df.columns)
@@ -55,7 +70,7 @@ def rolling_managed_returns(ret_df: pd.DataFrame, lookback: int):
     for k in range(oos_len):
         i     = lookback + k
         window = ret_df.iloc[i - lookback: i]
-        w_dict = optimize_weights(window, lookback)
+        w_dict = allocate_fn(window, lookback)
         w_arr  = np.array([w_dict[n] for n in names])
         managed_vals[k]    = float(values[i] @ w_arr)
         weights_array[k]   = w_arr
@@ -155,8 +170,10 @@ def main():
                         help=f'Optimization window in days (default {LOOKBACK})')
     parser.add_argument('--random-n', type=int,   default=RANDOM_N,
                         help=f'Number of random benchmark portfolios (default {RANDOM_N})')
-    parser.add_argument('--output',   type=str,   default=OUTPUT,
-                        help=f'Output path prefix (default {OUTPUT})')
+    parser.add_argument('--output',   type=str,   default=None,
+                        help=f'Output folder (default: {OUTPUT}, or allocators/<name> with --allocator)')
+    parser.add_argument('--allocator', type=str,  default=None,
+                        help='Walk-forward allocators/<name>/allocator.py instead of the built-in optimiser')
     args = parser.parse_args()
 
     np.random.seed(42)
@@ -179,8 +196,21 @@ def main():
               f'Need at least {args.lookback + 1} days.')
         return
 
+    # Named allocator → walk-forward that file and keep its outputs next to it,
+    # so several methods can be compared without overwriting each other.
+    if args.allocator:
+        mod         = allocator_lib.load(args.allocator)
+        method      = getattr(mod, 'DISPLAY_NAME', args.allocator)
+        names       = list(ret_df.columns)
+        allocate_fn = lambda window, lb: allocator_lib.clean(mod.allocate(window, lb), names)
+        output      = args.output or os.path.join(allocator_lib.ALLOCATORS_DIR, args.allocator)
+    else:
+        method      = 'built-in slope/std'
+        allocate_fn = None
+        output      = args.output or OUTPUT
+
     strategies = list(ret_df.columns)
-    print(f'\nManagement Walk-Forward Backtest  (lookback={args.lookback}d)')
+    print(f'\nManagement Walk-Forward Backtest  (lookback={args.lookback}d, method={method})')
     print(f'Strategies : {", ".join(strategies)}')
     print(f'Total data : {len(ret_df)} days  '
           f'({ret_df.index[0].date()} → {ret_df.index[-1].date()})')
@@ -188,7 +218,7 @@ def main():
           f'({ret_df.index[args.lookback].date()} → {ret_df.index[-1].date()})')
     print(f'Running walk-forward optimization... (this may take a moment)')
 
-    managed_ret, weights_history = rolling_managed_returns(ret_df, args.lookback)
+    managed_ret, weights_history = rolling_managed_returns(ret_df, args.lookback, allocate_fn)
     oos_index = managed_ret.index
 
     print(f'Running random benchmark (n={args.random_n})...')
@@ -212,7 +242,8 @@ def main():
     print(f'{"":─<60}')
 
     result = {
-        'lookback': args.lookback,
+        'lookback':  args.lookback,
+        'allocator': args.allocator,   # None = built-in slope/std
         'start':    oos_index[0].strftime('%Y-%m-%d'),
         'end':      oos_index[-1].strftime('%Y-%m-%d'),
         'managed': {
@@ -238,17 +269,16 @@ def main():
         },
     }
 
-    import os
-    os.makedirs(args.output, exist_ok=True)
-    json_path = os.path.join(args.output, 'stats.json')
-    png_path  = os.path.join(args.output, 'pnl.png')
+    os.makedirs(output, exist_ok=True)
+    json_path = os.path.join(output, 'stats.json')
+    png_path  = os.path.join(output, 'pnl.png')
 
     with open(json_path, 'w') as f:
         json.dump(result, f, indent=2)
 
     _plot(managed_ret, bench_rets, weights_history, png_path)
 
-    print(f'\n  Output: {args.output}/')
+    print(f'\n  Output: {output}/')
     print(f'          ├── stats.json')
     print(f'          └── pnl.png\n')
 

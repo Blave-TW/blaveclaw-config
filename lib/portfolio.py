@@ -9,6 +9,31 @@ def _append_reconciler_log(order):
         f.write(json.dumps(entry) + '\n')
 
 
+def _write_reconcile_snapshot(target, actual, orders):
+    """Record what this reconcile actually saw, for anything that needs to show
+    live positions without querying the exchange itself.
+
+    Targets are cheap to recompute anywhere (aggregate_portfolio is pure local
+    arithmetic); exchange positions are not — they need the user's keys and a
+    round-trip. So this is the only place `actual` is ever observed, and without
+    persisting it the workspace could only ever show half the picture.
+
+    Best-effort: a failure here must never stop a reconcile that already placed
+    orders.
+    """
+    try:
+        os.makedirs('manager', exist_ok=True)
+        with open('manager/last_reconcile.json', 'w') as f:
+            json.dump({
+                'ts':     datetime.utcnow().isoformat(),
+                'target': target,
+                'actual': actual,
+                'orders': orders,
+            }, f, indent=2)
+    except Exception as e:
+        logging.warning(f'failed to write manager/last_reconcile.json: {e}')
+
+
 def load_portfolio_config():
     """Load portfolio_config.json from manager/ directory."""
     path = 'manager/portfolio_config.json'
@@ -160,6 +185,10 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
     target = aggregate_portfolio()
     actual = get_positions_fn()
     orders = compute_diff(target, actual, threshold)
+
+    # Written before placing, so it records the state that WAS acted on. A
+    # reconcile that crashes mid-loop still leaves the observation behind.
+    _write_reconcile_snapshot(target, actual, orders)
 
     def _call_place(symbol, sub_diff, asset_spec, reduce_only):
         # Returns False if place_order_fn skipped the order (e.g. below exchange minimum).

@@ -7,8 +7,11 @@ __pycache__/
 strategies/*
 !strategies/TEMPLATE_A.py
 !strategies/TEMPLATE_C.py
+allocators/*
+!allocators/TEMPLATE.py
 manager/portfolio_config.json
 manager/orders.jsonl
+manager/last_reconcile.json
 examples/**/strategy.log
 examples/**/state.json
 examples/**/stats.json

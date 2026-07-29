@@ -170,6 +170,8 @@ Three rules to always remember:
 2. **`manager.py` is dry-run by default** — show proposed weights first, only `--apply` after user confirms
 3. **Order library → reconciler is one atomic task** — wire `reconciler.py` in the same session as `lib/order_*.py`
 
+The slope/std optimiser is the default weighting method, not the only one — when the user wants their own way of weighting, write it as `allocators/<name>/allocator.py` and use `--allocator`: `references/allocator-code.md`.
+
 ## Broker Onboarding
 
 **Any broker with an API is supported** — the ones below just have ready-made references; others you wire up on request (get API docs from the user, build a `lib/` helper following the existing broker patterns). Never answer "only these are supported".
