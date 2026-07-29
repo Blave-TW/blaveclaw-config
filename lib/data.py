@@ -307,6 +307,91 @@ def fetch_kline_batch(symbols, interval, start, end, headers):
     return {sid: _sanity_check_ohlc(df, f'{sid} {interval} kline') for sid, df in results.items()}
 
 
+# ── Exchange-native kline ─────────────────────────────────────────────────────
+# Blave's own /kline serves Binance USDT-M perps only. A contract listed on the
+# exchange the user actually trades — BingX's gold perp GOLD(XAU)-USDT, say — is
+# simply not in it, and substituting a same-ish Binance symbol silently backtests
+# a different instrument than the one the orders go to (that is a real incident,
+# not a hypothetical). Fetch those straight from the exchange instead.
+
+_BINGX_BASE = 'https://open-api.bingx.com'
+
+# lib interval string → BingX interval. Blave's /kline periods spell minutes
+# 'min'; BingX spells them 'm'.
+_BINGX_INTERVALS = {
+    '1min': '1m', '3min': '3m', '5min': '5m', '15min': '15m', '30min': '30m',
+    '1h': '1h', '2h': '2h', '4h': '4h', '6h': '6h', '8h': '8h', '12h': '12h',
+    '1d': '1d', '3d': '3d', '1w': '1w',
+}
+
+# Measured against the live endpoint: a response is capped at 1000 bars (not the
+# documented limit=1440) and keeps the NEWEST end of the requested window, so
+# paging walks backwards from endTime.
+_BINGX_PAGE = 1000
+_EPOCH = datetime(1970, 1, 1)
+
+
+def _fetch_bingx_kline_raw(symbol, interval, start, end):
+    bx_interval = _BINGX_INTERVALS.get(interval)
+    if bx_interval is None:
+        raise ValueError(f"fetch_bingx_kline: unsupported interval {interval!r} "
+                         f"(supported: {', '.join(_BINGX_INTERVALS)})")
+
+    to_ms = lambda s: int((datetime.strptime(s, '%Y-%m-%d') - _EPOCH).total_seconds() * 1000)
+    start_ms = to_ms(start)
+    end_ms   = to_ms(end) if end else int((datetime.utcnow() - _EPOCH).total_seconds() * 1000)
+
+    rows, cursor_ms, prev_oldest = [], end_ms, None
+    while cursor_ms > start_ms:
+        r = _retry_get(f'{_BINGX_BASE}/openApi/swap/v3/quote/klines', params={
+            'symbol': symbol, 'interval': bx_interval,
+            'startTime': start_ms, 'endTime': cursor_ms, 'limit': _BINGX_PAGE,
+        }, timeout=30)
+        body = r.json()
+        # BingX signals errors in the body with HTTP 200, so raise_for_status
+        # inside _retry_get sees nothing. Fail loud rather than return a short
+        # series that looks like "the contract just has no history there".
+        if body.get('code') != 0:
+            raise RuntimeError(f"BingX kline {symbol} {bx_interval}: "
+                               f"code={body.get('code')} {body.get('msg')}")
+        page = body.get('data') or []
+        if not page:
+            break
+        rows.extend(page)
+        oldest = min(int(bar['time']) for bar in page)
+        if prev_oldest is not None and oldest >= prev_oldest:
+            break            # no progress — stop instead of spinning forever
+        prev_oldest = oldest
+        cursor_ms = oldest - 1
+
+    cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    df = pd.DataFrame(rows)
+    df['time'] = pd.to_datetime(df['time'].astype('int64'), unit='ms', utc=True)
+    df = df.set_index('time').sort_index()
+    df = df[~df.index.duplicated(keep='first')]
+    df = df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low',
+                            'close': 'Close', 'volume': 'Volume'})
+    return df[cols].astype(float)
+
+
+def fetch_bingx_kline(symbol, interval, start, end):
+    """OHLCV for a BingX perpetual, straight from BingX's public API — no key needed.
+
+    `symbol` is the BingX API symbol, NOT the display name shown on the chart:
+    GOLD(XAU)-USDT is `NCCOGOLD2USD-USDT`. Look it up in
+    `GET /openApi/swap/v3/quote/contracts` (the `symbol` / `displayName` pair).
+    Whatever you pass here must be the same symbol the orders use.
+    """
+    df = _extend_cache_monthly(
+        'bingx_kline', {'symbol': symbol, 'period': interval},
+        lambda s, e: _fetch_bingx_kline_raw(symbol, interval, s, e),
+        start, end,
+    )
+    return _sanity_check_ohlc(df, f'{symbol} {interval} bingx_kline')
+
+
 # ── Alpha data ────────────────────────────────────────────────────────────────
 
 def _fetch_alpha_raw(endpoint, params, headers, start, end):
