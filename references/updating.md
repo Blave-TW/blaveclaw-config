@@ -4,7 +4,7 @@ Trigger: user says 更新 blaveclaw / 更新系統 / 更新 config / update blav
 
 ## 1. Skill
 
-Run: `npx -y skills add https://github.com/Blave-TW/blave-quant-skill -a openclaw -s blave-quant -y`
+Nothing to install — the platform re-clones the blave-quant skill into `skills/blave-quant` once a day (a systemd timer / scheduled task on Blave Agent machines, a crontab entry on older openclaw boxes). Just check that `skills/blave-quant/SKILL.md` is there; if it is missing, say so in the report and stop — a hand-install would put it somewhere the daily job then overwrites.
 
 ## 2. Config
 

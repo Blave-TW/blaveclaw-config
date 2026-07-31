@@ -132,8 +132,9 @@ Never create a duplicate strategy folder just because you ran a scan.
 - `lib/account_bingx.py` already ships implemented (swap/futures account) — do NOT rewrite it, extend it if spot/fund balance is needed
 - For any other exchange, copy `lib/account_TEMPLATE.py` — see `references/manager.md` § Account library
 
-`lib/guard.py` — **kill switch + order audit log.** Enforced inside `lib/order_*.py`'s transport layer — no caller opts in, nothing to wire:
+`lib/guard.py` — **kill switch + order audit log.** Enforced inside `lib/order_*.py`'s transport layer and again in `lib/portfolio.reconcile()` — no caller opts in, nothing to wire:
 - If the file `state/HALT` exists, every ENTRY order raises `guard.Halted` before any network call. Reduce-only closes, SL/TP, and cancels still work (flattening must never be trapped). The file's existence is authoritative — malformed content still halts.
+- `reconcile()` denies exposure-adding legs itself, before calling `place_order_fn`. That is the layer that covers a reconciler whose exchange has no official `lib/order_*.py` and whose `place_order` was hand-written — the transport-layer check alone would miss it. Denials are audited and logged, but deliberately NOT sent to Telegram: the user tripped the halt to stop the noise.
 - `trip_halt(reason, source)` — set it (user says 停 / healthcheck anomaly). `clear_halt(source)` — **only on explicit user instruction; NEVER clear a halt on your own initiative.** `halted()` / `halt_info()` — check state.
 - Every order attempt / outcome / denial is appended to `state/audit.jsonl` (fsynced). When the user asks "你到底下了什麼單", read this file — it is the record of what was actually sent, not what was intended.
 

@@ -122,6 +122,11 @@ All chart text must be in English — Chinese characters render as garbled boxes
 - Use `python3 file.py [args]` or `node file.js` directly
 - To run a strategy: `python3 strategies/my_strategy/strategy.py` with `workdir=$BLAVECLAW_HOME/workspace` — `$BLAVECLAW_HOME` defaults to `/root/.openclaw` (Linux) / `C:\openclaw` (Windows) when unset, same resolution as `lib/notify.py`; some runtimes set it to a different path
 
+## Cross-Day Task Memory
+
+- For any task spanning days or many turns, keep a progress note in the workspace (e.g. `state/notes/<task>.md`): goal, what's done, next step. Chat history gets compacted; files don't.
+- If you can't recall an older conversation and the env var `BLAVE_AGENT_DB` is set, the full transcript is in that SQLite db (`turns` table). Use one-shot `sqlite3 -readonly` queries only — no interactive shell, never write to it; if the `sqlite3` CLI is missing, use python's `sqlite3` with URI `mode=ro`.
+
 ## Long-Running Processes & Memory
 
 **RAM on this machine is limited and shared with the agent runtime itself (check with `free -m`). A process that grows without bound will freeze the ENTIRE machine — the bot dies with it and the user is locked out.** (This has happened: an in-memory trade log grew to 1.9 GB and froze a machine for 24 hours.)

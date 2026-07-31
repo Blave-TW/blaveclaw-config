@@ -20,3 +20,6 @@ examples/**/regime.png
 examples/**/mcpt.png
 examples/**/heatmap.png
 /tmp/
+
+# platform-managed (skill_sync re-clones this daily) — never commit a copy
+skills/
