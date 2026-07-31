@@ -15,7 +15,29 @@ BLAVECLAW_HOME = os.environ.get("BLAVECLAW_HOME") or (
 )
 GATEWAY_SECRET = open(os.path.join(BLAVECLAW_HOME, "gateway_secret")).read().strip()
 SESSION_MAX_AGE = 28800  # 8 hours
-valid_sessions = set()
+valid_sessions = {}  # sid -> expire_ts (epoch seconds)
+
+
+def _sanitize_redirect(raw):
+    # Whitelist: only relative paths under /terminal/, no CRLF/scheme injection.
+    if raw.startswith("/terminal/") and "\r" not in raw and "\n" not in raw and "://" not in raw:
+        return raw
+    return "/terminal/"
+
+
+def _is_valid_session(sid):
+    if not sid or sid not in valid_sessions:
+        return False
+    if valid_sessions[sid] < time.time():
+        del valid_sessions[sid]
+        return False
+    return True
+
+
+def _prune_expired_sessions():
+    now = time.time()
+    for sid in [s for s, exp in valid_sessions.items() if exp < now]:
+        del valid_sessions[sid]
 
 
 def _verify_token(token):
@@ -47,7 +69,7 @@ class AuthHandler(BaseHTTPRequestHandler):
         session = _get_session_cookie(self.headers.get("Cookie", ""))
 
         if parsed.path == "/validate":
-            if session and session in valid_sessions:
+            if _is_valid_session(session):
                 self.send_response(200)
                 self.end_headers()
             else:
@@ -55,8 +77,8 @@ class AuthHandler(BaseHTTPRequestHandler):
                 self.end_headers()
             return
 
-        redirect = params.get("redirect", [""])[0] or "/terminal/"
-        if session and session in valid_sessions:
+        redirect = _sanitize_redirect(params.get("redirect", [""])[0] or "/terminal/")
+        if _is_valid_session(session):
             self.send_response(302)
             self.send_header("Location", redirect)
             self.end_headers()
@@ -64,8 +86,9 @@ class AuthHandler(BaseHTTPRequestHandler):
 
         token = params.get("token", [""])[0]
         if token and _verify_token(token):
+            _prune_expired_sessions()
             sid = secrets.token_urlsafe(32)
-            valid_sessions.add(sid)
+            valid_sessions[sid] = time.time() + SESSION_MAX_AGE
             self.send_response(302)
             self.send_header("Location", redirect)
             self.send_header(

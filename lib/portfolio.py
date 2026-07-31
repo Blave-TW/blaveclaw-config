@@ -1,5 +1,7 @@
-import glob, json, logging, os
+import glob, inspect, json, logging, os
 from datetime import datetime
+
+from lib import guard
 
 
 def _append_reconciler_log(order):
@@ -41,6 +43,30 @@ def load_portfolio_config():
         return {'account_value': 0, 'weights': {}, 'exchanges': {}, 'asset_specs': {}}
     with open(path) as f:
         return json.load(f)
+
+
+def portfolio_members():
+    """Strategy names that belong to the portfolio — the keys of
+    portfolio_config["exchanges"].
+
+    There is deliberately no separate membership list. `exchanges` is already
+    the hand-maintained record of "this strategy is deployed to trade on X",
+    already the thing manager.py never overwrites, and already what decides
+    whether a strategy trades. Making it decide weighting too means one list
+    instead of two that can disagree.
+
+    Returns None when nothing has been routed yet — "no list has been drawn up"
+    rather than "the list is empty". Callers then weight everything, which is
+    the behaviour that existed before members did, so a fresh machine still
+    works before the user has deployed anything.
+
+    Why it matters: weights sum to 1 across whatever goes into the optimiser.
+    A backtest-only experiment left in that pool takes a share of the capital
+    purely by existing, and the strategies actually trading get sized down for
+    it — silently, since nothing anywhere reports that split.
+    """
+    exchanges = load_portfolio_config().get('exchanges') or {}
+    return set(exchanges) or None
 
 
 def load_all_states():
@@ -174,6 +200,10 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
     This prevents simultaneous long+short on hedge-mode exchanges (OKX 兩倉模式, etc.).
     If place_order_fn does not accept reduce_only, the kwarg is silently dropped.
 
+    Kill switch: while state/HALT exists, legs that ADD exposure are denied here
+    (audited to state/audit.jsonl) before place_order_fn is called. Legs that
+    reduce or close a position always go through — see lib/guard.py.
+
     Returns list of orders placed.
     """
     config  = load_portfolio_config()
@@ -190,13 +220,24 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
     # reconcile that crashes mid-loop still leaves the observation behind.
     _write_reconcile_snapshot(target, actual, orders)
 
+    # Checked once via signature inspection (not a runtime try/except TypeError) so a
+    # TypeError raised *after* place_order_fn already submitted the order — e.g. while
+    # processing the exchange response — can't be misread as "no reduce_only support"
+    # and trigger a second, duplicate submission.
+    try:
+        _place_params = inspect.signature(place_order_fn).parameters
+        _supports_reduce_only = 'reduce_only' in _place_params or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in _place_params.values()
+        )
+    except (TypeError, ValueError):
+        _supports_reduce_only = False
+
     def _call_place(symbol, sub_diff, asset_spec, reduce_only):
         # Returns False if place_order_fn skipped the order (e.g. below exchange minimum).
         # Returns None/truthy on success. Propagates exceptions on failure.
-        try:
+        if _supports_reduce_only:
             return place_order_fn(symbol, sub_diff, asset_spec, reduce_only=reduce_only)
-        except TypeError:
-            return place_order_fn(symbol, sub_diff, asset_spec)
+        return place_order_fn(symbol, sub_diff, asset_spec)
 
     for order in orders:
         symbol     = order['symbol']
@@ -210,15 +251,35 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
                     -a.get('size', 0) if a.get('side') == 'short' else 0)
         t_signed = a_signed + diff
 
+        # Third element is is_entry — whether the leg ADDS exposure, which is the
+        # only thing state/HALT blocks. A flip's second leg always does; a plain
+        # adjustment only when it grows the position (|target| > |actual|), so a
+        # halt never traps a position that is being reduced.
         if a_signed != 0 and t_signed != 0 and t_signed * a_signed < 0:
-            sub_orders = [(-a_signed, True), (t_signed, False)]
+            sub_orders = [(-a_signed, True, False), (t_signed, False, True)]
         else:
-            sub_orders = [(diff, False)]
+            sub_orders = [(diff, False, abs(t_signed) > abs(a_signed))]
 
         failed = False
-        for sub_diff, reduce_only in sub_orders:
+        for sub_diff, reduce_only, is_entry in sub_orders:
             if abs(sub_diff) < threshold:
                 continue
+
+            # Kill switch, enforced here rather than only in lib/order_*.py: every
+            # reconciler goes through this function, including the hand-written
+            # place_order_fn of an exchange that has no official lib/order_* module.
+            # Deliberately silent on Telegram — the user tripped the halt, and a
+            # denial every poll is the noise they were trying to stop.
+            if is_entry and guard.halted():
+                guard.audit('order_denied_halt', symbol=symbol, signed_diff=sub_diff,
+                            exchange=order.get('exchange'), source='reconcile')
+                logging.warning(
+                    f"[reconcile] {symbol} entry {sub_diff:+.2f} denied — state/HALT is set "
+                    f"({guard.halt_info()})"
+                )
+                failed = True
+                break
+
             try:
                 placed = _call_place(symbol, sub_diff, asset_spec, reduce_only)
             except Exception as e:
