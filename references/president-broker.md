@@ -1,7 +1,7 @@
 # President Futures (統一期貨) Broker — Agent Reference
 
 Use this document when a user asks to connect their President Futures (統一期貨) account to
-BlaveClaw. The integration uses the official **Unitrade API** (`pip install unitrade`), a
+Blave Agent. The integration uses the official **Unitrade API** (`pip install unitrade`), a
 cross-platform Python package (Linux/Windows/macOS) published by President Futures.
 
 Package docs: https://pfcec.github.io/unitrade/ · PyPI: https://pypi.org/project/unitrade/
@@ -43,7 +43,7 @@ Most users onboarding for the first time want TXF only — the rest of this doc 
 
 **This step requires a Windows machine — the certificate issuance tool is Windows-only.** The
 resulting `.pfx` file itself is platform-agnostic and works fine when uploaded to the Linux
-BlaveClaw workspace; only *obtaining* it is the friction point.
+Blave Agent workspace; only *obtaining* it is the friction point.
 
 **Ask the user:**
 > 你之前有沒有用過統一期貨的下單軟體、或申請過電腦憑證？
@@ -76,8 +76,8 @@ pip install unitrade
 **Platform notes (confirmed by testing):**
 - PyPI ships wheels for **Linux x86_64 and Windows**, Python **3.7–3.12**. No `aarch64`/ARM Linux
   wheel, no `cp313`/`cp314` wheel as of this writing.
-- BlaveClaw's default Linux workspace (Ubuntu, x86_64, system Python 3.10) installs cleanly.
-- BlaveClaw Windows workspaces ship **Python 3.14** by default — `unitrade` will fail to install
+- Blave Agent's default Linux workspace (Ubuntu, x86_64, system Python 3.10) installs cleanly.
+- Blave Agent Windows workspaces ship **Python 3.14** by default — `unitrade` will fail to install
   there until a 3.12-or-earlier interpreter is set up alongside it. **Recommend Linux workspaces
   for this integration** unless the user's machine is confirmed to have a compatible Python.
 - Before running Step 1 code below, confirm with `python3 -c "import platform; print(platform.machine(), platform.python_version())"` — if the machine is ARM or Python is 3.13+, stop and tell the user this broker isn't supported on their current machine.
@@ -260,7 +260,7 @@ rounds of lost orders on SinoPac — see `references/sinopac-broker.md` § Field
   contract id — there is no static rolling alias like SinoPac's `TXFR1`.
 - `query_reply`/`query_match` reject an empty string for the count parameter; always pass an int.
 - No confirmed IP allowlisting behavior for the **production** environment yet — ask the broker
-  rep whether the BlaveClaw machine's static IP needs to be registered before going live.
+  rep whether the Blave Agent machine's static IP needs to be registered before going live.
 - Unitrade has no Linux ARM wheel and no Python 3.13+ wheel as of this writing (see Step 3).
 
 ---

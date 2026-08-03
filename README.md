@@ -1,6 +1,6 @@
-# BlaveClaw Config
+# Blave Agent Config
 
-Workspace config for BlaveClaw agents. Contains AGENTS.md, shared library, strategy template, manager system, and reference docs.
+Workspace config for Blave Agent. Contains AGENTS.md, shared library, strategy template, manager system, and reference docs.
 
 Fresh installs are handled automatically by the provisioning script — no manual steps needed.
 

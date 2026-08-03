@@ -1,6 +1,6 @@
 # SinoPac (永豐金) Broker — Agent Reference
 
-Use this document when a user asks to connect their SinoPac account to BlaveClaw.
+Use this document when a user asks to connect their SinoPac account to Blave Agent.
 
 **Stock order placement is implemented in `lib/order_sinopac.py` — import it, never hand-write
 Shioaji order calls in a strategy or one-off script.** Every rule in the Field-Verified Lessons

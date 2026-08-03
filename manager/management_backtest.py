@@ -1,5 +1,5 @@
 """
-BlaveClaw Management Backtest
+Blave Agent Management Backtest
 
 Walk-forward simulation of the manager's dynamic portfolio allocation.
 Each day, optimizes weights using the past `lookback` days (strictly OOS),
@@ -165,7 +165,7 @@ def _plot(managed_ret: pd.Series, bench_rets: np.ndarray,
 
 
 def main():
-    parser = argparse.ArgumentParser(description='BlaveClaw Management Backtest')
+    parser = argparse.ArgumentParser(description='Blave Agent Management Backtest')
     parser.add_argument('--lookback', type=int,   default=LOOKBACK,
                         help=f'Optimization window in days (default {LOOKBACK})')
     parser.add_argument('--random-n', type=int,   default=RANDOM_N,

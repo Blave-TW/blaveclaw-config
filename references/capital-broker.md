@@ -85,7 +85,7 @@ shown in the Blave Agent web dashboard (「手動連線資訊」link: IP, Admini
    inside the same RDP session with the user instead of pre-staging it silently.
 2. Tell the user (Telegram):
    > 請連進你的 Blave Agent 機器桌面，跑一次群益的憑證精靈（約兩分鐘）：
-   > 1. 到 Blave 網站的 Blave Agent 頁面，點「開啟遠端桌面」——瀏覽器會直接開你的機器桌面，不用裝任何軟體
+   > 1. 到 Blave 網站的 Blave Agent 頁面，點「遠端桌面連線」——瀏覽器會直接開你的機器桌面，不用裝任何軟體
    > 2. 點開桌面上的 RAWinApp.exe（我已下載好）
    > 3. 輸入身分證字號＋交易密碼登入，手機會收到簡訊驗證碼，照精靈完成憑證安裝
    > 4. 完成後跟我說一聲

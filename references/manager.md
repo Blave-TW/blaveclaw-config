@@ -134,7 +134,7 @@ To check status: `nssm status blaveclaw-reconciler`. To stop: `nssm stop blavecl
 
 **Capital (群益) broker exception:** NSSM services default to running as `LocalSystem`. Capital's
 `SKCOM.dll` binds the certificate to the Windows identity that issued it (always `Administrator`
-on BlaveClaw machines — see `references/capital-broker.md` Step 2), so a service running as
+on Blave Agent machines — see `references/capital-broker.md` Step 2), so a service running as
 `LocalSystem` fails `SKCenterLib_Login` with error 602 even though the cert is correctly installed.
 If any portfolio in `portfolio_config.json["exchanges"]` uses `"capital"`, set the service identity
 to Administrator before starting it:

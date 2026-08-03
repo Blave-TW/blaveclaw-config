@@ -1,5 +1,5 @@
 """
-BlaveClaw Strategy Manager
+Blave Agent Strategy Manager
 
 Finds portfolio weights w that maximize slope/std of the combined
 portfolio returns (R · w), where R is the strategy returns matrix.
@@ -113,7 +113,7 @@ def optimize_weights(ret_df, lookback):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='BlaveClaw Strategy Manager')
+    parser = argparse.ArgumentParser(description='Blave Agent Strategy Manager')
     parser.add_argument('--lookback',   type=int,   default=LOOKBACK,   help=f'Lookback window in days (default {LOOKBACK})')
     parser.add_argument('--target-vol', type=float, default=TARGET_VOL, help=f'Target annual volatility for leverage (default {TARGET_VOL})')
     parser.add_argument('--notify',     action='store_true',             default=NOTIFY, help='Send Telegram notification after update')
@@ -210,7 +210,7 @@ def main():
             json.dump(cfg, f, indent=2)
 
     # Print summary
-    print(f'\nBlaveClaw Strategy Manager  (lookback={args.lookback}d, method={method})')
+    print(f'\nBlave Agent Strategy Manager  (lookback={args.lookback}d, method={method})')
     print(f'{"Strategy":<28} {"Indiv Score":>12} {"Weight":>8} {"Sharpe":>8} {"MDD%":>8} {"Symbol":<16}')
     print('-' * 86)
     for name in sorted(weights, key=lambda x: weights[x], reverse=True):
@@ -235,7 +235,7 @@ def main():
         try:
             from lib.notify import send_text
             action = 'Portfolio updated' if args.apply else 'Proposed weights (DRY RUN, config not modified)'
-            lines = [f'[BlaveClaw Manager] {action} (lookback={args.lookback}d, method={method})']
+            lines = [f'[Blave Agent Manager] {action} (lookback={args.lookback}d, method={method})']
             for name, w in sorted(weights.items(), key=lambda x: x[1], reverse=True):
                 sharpe = valid[name].get('Sharpe Ratio') or 0.0
                 lines.append(f'  {name}: {w:.1%}  Sharpe {sharpe:.2f}')
