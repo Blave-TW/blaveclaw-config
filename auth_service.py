@@ -99,7 +99,7 @@ class AuthHandler(BaseHTTPRequestHandler):
             return
 
         self.send_response(302)
-        self.send_header("Location", "https://blave.org/blaveclaw")
+        self.send_header("Location", "https://blave.org/agent")
         self.end_headers()
 
     def log_message(self, *args):
