@@ -1,10 +1,10 @@
 # Capital (群益) Broker — Agent Reference
 
 Use this document when a user asks to connect their **Capital Securities (群益證券)** and/or
-**Capital Futures (群益期貨)** account to BlaveClaw — same corporate group, same underlying API,
+**Capital Futures (群益期貨)** account to Blave Agent — same corporate group, same underlying API,
 one certificate covers both markets. The integration uses the official **Capital API**
 (`SKCOM.dll`, a Windows COM component) — **Windows-only**, so this broker requires a
-**Windows BlaveClaw workspace**. There is no cross-platform package (unlike SinoPac/President).
+**Windows Blave Agent workspace**. There is no cross-platform package (unlike SinoPac/President).
 
 Steps 1–6 (agreement, certificate, component install, login, accounts) are **shared** by both
 markets. Order placement diverges — see Step 7a (Futures) / Step 7b (Securities).
@@ -58,17 +58,17 @@ cannot run there — escalate to Blave ops for a Windows machine before continui
 
 ---
 
-## Step 2 — Issue the Certificate on the BlaveClaw Machine (RDP)
+## Step 2 — Issue the Certificate on the Blave Agent Machine (RDP)
 
 Since API 2.13.35, login is dual-factor: **a valid 群益 trading certificate must be installed on
 the machine that runs the API — even for quote-only use.** The issuance tool (`RAWinApp.exe`) is
 Windows-only, and the cert lands in the Windows certificate store, so issue it **directly on the
-BlaveClaw Windows machine** via RDP. The user does NOT need their own Windows PC.
+Blave Agent Windows machine** via RDP. The user does NOT need their own Windows PC.
 
 Flow (agent orchestrates):
 
-RDP is a standing feature of Windows BlaveClaw machines — enabled at provision time, credentials
-shown in the BlaveClaw web dashboard (「手動連線資訊」link: IP, Administrator, password + reset).
+RDP is a standing feature of Windows Blave Agent machines — enabled at provision time, credentials
+shown in the Blave Agent web dashboard (「手動連線資訊」link: IP, Administrator, password + reset).
 
 1. Agent pre-downloads the issuance tool to the desktop (run as admin) so the user only has to
    run the wizard. **`www2.capital.com.tw` is a dead hostname as of 2026-07-16 (confirmed NXDOMAIN,
@@ -84,8 +84,8 @@ shown in the BlaveClaw web dashboard (「手動連線資訊」link: IP, Administ
    running the download. If the agent has no browser automation on this machine, do this step
    inside the same RDP session with the user instead of pre-staging it silently.
 2. Tell the user (Telegram):
-   > 請連進你的 BlaveClaw 機器桌面，跑一次群益的憑證精靈（約兩分鐘）：
-   > 1. 到 Blave 網站的 BlaveClaw 頁面，點「開啟遠端桌面」——瀏覽器會直接開你的機器桌面，不用裝任何軟體
+   > 請連進你的 Blave Agent 機器桌面，跑一次群益的憑證精靈（約兩分鐘）：
+   > 1. 到 Blave 網站的 Blave Agent 頁面，點「開啟遠端桌面」——瀏覽器會直接開你的機器桌面，不用裝任何軟體
    > 2. 點開桌面上的 RAWinApp.exe（我已下載好）
    > 3. 輸入身分證字號＋交易密碼登入，手機會收到簡訊驗證碼，照精靈完成憑證安裝
    > 4. 完成後跟我說一聲
@@ -153,7 +153,7 @@ the desktop for the user to double-click.**
    comtypes cache** (`site-packages/comtypes/gen/SKCOMLib.py` + the GUID-named module) — stale
    generated wrappers cause silent quote/order anomalies.
 
-Python packages: `pip install comtypes pywin32`. Verified on a BlaveClaw Windows workspace's
+Python packages: `pip install comtypes pywin32`. Verified on a Blave Agent Windows workspace's
 Python 3.14 (2026-07-17, medium_win POC box): comtypes 1.4.16 + pywin32 312 install cleanly and
 COM CreateObject / Dispatch / message pump all work. (SKCOM.dll itself untested there — the zip
 is login-gated; confirm `GetModule` on first real onboarding.)
