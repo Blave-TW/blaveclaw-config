@@ -2,18 +2,27 @@
 # Before implementing: read skills/blave-quant/references/{exchange}-skill.md for
 # the correct balance and position endpoints, auth pattern, and response schema.
 #
-# API keys go in .env (same file as blave keys):
-#   {exchange}_api_key, {exchange}_secret_key, {exchange}_passphrase (if required)
+# API keys are already in .env — read the EXACT names that exist there (grep .env
+# first). Web-connected exchanges arrive uppercase ({EXCHANGE}_API_KEY /
+# {EXCHANGE}_SECRET_KEY / {EXCHANGE}_PASSPHRASE); some older integrations are
+# lowercase (sinopac_api_key). Never invent or re-case names.
 #
-# snapshot.py auto-imports this file by name — no changes to snapshot.py needed.
+# Platform readers auto-import this file by name — keep the exact filename convention.
 
 
 def get_equity(env: dict) -> dict:
     """
-    Query exchange for total account equity.
+    Query exchange for account equity.
     Returns {'equity': float, 'currency': str}
+    Optionally add 'accounts': {name: float} — per-wallet breakdown (lowercase
+    names like 'swap'/'spot'/'fund', USDT-denominated, best-effort), shown on
+    the web so funds outside the trading account don't look like they vanished.
 
-    env: dict from dotenv_values() — read keys with env.get('{exchange}_api_key'), etc.
+    Multi-account venues: equity = the account orders are placed on (it is the
+    position-sizing base) — never the sum across spot/futures/funding accounts.
+
+    env: dict from dotenv_values() — read the exact key names present in .env
+    (web-connected exchanges: env.get('{EXCHANGE}_API_KEY'), uppercase).
     """
     raise NotImplementedError
 

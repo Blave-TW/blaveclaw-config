@@ -163,7 +163,7 @@ for p in (positions.data or []):
 
 **Note:** on a test account with no funded balance, `get_margin` legitimately returns
 `ok=False, error='查無資料'` — this is not a connection failure. Re-verify equity once the
-production account is live and funded, since `manager/snapshot.py` depends on this call.
+production account is live and funded, since equity reporting depends on this call.
 
 **Near-month contract lookup** (no `TXFR1`-style auto-roll alias exists in Unitrade):
 
@@ -274,5 +274,4 @@ rounds of lost orders on SinoPac — see `references/sinopac-broker.md` § Field
 5. 下一筆市價測試單（1 口）→ `orderstatus == '委託成功'`（測試環境不會真的成交）
 6. 用戶通知營業員委託測試完成 → 等待正式環境開通信
 7. 正式環境開通後，重複步驟 2–5（更換 URL、憑證維持不變）
-8. 執行 `python3 manager/snapshot.py` → Telegram 收到含 president equity 的日報
-9. 用戶確認後，方可設定 reconciler 上線（參考 `references/deployment.md`）
+8. 用戶確認後，方可設定 reconciler 上線（參考 `references/deployment.md`）

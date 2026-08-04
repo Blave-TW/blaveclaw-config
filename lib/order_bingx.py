@@ -210,10 +210,20 @@ def _send(method, path, env, params=None, signed=True, retries=3):
 
 # ── contract rules / quantity formatting ────────────────────────────────────
 
+def _bingx_symbol(sym):
+    """Canonical dashless symbols (BTCUSDT — what strategies/reconciler use)
+    → BingX swap format (BTC-USDT). Already-dashed symbols pass through."""
+    import re as _re
+    if "-" not in sym:
+        return _re.sub(r"^([A-Z0-9]+?)(USDT|USDC)$", r"\1-\2", sym.upper())
+    return sym
+
+
 def get_contract_rules(env, symbol):
     """Rules for one symbol. {'qty_precision', 'price_precision', 'min_qty',
     'min_notional', 'active'} — precisions are DECIMAL PLACES (BingX swap gives
     digit counts, not tick sizes). Cached per process."""
+    symbol = _bingx_symbol(symbol)
     if symbol not in _rules_cache:
         rows = _request("GET", "/openApi/swap/v2/quote/contracts", env, signed=False) or []
         for r in rows:
@@ -326,6 +336,7 @@ def place_market_order(env, symbol, direction, qty, client_order_id=None,
     request param spelling is clientOrderID (official docs mix both spellings;
     capital ID is what ccxt ships in production), while query RESPONSES come
     back as clientOrderId."""
+    symbol = _bingx_symbol(symbol)
     mode = get_position_mode(env)
     if reduce_only:
         side = "SELL" if direction == "long" else "BUY"
@@ -354,6 +365,7 @@ def place_limit_order(env, symbol, direction, qty, price, client_order_id=None,
                       reduce_only=False, time_in_force="GTC"):
     """Limit order. Returns the raw (unconfirmed) order dict with orderId —
     limit orders may rest; use confirm_order / get_order to track it."""
+    symbol = _bingx_symbol(symbol)
     mode = get_position_mode(env)
     if reduce_only:
         side = "SELL" if direction == "long" else "BUY"
@@ -425,6 +437,7 @@ def confirm_order(env, symbol, order_id, timeout=15):
 def get_open_orders(env, symbol=None):
     """All open orders (entry + conditional). Returns a list of raw order dicts
     with orderId normalized to str."""
+    symbol = _bingx_symbol(symbol) if symbol else symbol
     params = {"symbol": symbol} if symbol else {}
     data = _request("GET", "/openApi/swap/v2/trade/openOrders", env, params) or {}
     orders = data.get("orders", []) if isinstance(data, dict) else data
@@ -437,6 +450,7 @@ def get_open_orders(env, symbol=None):
 def cancel_order(env, symbol, order_id=None, client_order_id=None):
     """Cancel one order by orderId or clientOrderID. Returns the canceled
     order's raw dict. Raises BingXError if the exchange refuses."""
+    symbol = _bingx_symbol(symbol)
     params = {"symbol": symbol}
     if order_id:
         params["orderId"] = str(order_id)
@@ -450,7 +464,8 @@ def cancel_order(env, symbol, order_id=None, client_order_id=None):
 def cancel_all_orders(env, symbol):
     """Cancel ALL open orders for a symbol (including protective orders —
     only do this when also closing the position)."""
-    return _request("DELETE", "/openApi/swap/v2/trade/allOpenOrders", env, {"symbol": symbol})
+    return _request("DELETE", "/openApi/swap/v2/trade/allOpenOrders", env,
+                    {"symbol": _bingx_symbol(symbol)})
 
 
 # ── protective orders (standalone) ───────────────────────────────────────────
@@ -472,6 +487,7 @@ def place_protective_orders(env, symbol, direction, qty=None, sl_price=None,
     VST quirk: the demo environment rejects closePosition=true with 109400
     ("parameter quantity or stopPrice is must") — on BINGX_DEMO=true, pass an
     explicit qty instead."""
+    symbol = _bingx_symbol(symbol)
     mode = get_position_mode(env)
     close_side = "SELL" if direction == "long" else "BUY"
     placed = {}
@@ -530,6 +546,7 @@ def open_position(env, symbol, direction, qty, sl_price=None, tp_price=None,
     Returns {'entry': confirmed order dict, 'protection': [raw conditional
     orders found on the exchange]}. Raises ProtectionFailed if sl/tp was
     requested but no conditional order is visible after the fill."""
+    symbol = _bingx_symbol(symbol)
     entry = place_market_order(
         env, symbol, direction, qty,
         client_order_id=client_order_id,
@@ -560,6 +577,7 @@ def open_position(env, symbol, direction, qty, sl_price=None, tp_price=None,
 def close_position(env, symbol, direction, qty, client_order_id=None):
     """Market-close (part of) an existing position, confirmed. direction is the
     POSITION being closed ('long'|'short')."""
+    symbol = _bingx_symbol(symbol)
     return place_market_order(
         env, symbol, direction, qty,
         client_order_id=client_order_id, reduce_only=True,
@@ -574,7 +592,7 @@ def get_fills(env, symbol, start_ms, end_ms):
     (snake_case), filledTime is an ISO-8601 STRING (not ms). tradingUnit=COIN
     is sent so `volume` is already coin quantity (CONT would mean contracts)."""
     data = _request("GET", "/openApi/swap/v2/trade/allFillOrders", env, {
-        "symbol": symbol,
+        "symbol": _bingx_symbol(symbol),
         "startTs": str(int(start_ms)),
         "endTs": str(int(end_ms)),
         "tradingUnit": "COIN",
@@ -593,12 +611,13 @@ def set_leverage(env, symbol, leverage, side="LONG"):
     both sides for symmetry. Never silently inherit: query first, set only on
     user instruction (see references/manager.md confirmation rules)."""
     return _request("POST", "/openApi/swap/v2/trade/leverage", env, {
-        "symbol": symbol, "side": side, "leverage": str(int(leverage)),
+        "symbol": _bingx_symbol(symbol), "side": side, "leverage": str(int(leverage)),
     })
 
 
 def get_leverage(env, symbol):
-    data = _request("GET", "/openApi/swap/v2/trade/leverage", env, {"symbol": symbol}) or {}
+    data = _request("GET", "/openApi/swap/v2/trade/leverage", env,
+                    {"symbol": _bingx_symbol(symbol)}) or {}
     return {
         "long": int(data.get("longLeverage") or data.get("leverage") or 0),
         "short": int(data.get("shortLeverage") or data.get("leverage") or 0),
@@ -616,3 +635,10 @@ def claim_demo_funds(env, amount=100000):
     return _request("POST", "/openApi/swap/v2/trade/getVst", env, {
         "adjustType": "0", "amount": str(int(amount)),
     })
+
+
+def close_position_partial(env, symbol, direction, qty, client_order_id=None):
+    """Cross-venue reconciler contract name. BingX's close_position already
+    takes qty (partial-capable) — same call; OKX splits full vs partial, so
+    the reconciler standardises on close_position_partial."""
+    return close_position(env, symbol, direction, qty, client_order_id=client_order_id)

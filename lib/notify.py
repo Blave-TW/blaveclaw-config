@@ -106,8 +106,25 @@ def make_sender(photo=False):
 
     Raises RuntimeError if Telegram rejects the send. Text messages longer
     than TELEGRAM_TEXT_LIMIT are split into multiple messages automatically.
+
+    Telegram UNCONFIGURED (web-only user who never paired a bot) degrades to
+    a log-only sender instead of raising — strategies and daemons must run
+    for web users too; their surface is the workspace page. Send rejections
+    on a configured bot still raise (never fail silently).
     """
-    token, chat_ids = _load_config()
+    try:
+        token, chat_ids = _load_config()
+    except (FileNotFoundError, KeyError) as e:
+        import logging
+        logging.warning(f"telegram notify unavailable ({e}) — log-only sender")
+        if photo:
+            def _log_photo(path):
+                logging.warning(f"[notify-unavailable] photo not sent: {path}")
+            return _log_photo
+
+        def _log_text(msg):
+            logging.warning(f"[notify-unavailable] {msg}")
+        return _log_text
 
     if photo:
         def _send_photo(path: str) -> None:

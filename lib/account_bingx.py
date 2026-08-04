@@ -1,8 +1,8 @@
 """
 BingX account library — swap/futures equity & positions.
 
-Auto-discovered by manager/snapshot.py (lib.account_bingx.get_equity /
-get_positions). Credentials: BINGX_API_KEY, BINGX_SECRET_KEY in .env.
+Discovered by filename (lib.account_bingx.get_equity / get_positions).
+Credentials: BINGX_API_KEY, BINGX_SECRET_KEY in .env.
 X-SOURCE-KEY: BX-AI-SKILL broker attribution is mandatory on every request —
 see skills/blave-quant/references/bingx-skill.md.
 
@@ -59,8 +59,25 @@ def _public_get(path, params=None):
     return _call(f"{path}?{qs}" if qs else path, {"X-SOURCE-KEY": "BX-AI-SKILL"})
 
 
+def _usdt_cash(data, list_key):
+    """USDT free+locked from a spot/fund balance payload. USDT only — valuing
+    other assets would need price lookups; documented as a known limit."""
+    rows = (data or {}).get(list_key) or []
+    row = next((r for r in rows if r.get("asset") == "USDT"), {})
+    return float(row.get("free", 0)) + float(row.get("locked", 0))
+
+
 def get_equity(env: dict) -> dict:
-    """Swap/futures account equity. Returns {'equity': float, 'currency': str}.
+    """Swap/futures account equity, plus a per-account breakdown.
+
+    Returns {'equity': float, 'currency': str, 'accounts': {name: float}}.
+    `equity` is the SWAP account only — that is what the reconciler trades
+    with, so it is the position-sizing base. `accounts` is display-only:
+    BingX keeps fund/spot/swap as separate wallets with no auto-transfer,
+    and money sitting outside swap would otherwise look like it vanished.
+    (Deliberately NOT /openApi/account/v1/allAccountBalance — measured on a
+    live account it omits the fund wallet and reported 0 for a spot wallet
+    holding >100 USDT.)
 
     /openApi/swap/v3/user/balance returns `data` as an array of per-asset
     balance rows (BingX swap supports USDT- and USDC-margined accounts) —
@@ -69,7 +86,39 @@ def get_equity(env: dict) -> dict:
     """
     rows = _signed_get("/openApi/swap/v3/user/balance", env) or []
     row = next((r for r in rows if r.get("asset") == "USDT"), rows[0] if rows else {})
-    return {"equity": float(row.get("equity", 0)), "currency": row.get("asset", "USDT")}
+    equity = float(row.get("equity", 0))
+
+    accounts = {"swap": equity}
+    # Best-effort: the breakdown failing must not take the main equity down.
+    try:
+        accounts["spot"] = _usdt_cash(
+            _signed_get("/openApi/spot/v1/account/balance", env), "balances"
+        )
+    except Exception:
+        pass
+    try:
+        accounts["fund"] = _usdt_cash(
+            _signed_get("/openApi/fund/v1/account/balance", env), "assets"
+        )
+    except Exception:
+        pass
+    # Wallets with no dedicated endpoint (standard futures / coin-M / copy
+    # trading) come from the allAccountBalance overview — measured accurate
+    # for these types (its spot row is NOT; never use it for spot/fund).
+    # ALWAYS listed, zeros included: the complete wallet map is itself the
+    # information — a user who can see 標準合約 $0 in the list won't be
+    # surprised when a transfer lands there (Wei 2026-08-04).
+    try:
+        rows2 = _signed_get("/openApi/account/v1/allAccountBalance", env) or []
+        extra = {"stdFutures": "std_futures", "coinMPerp": "coinm_perp",
+                 "copyTrading": "copy_trading"}
+        for r2 in rows2:
+            key = extra.get(r2.get("accountType"))
+            if key:
+                accounts[key] = float(r2.get("usdtBalance", 0) or 0)
+    except Exception:
+        pass
+    return {"equity": equity, "currency": row.get("asset", "USDT"), "accounts": accounts}
 
 
 def get_positions(env: dict) -> list:
@@ -98,9 +147,20 @@ def get_positions(env: dict) -> list:
             return float(p["markPrice"])
         return mark_prices.get(p.get("symbol"), float(p.get("avgPrice", 0)))
 
+    def _side(p):
+        s = (p.get("positionSide") or "").lower()
+        if s in ("long", "short"):
+            return s
+        # one-way accounts report positionSide "BOTH" — direction is the sign
+        # of positionAmt. Without this, callers see side="both": flatten skips
+        # the row and the reconciler treats actual as 0 → doubles the position.
+        return "short" if float(p.get("positionAmt", 0)) < 0 else "long"
+
     return [{
-        "symbol": p.get("symbol"),
-        "side": p.get("positionSide", "").lower(),
+        # canonical dashless uppercase (BingX reports 'BTC-USDT') — the
+        # reconciler keys target/actual on this format
+        "symbol": (p.get("symbol") or "").replace("-", "").upper(),
+        "side": _side(p),
         "size": abs(float(p.get("positionAmt", 0))),
         "mark_price": _mark_price(p),
     } for p in rows]

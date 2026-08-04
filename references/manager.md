@@ -66,6 +66,8 @@ Polls every 5 seconds; only reconciles when a strategy's `state.json` mtime chan
 
 **Wiring exchange order libraries (required, not optional):** `get_positions()` and `place_order()` must call into a `lib/order_*.py` helper — never remain as `raise NotImplementedError`. When writing a new order library, immediately update `reconciler.py` to import and call it in the same session.
 
+**Auto-halt on exchange disconnect:** `reconciler.py` wraps `get_positions()` in `_get_positions_guarded()`, which counts consecutive failures (`DISCONNECT_HALT_AFTER = 3`) and calls `guard.trip_halt()` once that's hit — the reasoning is that a failed `get_positions()` means the exchange link itself is unreachable (bad/revoked key, IP unwhitelisted, outage), not a single order being rejected (which `reconcile()` already handles per-order without halting). This only ever halts, never auto-clears — same as every other halt, only the user resumes it. Applies uniformly to every exchange without needing a shared exception type, since it keys off `get_positions()` failing at all rather than inspecting the error.
+
 **Qty precision (most common cause of rejected orders):** before placing any order, the order library must know the symbol's qty step, min qty, and min notional — fetch them from the exchange and cache at startup:
 
 | Exchange | Endpoint | Fields |
@@ -103,15 +105,20 @@ Run via `start_reconciler.sh` (Linux) / `start_reconciler_windows.ps1` (Windows)
 
 **Changing `account_value` (capital):** edit `portfolio_config.json["account_value"]` by hand — the ONLY way, and only when the user explicitly asks to change capital (never as a side effect of a weight update). Procedure: (1) the value is total account equity in the account currency (USD) — use the real figure, never a placeholder like 10000; (2) editing resizes every live position, so show the user the old → new value and get explicit confirmation BEFORE writing, same as `--apply`; (3) no restart needed — the reconciler re-reads the file on its next poll. `manager.py` never writes this field.
 
+**Order-qty UNITS pitfall (measured live 2026-08, sCode 51008):** the order libs'
+`place_market_order` / `close_position_partial` take **BASE-currency qty** (ETH, SOL…)
+and convert to contracts internally. Never pass `format_qty`'s return onward — it is a
+CONTRACT count, and re-converting divides by ctVal twice: invisible on SOL (ctVal=1),
+10× oversized on ETH (ctVal=0.1). Use `format_qty` as the min-size gate only. Partial
+reduces go through `close_position_partial`, not `close_position` (full close, no qty).
+
 **OKX `get_positions()` pitfall:** OKX positions API returns `ctVal` as `None` for some instrument types. Do NOT compute notional as `pos * markPx * ctVal` — use the `notionalUsd` field directly instead. Zero notional causes the position to be ignored and reconciliation skipped.
 
-**Account library — create `lib/account_{exchange}.py`:** To wire snapshot for an exchange, copy `lib/account_TEMPLATE.py` to `lib/account_{exchange}.py` and implement `get_equity(env)` and `get_positions(env)`. `snapshot.py` auto-discovers this file by name — **do NOT modify snapshot.py**. API keys go in `.env` (e.g. `OKX_API_KEY`, `OKX_SECRET_KEY`, `OKX_PASSPHRASE` — match the casing already used for that exchange's keys elsewhere in `.env`). Before writing, read the relevant skill reference under `skills/blave-quant/references/` for the correct balance and position endpoints.
+**Account library — create `lib/account_{exchange}.py`:** To read equity/positions for an exchange, copy `lib/account_TEMPLATE.py` to `lib/account_{exchange}.py` and implement `get_equity(env)` and `get_positions(env)`. Platform readers discover the file by its exact name — keep the naming convention. API keys go in `.env` (e.g. `OKX_API_KEY`, `OKX_SECRET_KEY`, `OKX_PASSPHRASE` — match the casing already used for that exchange's keys elsewhere in `.env`). Before writing, read the relevant skill reference under `skills/blave-quant/references/` for the correct balance and position endpoints.
 
 **BingX is already wired — `lib/account_bingx.py` ships implemented, no template copy needed.** Covers the SWAP (perp/futures) account only, via `/openApi/swap/v3/user/balance` and `/openApi/swap/v2/user/positions`. BingX keeps fund/spot/swap as three separate accounts with no auto-transfer (see `skills/blave-quant/references/bingx-api-reference.md`) — if the user's capital is in the spot or fund account, `get_equity()` will under-report; extend it rather than writing a second file.
 
 **`portfolio_config.json["messages"]`** — Telegram message templates for reconciler and watchdog. Keys: `order_buy`, `order_sell`, `order_close_long`, `order_close_short`, `order_error`, `watchdog_started`, `watchdog_restart`. Placeholders: `{symbol}`, `{amount}`, `{error}`, `{code}`. Edit these to match the user's preferred language when deploying.
-
-**`manager/snapshot.py`** — daily account equity snapshot. Reads unique exchanges from `portfolio_config.json["exchanges"]`, auto-imports `lib/account_{exchange}.py` per exchange, records to `manager/snapshots.jsonl`, sends Telegram report. Scheduled daily at 08:00 UTC — see `references/deployment.md` for the exact cron (Linux) / schtasks (Windows) entry. The working-directory prefix (`cd &&` / `cd /d &&`) is mandatory on both OSes — the scheduler does not run from the workspace by default and all paths in this repo are relative; without it every file open fails silently before Telegram is reached.
 
 **Always start the reconciler via the watchdog wrapper**, not `reconciler.py` directly and never with `nohup &`. `nohup &` background processes are killed when the shell session ends.
 

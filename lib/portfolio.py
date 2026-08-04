@@ -5,10 +5,16 @@ from lib import guard
 
 
 def _append_reconciler_log(order):
-    os.makedirs('manager', exist_ok=True)
-    entry = {'ts': datetime.utcnow().isoformat(), **order}
-    with open('manager/orders.jsonl', 'a') as f:
-        f.write(json.dumps(entry) + '\n')
+    # Best-effort like the other two writers: a full disk (measured on the
+    # fleet) must not abort the reconcile loop mid-round — the order already
+    # happened, losing the log line is the lesser failure.
+    try:
+        os.makedirs('manager', exist_ok=True)
+        entry = {'ts': datetime.utcnow().isoformat(), **order}
+        with open('manager/orders.jsonl', 'a') as f:
+            f.write(json.dumps(entry) + '\n')
+    except OSError as e:
+        logging.error(f"orders.jsonl append failed: {e}")
 
 
 def _write_reconcile_snapshot(target, actual, orders):
@@ -34,6 +40,25 @@ def _write_reconcile_snapshot(target, actual, orders):
             }, f, indent=2)
     except Exception as e:
         logging.warning(f'failed to write manager/last_reconcile.json: {e}')
+
+
+def _record_order_error(symbol, exchange, error):
+    """Last few order failures, for the workspace page — a reconciler that
+    fails silently in a tmux log is indistinguishable from one that never
+    tried (measured UX complaint). Best-effort; keeps the newest 5."""
+    try:
+        path = 'manager/order_errors.json'
+        try:
+            with open(path) as f:
+                rows = json.load(f)
+        except (OSError, ValueError):
+            rows = []
+        rows.append({'ts': datetime.utcnow().isoformat(), 'symbol': symbol,
+                     'exchange': exchange, 'error': str(error)[:200]})
+        with open(path, 'w') as f:
+            json.dump(rows[-5:], f, indent=2)
+    except Exception as e:
+        logging.warning(f'failed to record order error: {e}')
 
 
 def load_portfolio_config():
@@ -82,11 +107,35 @@ def load_all_states():
     return states
 
 
+def strategy_amounts(config=None):
+    """{strategy: dollars} — the per-strategy sizing base.
+
+    `amounts` is canonical (2026-08-03: 金額是介面也是儲存 — what the user
+    typed is what sizes positions, and it never drifts with equity). Configs
+    from before the change have no `amounts`; for those, fall back to the old
+    account_value × leverage × weight expression so existing deployments keep
+    trading identically until they are re-saved from the web.
+    """
+    config = config if config is not None else load_portfolio_config()
+    amounts = config.get('amounts')
+    if isinstance(amounts, dict):
+        return {k: float(v) for k, v in amounts.items()}
+    account_value = float(config.get('account_value', 0))
+    leverage      = float(config.get('leverage', 1.0))
+    weights       = config.get('weights', {}) or {}
+    return {k: account_value * leverage * float(w) for k, w in weights.items()}
+
+
 def aggregate_portfolio():
     """
     Aggregate all strategy states into net target positions using portfolio config.
 
-    target[symbol] = account_value × Σ(weight_i × position_i)  (in account currency)
+    target[symbol] = Σ(amount_i × position_i)  (in account currency)
+
+    amount_i is the strategy's dollar allocation (portfolio_config["amounts"],
+    see strategy_amounts) — "what this strategy trades with at position=1";
+    position is the strategy's signal and may be a fractional scaling factor
+    (vol-scaled strategies emit 0.5, 1.8, …), not just ±1.
 
     Returns {symbol: {'side': 'long'|'short'|None, 'size': float,
                        'exchange': str, 'asset_spec': dict|None}}
@@ -96,12 +145,10 @@ def aggregate_portfolio():
       {"type": "futures_contracts", "contract_value": 200,
        "currency": "TWD", "lot_size": 1}
 
-    Strategies not listed in weights, missing symbol, or missing exchange in config are skipped.
+    Strategies with no amount, missing symbol, or missing exchange in config are skipped.
     """
     config        = load_portfolio_config()
-    account_value = float(config.get('account_value', 0))
-    leverage      = float(config.get('leverage', 1.0))
-    weights       = config.get('weights', {})
+    amounts       = strategy_amounts(config)
     exchanges     = config.get('exchanges', {})
     asset_specs   = config.get('asset_specs', {})
     states        = load_all_states()
@@ -109,15 +156,19 @@ def aggregate_portfolio():
 
     for name, state in states.items():
         symbol     = state.get('symbol')
+        # canonical symbol key: dashless uppercase (BTCUSDT) — strategies write
+        # Binance-style, OKX reports dashed; without one canon the reconciler
+        # sees "BTCUSDT target" and "BTC-USDT actual" as two symbols and churns
+        symbol     = symbol.replace('-', '').upper() if symbol else symbol
         exchange   = exchanges.get(name)
         position   = float(state.get('position', 0))
-        weight     = float(weights.get(name, 0))
+        amount     = float(amounts.get(name, 0))
         asset_spec = asset_specs.get(name)
 
-        if not symbol or not exchange or weight == 0:
+        if not symbol or not exchange or amount == 0:
             continue
 
-        contribution = account_value * leverage * weight * position
+        contribution = amount * position
 
         if symbol not in totals:
             totals[symbol] = {'signed': 0.0, 'exchange': exchange,
@@ -126,7 +177,7 @@ def aggregate_portfolio():
         totals[symbol]['contributors'].append({
             'strategy':          name,
             'position':          position,
-            'weight':            weight,
+            'amount':            amount,
             'contribution': round(contribution, 4),
         })
 
@@ -172,7 +223,11 @@ def compute_diff(target, actual, threshold=10):
         orders.append({
             'symbol':           symbol,
             'signed_diff': diff,
-            'exchange':         t.get('exchange'),
+            # Symbols present only in `actual` (closing a strategy that left the
+            # portfolio) have no target entry — take the venue from the position
+            # row when get_positions tags it, so the log never says exchange=null
+            # for an order that clearly went to a real venue.
+            'exchange':         t.get('exchange') or a.get('exchange'),
             'asset_spec':       t.get('asset_spec'),
             'contributors':     t.get('contributors', []),
         })
@@ -204,7 +259,11 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
     (audited to state/audit.jsonl) before place_order_fn is called. Legs that
     reduce or close a position always go through — see lib/guard.py.
 
-    Returns list of orders placed.
+    Returns the orders that got AT LEAST ONE confirmed fill this round — not
+    every order attempted. Callers use truthiness to schedule an immediate
+    convergence re-run (force_next); returning failed orders too would turn a
+    persistent failure (bad key, insufficient margin) into a poll-interval
+    retry storm — failures instead wait for the next state change / heartbeat.
     """
     config  = load_portfolio_config()
     msgs    = config.get('messages', {})
@@ -214,6 +273,13 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
 
     target = aggregate_portfolio()
     actual = get_positions_fn()
+    # Defense in depth: target keys are canonical (dashless uppercase) since
+    # aggregate; an account lib / hand-written get_positions returning venue
+    # format ('BTC-USDT') would otherwise split one instrument into two rows —
+    # buy leg on one, close leg on the other, churning fees every round (and
+    # under HALT the close leg still passes: it would quietly flatten a real
+    # position). Normalize here so no wiring mistake can reach compute_diff.
+    actual = {str(k).replace('-', '').upper(): v for k, v in (actual or {}).items()}
     orders = compute_diff(target, actual, threshold)
 
     # Written before placing, so it records the state that WAS acted on. A
@@ -239,6 +305,7 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
             return place_order_fn(symbol, sub_diff, asset_spec, reduce_only=reduce_only)
         return place_order_fn(symbol, sub_diff, asset_spec)
 
+    executed = []  # orders with ≥1 confirmed fill — the return value
     for order in orders:
         symbol     = order['symbol']
         diff       = order['signed_diff']
@@ -258,9 +325,17 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
         if a_signed != 0 and t_signed != 0 and t_signed * a_signed < 0:
             sub_orders = [(-a_signed, True, False), (t_signed, False, True)]
         else:
-            sub_orders = [(diff, False, abs(t_signed) > abs(a_signed))]
+            # Same-side shrink (incl. full close) is ALSO reduce-only. On a
+            # one-way account a plain opposite-side order nets, so this flag
+            # was cosmetic — on a hedge-mode account (OKX 雙向) it is the whole
+            # difference between reducing the long and opening a fresh short
+            # (measured live: a $44 "reduce" opened $44 of shorts, twice).
+            shrink = (a_signed != 0 and abs(t_signed) < abs(a_signed)
+                      and t_signed * a_signed >= 0)
+            sub_orders = [(diff, shrink, abs(t_signed) > abs(a_signed))]
 
         failed = False
+        legs = []  # per-leg exchange-confirmed fills for orders.jsonl / the web 交易歷史
         for sub_diff, reduce_only, is_entry in sub_orders:
             if abs(sub_diff) < threshold:
                 continue
@@ -285,6 +360,7 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
             except Exception as e:
                 log_msg = f"order error {symbol}: {e}"
                 logging.error(log_msg)
+                _record_order_error(symbol, order.get('exchange'), e)
                 if send_telegram_fn:
                     send_telegram_fn(_msg('order_error', '⚠️ Order failed {symbol}: {error}',
                                          symbol=symbol, error=e))
@@ -295,6 +371,18 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
                 # place_order skipped (e.g. qty below exchange minimum) — no notification or log
                 logging.info(f"[reconcile] {symbol} skipped by place_order — below exchange minimum")
                 continue
+
+            # 進出場價格:order libs return the exchange-confirmed fill — record
+            # it per leg (a flip = close leg 出場價 + open leg 進場價). Older
+            # place_order_fn returning bare None still logs the leg, just bare.
+            leg = {'signed_diff': round(sub_diff, 2), 'reduce_only': reduce_only}
+            if isinstance(placed, dict):
+                for src, dst in (('avg_price', 'fill_price'),
+                                 ('executed_qty', 'executed_qty'),
+                                 ('exchange', 'exchange')):
+                    if placed.get(src) is not None:
+                        leg[dst] = placed[src]
+            legs.append(leg)
 
             if reduce_only:
                 key     = 'order_close_long'  if sub_diff < 0 else 'order_close_short'
@@ -308,15 +396,28 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
             if send_telegram_fn:
                 send_telegram_fn(_msg(key, default, symbol=symbol, amount=abs(sub_diff)))
 
-        if not failed:
+        # Log whenever ANYTHING filled — a flip whose close leg executed but
+        # whose entry leg then failed (or was halted) moved real money; hiding
+        # it because the order "failed" would desync the history from the
+        # exchange. `failed` marks the partial. Nothing filled + nothing
+        # failed = every leg skipped below-min: no phantom entry.
+        if legs:
             direction = 'BUY' if diff > 0 else 'SELL'
-            _append_reconciler_log({
+            entry = {
                 'action':      direction,
                 'symbol':      symbol,
                 'signed_diff': diff,
-                'exchange':    order.get('exchange'),
+                # place_order knows which venue it actually routed to — trust
+                # the fill over the config when both exist
+                'exchange':    next((l.get('exchange') for l in legs if l.get('exchange')),
+                                    order.get('exchange')),
                 'asset_spec':  asset_spec,
                 'contributors': order.get('contributors', []),
-            })
+                'legs':        legs,
+            }
+            if failed:
+                entry['failed'] = True
+            _append_reconciler_log(entry)
+            executed.append(order)
 
-    return orders
+    return executed

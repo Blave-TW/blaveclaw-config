@@ -128,8 +128,9 @@ Never create a duplicate strategy folder just because you ran a scan.
 - `from lib.pnl import daily_returns_typeA, daily_returns_typeC` — extracts daily returns from pf_series (called automatically by runner, no manual use needed)
 - `from lib.pnl import load_all_stats` — reads all `strategies/*/stats.json` (including daily_returns) for use by manager
 
-**Exchange account libraries** (`lib/account_{exchange}.py` — equity + positions for `manager/snapshot.py`):
-- `lib/account_bingx.py` already ships implemented (swap/futures account) — do NOT rewrite it, extend it if spot/fund balance is needed
+**Exchange account libraries** (`lib/account_{exchange}.py` — equity + positions readers, discovered by filename):
+- `lib/account_bingx.py` already ships implemented (swap equity + spot/fund wallet breakdown) — do NOT rewrite it, extend it in place
+- `lib/account_okx.py` already ships implemented — unified TRADING account (`totalEq`) as equity + separate `funding` wallet in the breakdown; `OKX_DEMO=true` in `.env` routes to OKX simulated trading
 - For any other exchange, copy `lib/account_TEMPLATE.py` — see `references/manager.md` § Account library
 
 `lib/guard.py` — **kill switch + order audit log.** Enforced inside `lib/order_*.py`'s transport layer and again in `lib/portfolio.reconcile()` — no caller opts in, nothing to wire:
@@ -137,6 +138,8 @@ Never create a duplicate strategy folder just because you ran a scan.
 - `reconcile()` denies exposure-adding legs itself, before calling `place_order_fn`. That is the layer that covers a reconciler whose exchange has no official `lib/order_*.py` and whose `place_order` was hand-written — the transport-layer check alone would miss it. Denials are audited and logged, but deliberately NOT sent to Telegram: the user tripped the halt to stop the noise.
 - `trip_halt(reason, source)` — set it (user says 停 / healthcheck anomaly). `clear_halt(source)` — **only on explicit user instruction; NEVER clear a halt on your own initiative.** `halted()` / `halt_info()` — check state.
 - Every order attempt / outcome / denial is appended to `state/audit.jsonl` (fsynced). When the user asks "你到底下了什麼單", read this file — it is the record of what was actually sent, not what was intended.
+
+`lib/order_TEMPLATE.py` — **contract for writing a new perp venue's order lib** (Taiwan brokers follow `lib/order_sinopac.py` instead). Copy it, keep the filename convention (`lib/order_{exchange}.py`). The reconciler calls four FIXED names — `get_contract_rules` / `format_qty` / `place_market_order` / `close_position_partial` — a lib missing any of them crashes at reconcile time, mid-trade. `lib/order_bingx.py` is the reference implementation.
 
 `lib/order_bingx.py` — **BingX swap (USDT-M perp) order execution. Ships implemented — NEVER hand-write BingX order calls in a strategy; import from here.** All functions take `env` (dotenv dict) first. `direction` is always the POSITION's direction (`'long'`/`'short'`); position mode (one-way vs hedge) is auto-detected.
 - `open_position(env, symbol, direction, qty, sl_price=, tp_price=, client_order_id=)` — **the recommended entry flow**: ONE atomic market order with SL/TP attached (no naked window), polled to FILLED, protection verified in open orders. Returns `{'entry': confirmed, 'protection': [...]}`. Raises `ProtectionFailed` if protection isn't visible after the fill — treat that as an ALERT-THE-USER-NOW event, never swallow it.

@@ -24,7 +24,14 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         price_df: MultiIndex DataFrame with 'close' and optionally 'open' as top-level keys
         exec_at_close: optional bool array (n,) in original space
     """
-    mode          = config['MODE']
+    # BLAVE_MODE lets the platform's signal-refresh cron run a strategy live
+    # without editing the user's MODE constant (the file may still say
+    # "backtest" while its signals feed the 下單設定 table). A cron-driven
+    # run is also QUIET: no chart re-render, no chart/report pushed into the
+    # chat or Telegram — an hourly pnl.png would spam the conversation and
+    # re-upload images every report; the tick's job is the signal, nothing else.
+    quiet         = bool(os.environ.get('BLAVE_MODE'))
+    mode          = os.environ.get('BLAVE_MODE') or config['MODE']
     strategy_name = config['STRATEGY_NAME']
     fee           = config.get('FEE', 0.0005)
     interval      = config.get('INTERVAL', '1h')
@@ -142,12 +149,13 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
             open(out_dir / 'stats.json', 'w'), indent=2
         )
 
-        plot_pnl(df, result_d, title=strategy_name,
-                 output_path=str(out_dir / 'pnl.png'))
-        # Mirror the chart into the web workspace chat (no-op off web); separate from
-        # the Telegram gate below so it shows regardless of send_telegram_fn.
-        from lib.notify import report_photo_web
-        report_photo_web(str(out_dir / 'pnl.png'))
+        if not quiet:
+            plot_pnl(df, result_d, title=strategy_name,
+                     output_path=str(out_dir / 'pnl.png'))
+            # Mirror the chart into the web workspace chat (no-op off web); separate
+            # from the Telegram gate below so it shows regardless of send_telegram_fn.
+            from lib.notify import report_photo_web
+            report_photo_web(str(out_dir / 'pnl.png'))
 
         if mode == 'backtest':
             if send_telegram_fn:
@@ -254,15 +262,16 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
             open(out_dir / 'stats.json', 'w'), indent=2
         )
 
-        plot_pnl_portfolio(pf_series, close_df, title=strategy_name,
-                           output_path=str(out_dir / 'pnl.png'),
-                           bench_pct=bench_pct)
-        # Mirror into the web workspace chat (no-op off web), regardless of the
-        # Telegram gate below.
-        from lib.notify import report_photo_web
-        report_photo_web(str(out_dir / 'pnl.png'))
+        if not quiet:
+            plot_pnl_portfolio(pf_series, close_df, title=strategy_name,
+                               output_path=str(out_dir / 'pnl.png'),
+                               bench_pct=bench_pct)
+            # Mirror into the web workspace chat (no-op off web), regardless of the
+            # Telegram gate below.
+            from lib.notify import report_photo_web
+            report_photo_web(str(out_dir / 'pnl.png'))
 
-        if send_telegram_fn:
+        if send_telegram_fn and not quiet:
             from lib.notify import send_photo
             send_photo(str(out_dir / 'pnl.png'))
             send_telegram_fn(

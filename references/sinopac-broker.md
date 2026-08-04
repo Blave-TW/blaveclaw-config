@@ -290,7 +290,6 @@ After the user completes setup, in order:
 1. Connection test (simulation mode) → accounts list visible
 2. Query account equity → confirm equity > 0
 3. Query positions → no exceptions
-4. Run `python3 manager/snapshot.py` → Telegram daily report includes sinopac equity
-5. Only after the user confirms: enable the reconciler (see `references/deployment.md`).
+4. Only after the user confirms: enable the reconciler (see `references/deployment.md`).
    Live orders go through `lib/order_sinopac.py`, which requires `SINOPAC_LIVE=true` and an
    activated CA certificate (lessons 1-2).

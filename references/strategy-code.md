@@ -30,6 +30,23 @@ DESCRIPTION   = "追蹤 DOGE 大戶持倉集中度,集中度升高時進場做�
 
 Always set `DISPLAY_NAME` and `DESCRIPTION` when creating a strategy — the workspace shows the technical id only as a fallback when they are missing.
 
+## Editing a live strategy (soft lock)
+
+A strategy that is in the trading portfolio with an amount > 0 has REAL positions
+sized off its signal — an in-place edit takes effect on the very next reconcile.
+No platform lets edits act on live positions (Pionex/QuantConnect hard-stop first;
+3Commas scopes edits to new deals). Ours is agent-run, so YOU run the safe flow:
+
+1. Tell the user the strategy is live and what the flow will do; get their OK.
+2. Suspend its sizing: save its amount as 0 via the user's 下單設定 (or ask them to)
+   — the reconciler closes its positions. Note the old amount.
+3. Make the edit. Re-run the backtest; show the result.
+4. Only after the user confirms the new behaviour, restore the amount.
+
+Never skip step 2 "because the change is small" — a one-line signal change can flip
+a live position instantly. Check portfolio_config.json `amounts` before any edit to
+strategy.py of a deployed strategy.
+
 ## Signal Contract
 
 `compute_signals(df)` receives the DataFrame returned by `fetch_data` and returns either a **pd.Series** or a **(pd.Series, exec_at_close)** tuple:

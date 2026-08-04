@@ -384,5 +384,4 @@ shares. Order library + reconciler wiring is one atomic task — see `references
 5. `OnAccount` returns the expected account(s) (`TF` and/or `TS`) → Step 6
 6. One user-approved minimal live order per market being used (or intentional rejection)
    confirms the order path → Step 7a / 7b
-7. `python manager/snapshot.py` → Telegram daily report includes the capital account(s)
-8. 用戶確認後，方可設定 reconciler 上線（參考 `references/deployment.md`）
+7. 用戶確認後，方可設定 reconciler 上線（參考 `references/deployment.md`）

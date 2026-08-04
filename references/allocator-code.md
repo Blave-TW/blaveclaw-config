@@ -26,7 +26,7 @@ Never put an allocator in `manager/` — that directory takes no new files
 ## Contract
 
 ```python
-DISPLAY_NAME = "動能加權"                 # human-facing, shown in the workspace
+DISPLAY_NAME = "動能加權"                 # human-facing name
 DESCRIPTION  = "用指數衰減的近期報酬當權重"   # one sentence
 PARAMS       = {"half_life": 60}          # this method's own knobs
 

@@ -11,10 +11,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 # ── Config ────────────────────────────────────────────────────────────────────
 MODE          = "backtest"
 STRATEGY_NAME = "[strategy_name]"
-INTERVAL      = "1d"            # '1d' for equities, '1h'/'4h' for crypto
+DISPLAY_NAME  = "[human-facing name, user's language — what it trades + does]"
+DESCRIPTION   = "[one plain sentence]"
+MARKET        = "spot"          # "spot" | "swap" — ask the user at creation; fixed once deployed
+INTERVAL      = "1d"            # '1d' for equities, '1h'/'4h' for crypto; the platform's signal-refresh schedule follows this
 START         = "2015-01-01"
 END           = None
-FEE           = 0.003           # ~0.3% for Taiwan equities; adjust per asset class
+FEE           = 0.003           # VERIFIED real rate for this asset class — never 0 (TW equities ≈ 0.3% round-trip)
 
 PARAM1         = ...             # primary signal parameter (e.g. lookback window)
 PARAM2         = ...             # secondary parameter (e.g. top-N, threshold)

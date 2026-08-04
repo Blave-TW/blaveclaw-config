@@ -3,20 +3,32 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lib.portfolio import reconcile, load_portfolio_config
+from lib.portfolio import reconcile, load_portfolio_config, strategy_amounts
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
 POLL_INTERVAL  = 5    # seconds between polls
 THRESHOLD = 10   # minimum diff (in account currency) to place an order
+RECONCILE_EVERY_S = 300  # 定期心跳對帳:就算沒有任何 mtime 變動也要每 5 分鐘
+                         # 對一次帳——斷鏈、金鑰失效、倉位漂移不能等下一次訊號
+                         # 變動(可能一小時後)才被發現
 
 
 def _active_state_mtimes():
-    """Return {strategy_name: mtime} for strategies with non-zero weight."""
-    weights = load_portfolio_config().get('weights', {})
-    mtimes  = {}
-    for name, w in weights.items():
-        if w <= 0:
+    """{strategy: state.json mtime} for funded strategies, plus the config
+    itself — a reconcile is due when a SIGNAL moved or when the user changed
+    the AMOUNTS (下單設定儲存); watching only state.json would leave a new
+    allocation sitting unapplied until the next strategy tick."""
+    mtimes = {}
+    cfg_path = 'manager/portfolio_config.json'
+    if os.path.exists(cfg_path):
+        mtimes['__config__'] = os.path.getmtime(cfg_path)
+    # HALT tripping/clearing must also trigger a round: 啟動下單 clears the
+    # flag and the user expects orders within seconds, not at the next tick.
+    halt_path = 'state/HALT'
+    mtimes['__halt__'] = os.path.getmtime(halt_path) if os.path.exists(halt_path) else 0
+    for name, amt in strategy_amounts().items():
+        if amt <= 0:
             continue
         path = f'strategies/{name}/state.json'
         if os.path.exists(path):
@@ -100,7 +112,17 @@ def place_order(symbol, signed_diff, asset_spec=None):
 
 
 from lib.notify import make_sender as _make_sender
-send_telegram = _make_sender()
+
+# Telegram is optional: a web-workspace user may never pair a bot, and the
+# reconciler must trade for them anyway. No config → log instead of notify;
+# the workspace page is their surface for state.
+try:
+    send_telegram = _make_sender()
+except Exception as _e:
+    logging.warning(f"telegram notify unavailable ({_e}) — falling back to log-only")
+
+    def send_telegram(msg):
+        logging.warning(f"[notify-unavailable] {msg}")
 
 
 HEARTBEAT_PATH = Path('state/heartbeat/reconciler')
@@ -109,16 +131,28 @@ HEARTBEAT_PATH = Path('state/heartbeat/reconciler')
 if __name__ == '__main__':
     logging.info(f"Reconciler started (poll={POLL_INTERVAL}s, threshold={THRESHOLD})")
     last_mtimes = {}
+    last_reconcile_at = 0.0
+    force_next = False  # 下單後強制再對帳一輪:把成交後的實際部位寫進快照,
+                        # 不然「實際/差額」會停在下單前的狀態直到下次訊號變動
 
     while True:
         # heartbeat for manager/healthcheck.py — a stale file means this daemon died
         HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
         HEARTBEAT_PATH.touch()
 
-        current_mtimes = _active_state_mtimes()
+        try:
+            # Inside the try: this json-loads portfolio_config.json, which the
+            # web command listener rewrites — a mid-write read must be a skipped
+            # round, not a daemon crash-loop.
+            current_mtimes = _active_state_mtimes()
+        except Exception as e:
+            logging.error(f"[reconciler] state scan failed: {e}")
+            time.sleep(POLL_INTERVAL)
+            continue
         changed = [k for k in current_mtimes if current_mtimes[k] != last_mtimes.get(k)]
+        heartbeat_due = time.time() - last_reconcile_at > RECONCILE_EVERY_S
 
-        if changed:
+        if changed or force_next or heartbeat_due:
             logging.info(f"State changed: {changed} — running reconciliation")
             try:
                 orders = reconcile(
@@ -128,11 +162,21 @@ if __name__ == '__main__':
                     send_telegram_fn=send_telegram,
                 )
                 if not orders:
-                    logging.info("No orders needed (within threshold)")
+                    logging.info("Converged — nothing filled this round")
+                # reconcile() returns only orders that actually FILLED ≥1 leg —
+                # so a persistent failure does not become a 5-second retry
+                # storm; failures wait for the next state change / heartbeat.
+                force_next = bool(orders)
                 last_mtimes = current_mtimes
+                last_reconcile_at = time.time()
             except Exception as e:
                 err_msg = f"[reconciler] ERROR: {e}"
                 logging.error(err_msg)
                 send_telegram(err_msg)
+                # A persistent failure (dead key, network) must retreat to the
+                # heartbeat cadence, not retry+Telegram every poll tick — the
+                # mtime trigger stays armed, so a real state change still
+                # reconciles immediately.
+                last_reconcile_at = time.time()
 
         time.sleep(POLL_INTERVAL)

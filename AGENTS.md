@@ -61,6 +61,8 @@ These are not user strategies. User strategies live in `strategies/`.
 
 Classify BEFORE writing any code. Full code rules and patterns: `references/strategy-code.md`.
 
+**Never edit a live strategy in place.** If the strategy is in the 下單組合 with an amount > 0, follow the soft-lock flow in `references/strategy-code.md` › *Editing a live strategy* — suspend its sizing first, edit, re-backtest, restore only after the user confirms.
+
 When creating a strategy, always set `DISPLAY_NAME` (plain-language name — what it trades + does, in the user's language) and `DESCRIPTION` (one plain sentence) alongside `STRATEGY_NAME` — details in `references/strategy-code.md` › *Naming & description*.
 
 ```
@@ -182,6 +184,8 @@ The slope/std optimiser is the default weighting method, not the only one — wh
 ## Broker Onboarding
 
 **Any broker with an API is supported** — the ones below just have ready-made references; others you wire up on request (get API docs from the user, build a `lib/` helper following the existing broker patterns). Never answer "only these are supported".
+
+**Web-initiated exchange connect:** when a chat message says the user just connected an exchange from the web (its API key already stored on the machine), follow `references/exchange-connect.md` (write `lib/account_{id}.py` + `lib/order_{id}.py` if missing, wire the reconciler, read-only validation, no orders).
 
 When a user asks to connect a broker (e.g. "我想串永豐", "connect SinoPac", "我想串統一期貨"), read the relevant reference first:
 - **SinoPac (永豐金):** `references/sinopac-broker.md`

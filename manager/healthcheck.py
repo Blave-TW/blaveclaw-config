@@ -14,15 +14,14 @@ Data model (all under state/, which the nightly config sync never overwrites):
                               or loop tick (daemons)
   state/healthcheck_alerts.json  last-alert timestamps (cooldown bookkeeping)
 
-Cron (add ONCE, like the snapshot cron — see references/deployment.md):
+Cron (add ONCE — see references/deployment.md):
   */30 * * * * cd $BLAVECLAW_HOME/workspace && python3 manager/healthcheck.py
   ($BLAVECLAW_HOME defaults to /root/.openclaw if unset)
 
 Self-healing: any `run_strategy.sh <name>` entry found in crontab is
 auto-registered, so strategies deployed before this healthcheck existed are
 covered without anyone re-registering them. Heartbeat files without a registry
-entry are shown in the daily snapshot but never alerted (a one-off manual run
-is not a deployment).
+entry are never alerted (a one-off manual run is not a deployment).
 """
 import json
 import os
@@ -154,7 +153,7 @@ def _check_entry(name, entry, cron_entries, now):
 
 
 def health_report():
-    """Status of every registered deployment (also used by snapshot.py).
+    """Status of every registered deployment.
 
     Returns (lines, problems): lines are display strings for all entries,
     problems is {name: problem_string} for the unhealthy ones.
