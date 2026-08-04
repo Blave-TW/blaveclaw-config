@@ -20,13 +20,15 @@ do not assume casing or invent names.
    are implemented — extend, never rewrite. For everything else, work from
    `lib/account_TEMPLATE.py` and the patterns in `lib/order_bingx.py`
    (see `references/lib.md`, `references/manager.md` § Account library).
-   **If both files already ship for this venue, skip straight to rule 7** — a stored
+   **If both files already ship for this venue, skip straight to rule 5, and once
+   it passes go directly to rule 8** (rules 6–7 are for venues whose order lib
+   doesn't exist yet — don't rewrite what already ships) — a stored
    key is not a working key (wrong permissions, missing IP whitelist, capital sitting
    in an account the lib doesn't read); validate read-only and report. A shipped lib
    is a starting point, not a fence: when the user wants different behaviour (e.g.
    count spot balance into equity), modify it in place — keep the contract, never
-   rewrite from scratch. **Every path ends at rule 7**; writing or changing code just
-   comes before it.
+   rewrite from scratch. **Every path passes through the rule-5 validation gate**;
+   writing or changing account code just comes before it.
 
 3. **Find the API docs in this order:**
    - ① `skills/blave-quant/references/{id}-skill.md` / `{id}-api-reference.md` — if a
@@ -57,8 +59,30 @@ do not assume casing or invent names.
    platform's account reader starts polling it automatically (every ~2 min, written
    to `manager/account.json`) — failures show on the web as `error`, so raise with
    readable messages (env key NAMES are fine, values never).
+   **The auth-failure path is part of the contract, not an afterthought**: a bad /
+   revoked / IP-blocked key MUST raise with the exchange's own error code and
+   message. Never swallow an auth error into zeros (a user with a typo'd key then
+   sees "equity $0" and thinks their money vanished), and never let the error
+   response crash the parser (`'str' object has no attribute 'get'` tells the user
+   nothing). Test the module against a deliberately broken signature before calling
+   it done — the error string is what the web shows the user.
 
-5. **`lib/order_{id}.py`** — copy `lib/order_TEMPLATE.py` (perp venues; Taiwan brokers
+5. **Read-only validation gate — BEFORE any order code.** Run `get_equity()` and
+   `get_positions()` now. **If the read fails (auth / permission / IP whitelist),
+   STOP HERE**: report the readable error and wait for the user to fix the key —
+   do not write `lib/order_{id}.py`, do not touch the reconciler. A wrong key must
+   cost one small module, not a whole integration (measured 2026-08-04: an agent
+   wrote a 15KB order lib against a dead key — minutes of work validating nothing).
+   On success: show the numbers (every wallet, when the venue splits them) and ask
+   the user to confirm they match the exchange app. Place NO order — live trading
+   starts later via the reconciler, not as an integration test. Never clear a halt
+   as part of this flow. **Do not tell the user to move funds to any particular
+   wallet** — spot strategies trade the spot wallet, perp strategies the futures
+   wallet, and which applies is unknown until a strategy is deployed; presenting
+   the balances without a transfer instruction is the correct ending. Transfer
+   advice belongs at deployment time, matched to the strategy actually deployed.
+
+6. **`lib/order_{id}.py`** — copy `lib/order_TEMPLATE.py` (perp venues; Taiwan brokers
    follow `lib/order_sinopac.py` instead) and follow `lib/order_bingx.py`'s contract:
    confirmed orders (poll to terminal state; report exchange-reported fills, never the
    intent), unique client-order-id for idempotency, `lib/guard` halt + audit
@@ -69,18 +93,9 @@ do not assume casing or invent names.
    `close_position_partial` — missing any of them crashes at reconcile time
    (mid-trade), not at integration time. Never rename or omit them.
 
-6. **Wire `manager/reconciler.py`** through both files in the same session
+7. **Wire `manager/reconciler.py`** through both files in the same session
    (order library → reconciler is one atomic task — AGENTS.md).
 
-7. **Validate read-only, then stop.** Run `get_equity()` and `get_positions()`, show
-   the numbers (every wallet, when the venue splits them), and ask the user to
-   confirm they match the exchange app. Place NO order — live trading starts later
-   via the reconciler, not as an integration test. Never clear a halt as part of
-   this flow. **Do not tell the user to move funds to any particular wallet** —
-   spot strategies trade the spot wallet, perp strategies the futures wallet, and
-   which applies is unknown until a strategy is deployed; presenting the balances
-   without a transfer instruction is the correct ending. Transfer advice belongs
-   at deployment time, matched to the strategy actually being deployed.
-
-8. **Done = the two files exist.** The machine's portfolio reporter detects them and
-   the web page flips the venue to ready on its own — no extra reporting step.
+8. **Done = the two files exist and rule 5 passed.** The machine's portfolio
+   reporter detects the files and the web page flips the venue to ready on its
+   own — no extra reporting step.

@@ -185,7 +185,7 @@ The slope/std optimiser is the default weighting method, not the only one — wh
 
 **Any broker with an API is supported** — the ones below just have ready-made references; others you wire up on request (get API docs from the user, build a `lib/` helper following the existing broker patterns). Never answer "only these are supported".
 
-**Web-initiated exchange connect:** when a chat message says the user just connected an exchange from the web (its API key already stored on the machine), follow `references/exchange-connect.md` (write `lib/account_{id}.py` + `lib/order_{id}.py` if missing, wire the reconciler, read-only validation, no orders).
+**Web-initiated exchange connect:** when a chat message says the user just connected an exchange from the web (its API key already stored on the machine), follow `references/exchange-connect.md` (write `lib/account_{id}.py` if missing, PASS the read-only validation first, only then write `lib/order_{id}.py` + wire the reconciler; no orders ever).
 
 When a user asks to connect a broker (e.g. "我想串永豐", "connect SinoPac", "我想串統一期貨"), read the relevant reference first:
 - **SinoPac (永豐金):** `references/sinopac-broker.md`
@@ -201,7 +201,7 @@ tell user → restart gateway). Never use a memorized/guessed model id (e.g.
 
 ## Updating Workspace Files (Config + Skill)
 
-When the user says anything like 更新 blaveclaw / 更新系統 / update blaveclaw / update workspace — no link required — follow `references/updating.md` exactly.
+When the user says anything like 更新 blaveclaw / 更新 blave agent / 更新系統 / update blaveclaw / update blave agent / update workspace — no link required — follow `references/updating.md` exactly.
 
 ## Response Style
 

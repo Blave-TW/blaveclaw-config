@@ -1,6 +1,6 @@
 # Updating the Workspace
 
-Trigger: user says 更新 blaveclaw / 更新系統 / 更新 config / update blaveclaw / update workspace — no link required.
+Trigger: user says 更新 blaveclaw / 更新 blave agent / 更新系統 / 更新 config / update blaveclaw / update blave agent / update workspace — no link required.
 
 ## 1. Skill
 
