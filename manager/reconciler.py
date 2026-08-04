@@ -3,12 +3,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from lib import guard
 from lib.portfolio import reconcile, load_portfolio_config, strategy_amounts
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
 POLL_INTERVAL  = 5    # seconds between polls
 THRESHOLD = 10   # minimum diff (in account currency) to place an order
+DISCONNECT_HALT_AFTER = 3  # 連續 N 次讀不到持倉=交易所鏈路斷了,自動 HALT
 RECONCILE_EVERY_S = 300  # 定期心跳對帳:就算沒有任何 mtime 變動也要每 5 分鐘
                          # 對一次帳——斷鏈、金鑰失效、倉位漂移不能等下一次訊號
                          # 變動(可能一小時後)才被發現
@@ -57,6 +59,12 @@ def get_positions():
       GET /v5/position/list?category=linear
       side = row['side'].lower()
       size = float(row['positionValue'])
+
+    ERROR CONTRACT — on any failure, let the exception PROPAGATE. Never
+    catch-and-return {} to "handle errors gracefully": an empty dict reads as
+    "all positions are zero", so reconcile() would re-buy the entire target
+    the moment the link recovers — and the auto-halt wrapper
+    (_get_positions_guarded) can only count failures it actually sees.
     """
     raise NotImplementedError("implement exchange-specific position query")
 
@@ -111,6 +119,37 @@ def place_order(symbol, signed_diff, asset_spec=None):
     raise NotImplementedError("implement exchange-specific order placement")
 
 
+# 這層包裝是基礎設施,交易所無關——實作 get_positions() 時不用碰它。
+_consecutive_failures = 0
+
+
+def _get_positions_guarded():
+    """Auto-halt on exchange disconnect (references/manager.md § Auto-halt).
+
+    get_positions() 失敗=交易所鏈路本身不通(壞/撤銷金鑰、IP 白名單、斷線),
+    不是單筆下單被拒(那由 reconcile() 逐單處理、不掛 halt)。連續
+    DISCONNECT_HALT_AFTER 次就 trip_halt——看不到真實持倉還繼續開新倉,
+    等於矇著眼下單;金鑰消失期間尤其危險(連線恢復那刻會把整份 target
+    重新買一次)。只掛不自動解:跟所有 halt 一樣,只有用戶能 resume。"""
+    global _consecutive_failures
+    try:
+        result = get_positions()
+        _consecutive_failures = 0
+        return result
+    except Exception as e:
+        _consecutive_failures += 1
+        logging.error(
+            f"get_positions failed ({_consecutive_failures}/{DISCONNECT_HALT_AFTER}): {e}")
+        if _consecutive_failures >= DISCONNECT_HALT_AFTER and not guard.halted():
+            guard.trip_halt(
+                f"exchange unreachable ({_consecutive_failures} consecutive "
+                f"get_positions failures)", "reconciler")
+            send_telegram(
+                f"🚨 HALT engaged: get_positions() failed {_consecutive_failures} "
+                f"times — exchange may be unreachable")
+        raise
+
+
 from lib.notify import make_sender as _make_sender
 
 # Telegram is optional: a web-workspace user may never pair a bot, and the
@@ -156,7 +195,7 @@ if __name__ == '__main__':
             logging.info(f"State changed: {changed} — running reconciliation")
             try:
                 orders = reconcile(
-                    get_positions_fn=get_positions,
+                    get_positions_fn=_get_positions_guarded,
                     place_order_fn=place_order,
                     threshold=THRESHOLD,
                     send_telegram_fn=send_telegram,
@@ -174,9 +213,14 @@ if __name__ == '__main__':
                 logging.error(err_msg)
                 send_telegram(err_msg)
                 # A persistent failure (dead key, network) must retreat to the
-                # heartbeat cadence, not retry+Telegram every poll tick — the
-                # mtime trigger stays armed, so a real state change still
-                # reconciles immediately.
+                # heartbeat cadence, not retry+Telegram every poll tick. BOTH
+                # lines are needed: last_reconcile_at throttles the heartbeat
+                # branch, and last_mtimes must also advance or the `changed`
+                # branch keeps firing — auto-halt's own trip writes state/HALT,
+                # whose fresh mtime would otherwise re-trigger a failing round
+                # (and a Telegram error) every 5 seconds, forever. A REAL new
+                # state change still produces a newer mtime and fires at once.
+                last_mtimes = current_mtimes
                 last_reconcile_at = time.time()
 
         time.sleep(POLL_INTERVAL)
