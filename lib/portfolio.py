@@ -1,4 +1,4 @@
-import glob, inspect, json, logging, os
+import glob, inspect, json, logging, os, re
 from datetime import datetime
 
 from lib import guard
@@ -59,6 +59,104 @@ def _record_order_error(symbol, exchange, error):
             json.dump(rows[-5:], f, indent=2)
     except Exception as e:
         logging.warning(f'failed to record order error: {e}')
+
+
+# ── market dimension (spot vs swap) ─────────────────────────────────────────
+# A strategy declares MARKET = "spot" in its strategy.py (same constant the
+# platform's portfolio_reporter reads); undeclared = "swap" — every pre-2026-08
+# fleet strategy is a perp strategy, so the default keeps them unchanged.
+# Spot and swap flows through the SAME reconcile pipeline, distinguished by the
+# target/actual KEY: swap keys stay the plain canonical symbol ("BTCUSDT",
+# backward compatible with every existing snapshot/consumer), spot keys carry
+# an "@spot" suffix ("BTCUSDT@spot"). place_order wirings split the key via
+# split_key() and route to the venue's spot or perp execution.
+
+_MARKET_RE = re.compile(r'^\s*MARKET\s*=\s*["\']([a-z]+)["\']', re.M)
+SPOT_SUFFIX = '@spot'
+
+
+def strategy_market(name):
+    """'spot' | 'swap' from the strategy.py MARKET constant (default swap)."""
+    try:
+        with open(f'strategies/{name}/strategy.py') as f:
+            m = _MARKET_RE.search(f.read())
+        return m.group(1) if m else 'swap'
+    except OSError:
+        return 'swap'
+
+
+def market_key(symbol, market):
+    """Canonical reconcile key: plain symbol for swap, symbol@spot for spot."""
+    return symbol + SPOT_SUFFIX if market == 'spot' else symbol
+
+
+def split_key(key):
+    """'BTCUSDT@spot' -> ('BTCUSDT', 'spot'); 'BTCUSDT' -> ('BTCUSDT', 'swap')."""
+    key = str(key)
+    if key.endswith(SPOT_SUFFIX):
+        return key[:-len(SPOT_SUFFIX)], 'spot'
+    return key, 'swap'
+
+
+def spot_symbols():
+    """Plain symbols whose SPOT inventory the reconciler must read = symbols of
+    funded spot strategies (amount != 0 — position 0 still needs the inventory
+    visible, or a target that drops to 0 could never sell down). SCOPING RULE:
+    only these ever enter `actual` — personal coins in any other symbol must
+    never grow sell orders."""
+    config = load_portfolio_config()
+    amounts = strategy_amounts(config)
+    exchanges = config.get('exchanges', {})
+    out = set()
+    for name, state in load_all_states().items():
+        sym = (state.get('symbol') or '').replace('-', '').upper()
+        if sym and exchanges.get(name) and float(amounts.get(name, 0)) != 0 \
+                and strategy_market(name) == 'spot':
+            out.add(sym)
+    return out
+
+
+_SPOT_SCOPE_PATH = 'manager/spot_scope.json'
+
+
+# threshold default MUST track manager/reconciler.py THRESHOLD (both 10):
+# a scope threshold above the reconcile one strands inventory in scope forever
+# (rows below reconcile threshold never sell, never leave scope) — audit L1
+def spot_scope(inventory_value_fn, threshold=10):
+    """{symbol: usd_value} of every spot inventory the reconciler must treat
+    as `actual` — and the rule that makes REMOVING a spot strategy exit its
+    position instead of orphaning it (futures parity: strategy leaves →
+    position closes).
+
+    Scope = funded spot strategies (spot_symbols) ∪ previously-managed symbols
+    persisted in manager/spot_scope.json. A symbol leaves the persisted scope
+    only when its inventory value drops below the reconcile threshold — so
+    after removal the actual-only row keeps generating sell orders until the
+    inventory is gone. Personal coins in symbols no strategy targets never
+    enter; but a targeted symbol's spot inventory is ONE pool — coins the
+    user holds in the same symbol are co-managed with the strategy's (incl.
+    the removal sell-down). Say so when a user asks; it is the accepted
+    trade-off of inventory-based reconciling (audit M5).
+    inventory_value_fn(symbol) -> USD value; its errors PROPAGATE
+    (a failed read silently dropping a symbol from scope would strand
+    inventory — same error contract as get_positions)."""
+    targeted = spot_symbols()
+    try:
+        with open(_SPOT_SCOPE_PATH) as f:
+            prev = set(json.load(f))
+    except (OSError, ValueError):
+        prev = set()
+    values = {}
+    for sym in sorted(targeted | prev):
+        values[sym] = float(inventory_value_fn(sym))
+    keep = targeted | {s for s, v in values.items() if v >= threshold}
+    try:  # best-effort persist — next round recomputes from targets anyway
+        os.makedirs('manager', exist_ok=True)
+        with open(_SPOT_SCOPE_PATH, 'w') as f:
+            json.dump(sorted(keep), f)
+    except OSError as e:
+        logging.warning(f'spot_scope persist failed: {e}')
+    return values
 
 
 def load_portfolio_config():
@@ -170,11 +268,18 @@ def aggregate_portfolio():
 
         contribution = amount * position
 
-        if symbol not in totals:
-            totals[symbol] = {'signed': 0.0, 'exchange': exchange,
-                              'asset_spec': asset_spec, 'contributors': []}
-        totals[symbol]['signed'] += contribution
-        totals[symbol]['contributors'].append({
+        # spot and swap are different inventories — same symbol, different key,
+        # so a spot strategy and a perp strategy on BTCUSDT never net against
+        # each other (they'd converge the WRONG account's position)
+        market = strategy_market(name)
+        key = market_key(symbol, market)
+
+        if key not in totals:
+            totals[key] = {'signed': 0.0, 'exchange': exchange,
+                           'asset_spec': asset_spec, 'market': market,
+                           'contributors': []}
+        totals[key]['signed'] += contribution
+        totals[key]['contributors'].append({
             'strategy':          name,
             'position':          position,
             'amount':            amount,
@@ -182,13 +287,22 @@ def aggregate_portfolio():
         })
 
     result = {}
-    for symbol, data in totals.items():
+    for key, data in totals.items():
         s = data['signed']
-        result[symbol] = {
+        if data['market'] == 'spot' and s < 0:
+            # spot cannot short — a net-negative spot target is clamped to
+            # flat, loudly: the strategy author meant short exposure the venue
+            # cannot express, silence would misreport what is being traded
+            logging.warning(
+                f"[portfolio] {key}: net target {s:.2f} is SHORT on a spot "
+                f"market — clamped to 0 (spot cannot short)")
+            s = 0.0
+        result[key] = {
             'side':         'long' if s > 0 else ('short' if s < 0 else None),
             'size':    abs(s),
             'exchange':     data['exchange'],
             'asset_spec':   data['asset_spec'],
+            'market':       data['market'],
             'contributors': data['contributors'],
         }
     return result
@@ -222,11 +336,13 @@ def compute_diff(target, actual, threshold=10):
 
         orders.append({
             'symbol':           symbol,
+            'market':           split_key(symbol)[1],
             'signed_diff': diff,
             # Symbols present only in `actual` (closing a strategy that left the
-            # portfolio) have no target entry — take the venue from the position
-            # row when get_positions tags it, so the log never says exchange=null
-            # for an order that clearly went to a real venue.
+            # portfolio) have no target entry. Auto-wired get_positions does
+            # NOT tag rows with a venue, so this is often None there — the
+            # order log's legs carry the venue the wiring actually routed to,
+            # which is the truthful record anyway.
             'exchange':         t.get('exchange') or a.get('exchange'),
             'asset_spec':       t.get('asset_spec'),
             'contributors':     t.get('contributors', []),
@@ -279,7 +395,10 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
     # buy leg on one, close leg on the other, churning fees every round (and
     # under HALT the close leg still passes: it would quietly flatten a real
     # position). Normalize here so no wiring mistake can reach compute_diff.
-    actual = {str(k).replace('-', '').upper(): v for k, v in (actual or {}).items()}
+    def _canon_key(k):
+        sym, market = split_key(str(k))
+        return market_key(sym.replace('-', '').upper(), market)
+    actual = {_canon_key(k): v for k, v in (actual or {}).items()}
     orders = compute_diff(target, actual, threshold)
 
     # Written before placing, so it records the state that WAS acted on. A
@@ -292,17 +411,28 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
     # and trigger a second, duplicate submission.
     try:
         _place_params = inspect.signature(place_order_fn).parameters
-        _supports_reduce_only = 'reduce_only' in _place_params or any(
+        _has_var_kw = any(
             p.kind == inspect.Parameter.VAR_KEYWORD for p in _place_params.values()
         )
+        _supports_reduce_only = 'reduce_only' in _place_params or _has_var_kw
+        # exchange passthrough lets the wiring refuse a target routed to a
+        # DIFFERENT live venue (venue_wiring audit H3) — older hand-wired
+        # place_order fns don't take it, same signature-sniff as reduce_only
+        _supports_exchange = 'exchange' in _place_params or _has_var_kw
     except (TypeError, ValueError):
         _supports_reduce_only = False
+        _supports_exchange = False
 
-    def _call_place(symbol, sub_diff, asset_spec, reduce_only):
+    def _call_place(symbol, sub_diff, asset_spec, reduce_only, exchange=None):
         # Returns False if place_order_fn skipped the order (e.g. below exchange minimum).
         # Returns None/truthy on success. Propagates exceptions on failure.
+        kw = {}
         if _supports_reduce_only:
-            return place_order_fn(symbol, sub_diff, asset_spec, reduce_only=reduce_only)
+            kw['reduce_only'] = reduce_only
+        if _supports_exchange:
+            kw['exchange'] = exchange
+        if kw:
+            return place_order_fn(symbol, sub_diff, asset_spec, **kw)
         return place_order_fn(symbol, sub_diff, asset_spec)
 
     executed = []  # orders with ≥1 confirmed fill — the return value
@@ -356,7 +486,8 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
                 break
 
             try:
-                placed = _call_place(symbol, sub_diff, asset_spec, reduce_only)
+                placed = _call_place(symbol, sub_diff, asset_spec, reduce_only,
+                                     exchange=order.get('exchange'))
             except Exception as e:
                 log_msg = f"order error {symbol}: {e}"
                 logging.error(log_msg)

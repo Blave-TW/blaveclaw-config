@@ -100,6 +100,9 @@ _MUTATING_PATHS = {
     ("DELETE", "/openApi/swap/v2/trade/order"): "cancel",
     ("DELETE", "/openApi/swap/v2/trade/allOpenOrders"): "cancel_all",
     ("POST", "/openApi/swap/v2/trade/leverage"): "leverage",
+    ("POST", "/openApi/spot/v1/trade/order"): "place",
+    ("POST", "/openApi/spot/v1/trade/cancel"): "cancel",
+    ("POST", "/openApi/spot/v1/trade/cancelOpenOrders"): "cancel_all",
 }
 
 _PROTECTIVE_TYPES = {"STOP_MARKET", "TAKE_PROFIT_MARKET", "STOP", "TAKE_PROFIT"}
@@ -107,27 +110,38 @@ _PROTECTIVE_TYPES = {"STOP_MARKET", "TAKE_PROFIT_MARKET", "STOP", "TAKE_PROFIT"}
 # Params worth keeping in the audit line (no secrets live in params — the
 # signature and timestamp are added later, inside _sign's own copy).
 _AUDIT_PARAM_KEYS = ("symbol", "side", "positionSide", "type", "quantity",
-                     "price", "stopPrice", "clientOrderID", "reduceOnly",
-                     "closePosition", "leverage", "orderId")
+                     "quoteOrderQty", "price", "stopPrice", "clientOrderID",
+                     "newClientOrderId", "reduceOnly", "closePosition",
+                     "leverage", "orderId")
 
 
 def _order_intent(method, path, params):
     """'entry' | 'reduce' | 'protective' | 'cancel' | 'cancel_all' |
     'leverage' | None (not order-mutating). Hedge mode has no reduceOnly
-    flag — there, closing = side opposite to positionSide."""
+    flag — there, closing = side opposite to positionSide.
+
+    A conditional TYPE alone does not make an order protective (audited
+    2026-08-04): a STOP_MARKET BUY with no reduce semantics is a breakout
+    ENTRY, and classifying it protective would let it sail through HALT.
+    Every legitimate protective order this lib produces carries reduce
+    semantics (closePosition / reduceOnly / hedge opposite-side), so require
+    them — conditional without reduce semantics is an entry and gets halted."""
     kind = _MUTATING_PATHS.get((method, path))
     if kind != "place":
         return kind
     p = params or {}
-    if p.get("type") in _PROTECTIVE_TYPES:
-        return "protective"
-    if str(p.get("reduceOnly", "")).lower() == "true" or \
-       str(p.get("closePosition", "")).lower() == "true":
-        return "reduce"
+    if path == "/openApi/spot/v1/trade/order":
+        # spot has no positions: BUY builds exposure (halt blocks it), SELL
+        # liquidates inventory (never trapped — same rule as reduce-only)
+        return "reduce" if p.get("side") == "SELL" else "entry"
+    is_reduce = (str(p.get("reduceOnly", "")).lower() == "true" or
+                 str(p.get("closePosition", "")).lower() == "true")
     ps, side = p.get("positionSide"), p.get("side")
     if (ps == "LONG" and side == "SELL") or (ps == "SHORT" and side == "BUY"):
-        return "reduce"
-    return "entry"
+        is_reduce = True
+    if p.get("type") in _PROTECTIVE_TYPES:
+        return "protective" if is_reduce else "entry"
+    return "reduce" if is_reduce else "entry"
 
 
 def _request(method, path, env, params=None, signed=True, retries=3):
@@ -606,6 +620,15 @@ def get_fills(env, symbol, start_ms, end_ms):
 
 # ── leverage ─────────────────────────────────────────────────────────────────
 
+def get_mark_price(env, symbol):
+    """Live mark price (public premiumIndex) — the cross-venue wiring contract
+    for USD→qty conversion (lib/venue_wiring.py)."""
+    data = _request("GET", "/openApi/swap/v2/quote/premiumIndex", env,
+                    {"symbol": _bingx_symbol(symbol)}, signed=False)
+    row = data[0] if isinstance(data, list) else data
+    return float(row["markPrice"])
+
+
 def set_leverage(env, symbol, leverage, side="LONG"):
     """Set leverage. In one-way mode BingX still takes side LONG/SHORT — set
     both sides for symmetry. Never silently inherit: query first, set only on
@@ -642,3 +665,163 @@ def close_position_partial(env, symbol, direction, qty, client_order_id=None):
     takes qty (partial-capable) — same call; OKX splits full vs partial, so
     the reconciler standardises on close_position_partial."""
     return close_position(env, symbol, direction, qty, client_order_id=client_order_id)
+
+
+# ── spot execution (MARKET="spot" strategies) ────────────────────────────────
+# Same guard/audit discipline as the swap layer; BingX spot quirks (verified
+# against ccxt's production bingx parser): symbols are DASHED (BTC-USDT, same
+# as swap); the client-id param is newClientOrderId (the swap layer's is
+# clientOrderID — different casing AND name); market BUYs size in QUOTE
+# currency via quoteOrderQty; spot rules come from the public
+# /openApi/spot/v1/common/symbols where stepSize/tickSize are SIZES
+# (0.0001), unlike swap's digit counts; placement may return status PENDING
+# even for market orders — poll /openApi/spot/v1/trade/query to terminal.
+# Broker attribution is the X-SOURCE-KEY header (already on every request).
+# There are no positions and no leverage — inventory is the position.
+#
+# ASYMMETRIC MINIMUMS (measured live 2026-08-04): BTC-USDT buy minimum is
+# 0.5 USDT notional but the SELL minimum is minQty 0.0001826 BTC (~$12) — a
+# small buy can create inventory that cannot be sold on its own until more
+# accumulates. place_spot_market_order returns False on such sells; callers
+# treat it as dust, not an error.
+
+from decimal import Decimal as _Dec, ROUND_DOWN as _RD
+
+SPOT_TERMINAL_STATUSES = {"FILLED", "CANCELED", "CANCELLED", "FAILED"}
+
+_spot_rules_cache = {}  # dashed symbol -> spot trading rules (per-process)
+
+
+def _floor_to_step(value, step_str):
+    return _Dec(str(value)).quantize(_Dec(str(step_str)).normalize(), rounding=_RD)
+
+
+def get_spot_rules(env, symbol):
+    """Spot trading rules: {'step': str, 'tick': str, 'min_qty': float,
+    'min_notional': float, 'active': bool}. active needs BOTH api trade
+    states plus status "1" (ccxt's gate)."""
+    sym = _bingx_symbol(symbol)
+    if sym not in _spot_rules_cache:
+        data = _request("GET", "/openApi/spot/v1/common/symbols", env,
+                        {"symbol": sym}, signed=False) or {}
+        for r in data.get("symbols") or []:
+            _spot_rules_cache[r.get("symbol")] = {
+                "step": str(r.get("stepSize") or 1),
+                "tick": str(r.get("tickSize") or "0.01"),
+                "min_qty": float(r.get("minQty") or 0),
+                "min_notional": float(r.get("minNotional") or 0),
+                "active": bool(r.get("apiStateBuy")) and bool(r.get("apiStateSell"))
+                          and str(r.get("status")) == "1",
+            }
+    if sym not in _spot_rules_cache:
+        raise BingXError("N/A", f"symbol {sym} not in spot common/symbols", "symbols")
+    return _spot_rules_cache[sym]
+
+
+def format_spot_qty(env, symbol, qty):
+    """Floor a BASE qty to the spot step. Raises ValueError below min_qty or
+    on a suspended symbol. Plain decimal string."""
+    rules = get_spot_rules(env, symbol)
+    if not rules["active"]:
+        raise ValueError(f"{symbol} is not open for spot trading")
+    q = _floor_to_step(qty, rules["step"])
+    if float(q) < rules["min_qty"] or float(q) <= 0:
+        raise ValueError(
+            f"{symbol} spot qty {qty} floors to {q}, below minimum {rules['min_qty']}"
+        )
+    return format(q, "f")
+
+
+def get_spot_price(env, symbol):
+    """Last spot trade price (public 24hr ticker — /ticker/price is marked
+    deprecated by BingX)."""
+    data = _request("GET", "/openApi/spot/v1/ticker/24hr", env,
+                    {"symbol": _bingx_symbol(symbol)}, signed=False)
+    row = data[0] if isinstance(data, list) else data
+    return float(row["lastPrice"])
+
+
+def get_spot_balances(env):
+    """{asset: free+locked} for every non-zero spot balance."""
+    data = _request("GET", "/openApi/spot/v1/account/balance", env) or {}
+    out = {}
+    for b in data.get("balances") or []:
+        amt = float(b.get("free") or 0) + float(b.get("locked") or 0)
+        if amt > 0:
+            out[b.get("asset")] = amt
+    return out
+
+
+def get_spot_order(env, symbol, order_id):
+    """Spot order by id, normalized: status, avg_price, executed_qty,
+    quote_qty, client_order_id, raw."""
+    o = _request("GET", "/openApi/spot/v1/trade/query", env,
+                 {"symbol": _bingx_symbol(symbol), "orderId": str(order_id)}) or {}
+    if "status" not in o:
+        raise BingXError("N/A", f"spot order query missing status: {list(o)}", "trade/query")
+    executed = float(o.get("executedQty") or 0)
+    quote = float(o.get("cummulativeQuoteQty") or 0)
+    return {
+        "order_id": str(o.get("orderId", "")),
+        "status": o.get("status"),
+        "avg_price": (quote / executed) if executed else 0.0,
+        "executed_qty": executed,
+        "quote_qty": quote,
+        "client_order_id": o.get("clientOrderId") or o.get("newClientOrderId") or "",
+        "raw": o,
+    }
+
+
+def place_spot_market_order(env, symbol, side, base_qty=None, quote_qty=None,
+                            client_order_id=None, confirm_timeout=15):
+    """Confirmed spot market order. side: 'buy'|'sell'.
+
+    BUYs pass quote_qty (USDT — quoteOrderQty, no price conversion on our
+    side); SELLs pass base_qty (floored to the spot step — you can only sell
+    inventory you hold). Below min qty/notional → returns False (intentional
+    skip). Polls to a terminal state; returns get_spot_order()'s dict.
+    Guard: buy=entry (halt blocks), sell=reduce (never trapped)."""
+    sym = _bingx_symbol(symbol)
+    side = side.lower()
+    if side not in ("buy", "sell"):
+        raise ValueError(f"side must be buy|sell, got {side!r}")
+    rules = get_spot_rules(env, sym)
+    params = {"symbol": sym, "side": side.upper(), "type": "MARKET"}
+    if client_order_id:
+        params["newClientOrderId"] = client_order_id  # spot param name (swap uses clientOrderID)
+    if side == "buy":
+        if quote_qty is None:
+            raise ValueError("spot buys are sized in quote currency — pass quote_qty")
+        if float(quote_qty) < rules["min_notional"]:
+            return False  # below min notional — intentional skip
+        params["quoteOrderQty"] = f"{float(quote_qty):.2f}"
+    else:
+        if base_qty is None:
+            raise ValueError("spot sells are sized in base currency — pass base_qty")
+        try:
+            params["quantity"] = format_spot_qty(env, sym, base_qty)
+        except ValueError as e:
+            if "not open for spot trading" in str(e):
+                raise
+            return False  # below min qty — intentional skip
+
+    data = _request("POST", "/openApi/spot/v1/trade/order", env, params)
+    order = data if isinstance(data, dict) else {}
+    order_id = order.get("orderId")
+    if not order_id:
+        raise BingXError("N/A", f"spot order response missing orderId: {list(order)}",
+                         "trade/order")
+    deadline = time.time() + confirm_timeout
+    result = None
+    while time.time() < deadline:
+        result = get_spot_order(env, sym, order_id)
+        if result["status"] == "FILLED":
+            return result
+        if result["status"] in SPOT_TERMINAL_STATUSES:
+            raise BingXError("N/A", f"spot order {order_id} ended {result['status']}",
+                             "confirm")
+        time.sleep(1)
+    raise OrderNotConfirmed(
+        f"spot order {order_id} still {result['status'] if result else 'UNKNOWN'} "
+        f"after {confirm_timeout}s"
+    )

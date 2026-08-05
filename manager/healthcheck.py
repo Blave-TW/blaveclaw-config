@@ -134,6 +134,15 @@ def _check_entry(name, entry, cron_entries, now):
     if entry.get("type") == "cron" and cron_entries is not None and name not in cron_entries:
         return "registered as a deployment but no crontab entry found (schedule lost or never created)"
 
+    # the run can only succeed if the strategy file is where run_strategy.sh
+    # looks — measured 2026-08-05: a strategy written to strategies/<name>.py
+    # (root) instead of strategies/<name>/strategy.py failed every scheduled
+    # run for hours, and the crash alert only goes to Telegram, so an unpaired
+    # machine saw nothing at all
+    if entry.get("type") == "cron" and not os.path.isfile(f"strategies/{name}/strategy.py"):
+        return (f"strategies/{name}/strategy.py missing — the schedule can never "
+                f"run it (wrong layout? check for a stray strategies/{name}.py)")
+
     if not os.path.exists(hb_path):
         try:
             registered = datetime.strptime(

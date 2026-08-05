@@ -16,8 +16,10 @@ do not assume casing or invent names.
    values must never appear in chat, logs, Telegram, error messages, or committed files.
 
 2. **Check what already ships before writing anything.** BingX
-   (`lib/account_bingx.py` + `lib/order_bingx.py`) and SinoPac (`lib/order_sinopac.py`)
-   are implemented — extend, never rewrite. For everything else, work from
+   (`lib/account_bingx.py` + `lib/order_bingx.py`), Binance
+   (`lib/account_binance.py` + `lib/order_binance.py`), OKX
+   (`lib/account_okx.py` + `lib/order_okx.py`) and SinoPac
+   (`lib/order_sinopac.py`) are implemented — extend, never rewrite. For everything else, work from
    `lib/account_TEMPLATE.py` and the patterns in `lib/order_bingx.py`
    (see `references/lib.md`, `references/manager.md` § Account library).
    **If both files already ship for this venue, skip straight to rule 5, and once
@@ -73,8 +75,13 @@ do not assume casing or invent names.
    do not write `lib/order_{id}.py`, do not touch the reconciler. A wrong key must
    cost one small module, not a whole integration (measured 2026-08-04: an agent
    wrote a 15KB order lib against a dead key — minutes of work validating nothing).
-   On success: show the numbers (every wallet, when the venue splits them) and ask
-   the user to confirm they match the exchange app. Place NO order — live trading
+   On success: report the numbers (every wallet, when the venue splits them), ask
+   the user to check them against the exchange app, and **continue straight into
+   rules 6–7 without waiting for the answer** — the integration finishes in ONE
+   pass (measured 2026-08-04: stopping here read as "the agent said done but the
+   page still says incomplete"). The gate's job is catching a dead key cheaply,
+   not pausing on a live one; a number mismatch reported later is fixed in the
+   account lib without touching the order code. Place NO order — live trading
    starts later via the reconciler, not as an integration test. Never clear a halt
    as part of this flow. **Do not tell the user to move funds to any particular
    wallet** — spot strategies trade the spot wallet, perp strategies the futures
@@ -93,8 +100,14 @@ do not assume casing or invent names.
    `close_position_partial` — missing any of them crashes at reconcile time
    (mid-trade), not at integration time. Never rename or omit them.
 
-7. **Wire `manager/reconciler.py`** through both files in the same session
-   (order library → reconciler is one atomic task — AGENTS.md).
+7. **Reconciler wiring is AUTOMATIC for official venues** — the template's
+   `get_positions`/`place_order` route through `lib/venue_wiring.py`, which
+   detects the bound venue and maps the USD-diff contract (swap + spot) for
+   you; do not touch `manager/reconciler.py` for Binance/BingX/OKX, and a
+   rebind to another official venue needs no reconciler change. For a venue
+   WITHOUT official libs, replace the two function bodies in the same session
+   as the order lib (order library → reconciler is one atomic task —
+   AGENTS.md); their docstrings carry the contract.
 
 8. **Done = the two files exist and rule 5 passed.** The machine's portfolio
    reporter detects the files and the web page flips the venue to ready on its

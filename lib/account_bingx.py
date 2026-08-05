@@ -59,12 +59,26 @@ def _public_get(path, params=None):
     return _call(f"{path}?{qs}" if qs else path, {"X-SOURCE-KEY": "BX-AI-SKILL"})
 
 
-def _usdt_cash(data, list_key):
-    """USDT free+locked from a spot/fund balance payload. USDT only — valuing
-    other assets would need price lookups; documented as a known limit."""
-    rows = (data or {}).get(list_key) or []
-    row = next((r for r in rows if r.get("asset") == "USDT"), {})
-    return float(row.get("free", 0)) + float(row.get("locked", 0))
+def _wallet_value(data, list_key, marks):
+    """USDT value of ALL assets in a spot/fund balance payload — USDT/USDC
+    direct, others via the perp mark map (2026-08-04: the old USDT-only sum
+    made the breakdown row disagree with get_holdings by exactly the coins'
+    value — measured $35.93 shown vs $80.5 held). Unpriceable assets
+    contribute 0 here; the per-coin truth (incl. None-valued rows) lives in
+    get_holdings."""
+    total = 0.0
+    for r in (data or {}).get(list_key) or []:
+        amt = float(r.get("free", 0)) + float(r.get("locked", 0))
+        if amt <= 0:
+            continue
+        asset = r.get("asset")
+        if asset in ("USDT", "USDC"):
+            total += amt
+        else:
+            px = marks.get(f"{asset}-USDT")
+            if px:
+                total += amt * px
+    return round(total, 2)
 
 
 def get_equity(env: dict) -> dict:
@@ -90,15 +104,21 @@ def get_equity(env: dict) -> dict:
 
     accounts = {"swap": equity}
     # Best-effort: the breakdown failing must not take the main equity down.
+    marks = {}
     try:
-        accounts["spot"] = _usdt_cash(
-            _signed_get("/openApi/spot/v1/account/balance", env), "balances"
+        marks = {m["symbol"]: float(m["markPrice"])
+                 for m in (_public_get("/openApi/swap/v2/quote/premiumIndex") or [])}
+    except Exception:
+        pass
+    try:
+        accounts["spot"] = _wallet_value(
+            _signed_get("/openApi/spot/v1/account/balance", env), "balances", marks
         )
     except Exception:
         pass
     try:
-        accounts["fund"] = _usdt_cash(
-            _signed_get("/openApi/fund/v1/account/balance", env), "assets"
+        accounts["fund"] = _wallet_value(
+            _signed_get("/openApi/fund/v1/account/balance", env), "assets", marks
         )
     except Exception:
         pass
@@ -119,6 +139,52 @@ def get_equity(env: dict) -> dict:
     except Exception:
         pass
     return {"equity": equity, "currency": row.get("asset", "USDT"), "accounts": accounts}
+
+
+def get_holdings(env: dict) -> list:
+    """Coin holdings — DISPLAY ONLY, never fed to the reconciler.
+    Returns [{'asset', 'amount', 'usdt_value', 'wallet'}, ...] sorted by
+    value desc; wallet ∈ {'spot','fund','swap'}. Valuation uses the public
+    perp premiumIndex map (shape already field-verified in get_positions);
+    assets with no ASSET-USDT perp keep usdt_value=None but are still listed.
+    Dust under 0.1 USDT dropped; unpriceable rows kept. Swap rows use the
+    per-asset `equity` field (margin balance incl. unrealized PnL — same
+    basis as the wallet-breakdown swap row and the sizing equity)."""
+    # fail-loud per section (audit M2): a partial list reads as "money
+    # vanished" — account_reader is the single best-effort layer, not here
+    out = []
+    for b in _signed_get("/openApi/swap/v3/user/balance", env) or []:
+        amt = float(b.get("equity") or 0)
+        if amt != 0:
+            out.append({"asset": b.get("asset"), "amount": amt, "wallet": "swap"})
+    for b in (_signed_get("/openApi/spot/v1/account/balance", env) or {}).get("balances") or []:
+        amt = float(b.get("free") or 0) + float(b.get("locked") or 0)
+        if amt > 0:
+            out.append({"asset": b.get("asset"), "amount": amt, "wallet": "spot"})
+    for b in (_signed_get("/openApi/fund/v1/account/balance", env) or {}).get("assets") or []:
+        amt = float(b.get("free") or 0) + float(b.get("locked") or 0)
+        if amt > 0:
+            out.append({"asset": b.get("asset"), "amount": amt, "wallet": "fund"})
+    if not out:
+        return []
+
+    marks = {}
+    try:
+        marks = {m["symbol"]: float(m["markPrice"])
+                 for m in (_public_get("/openApi/swap/v2/quote/premiumIndex") or [])}
+    except Exception:
+        pass
+
+    for h in out:
+        if h["asset"] in ("USDT", "USDC"):  # USDC ≈1 — display-grade valuation
+            h["usdt_value"] = round(h["amount"], 2)
+        else:
+            p = marks.get(f"{h['asset']}-USDT")
+            h["usdt_value"] = round(h["amount"] * p, 2) if p else None
+    # abs(): a negative margin row (multi-asset mode) is information, not dust
+    out = [h for h in out if h["usdt_value"] is None or abs(h["usdt_value"]) >= 0.1]
+    out.sort(key=lambda h: -(h["usdt_value"] or 0))
+    return out
 
 
 def get_positions(env: dict) -> list:

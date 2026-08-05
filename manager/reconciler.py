@@ -10,6 +10,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 
 POLL_INTERVAL  = 5    # seconds between polls
 THRESHOLD = 10   # minimum diff (in account currency) to place an order
+                 # (lib/portfolio.spot_scope's threshold default tracks this)
 DISCONNECT_HALT_AFTER = 3  # 連續 N 次讀不到持倉=交易所鏈路斷了,自動 HALT
 RECONCILE_EVERY_S = 300  # 定期心跳對帳:就算沒有任何 mtime 變動也要每 5 分鐘
                          # 對一次帳——斷鏈、金鑰失效、倉位漂移不能等下一次訊號
@@ -40,83 +41,51 @@ def _active_state_mtimes():
 
 def get_positions():
     """
-    Query exchange for actual open positions.
-    Return {symbol: {'side': 'long'|'short'|None, 'size': float}}
+    Actual open positions: {symbol: {'side': 'long'|'short'|None, 'size': float}}
+    with 'size' in account currency (USD), and spot inventory under
+    "SYMBOL@spot" keys (lib/portfolio.market_key).
 
-    'size' is the position value expressed in account currency (e.g. USD).
-    Convert native qty to account currency before returning:
-      contracts × price_in_account_ccy   (futures)
-      qty × mark_price                   (crypto perps)
-      lots × price × fx_rate             (forex)
+    OFFICIAL VENUES AUTO-WIRE — DO NOT HAND-WIRE THEM: when the bound venue
+    ships both lib/account_{id}.py and lib/order_{id}.py (Binance / BingX /
+    OKX), lib/venue_wiring routes everything — swap positions, spot inventory
+    (MARKET="spot" strategies via spot_scope, incl. exit-on-removal), and the
+    reduce-leg lot handling. Rebinding to another official venue needs no
+    reconciler change at all.
 
-    Example — Binance USDT-M futures:
-      GET /fapi/v2/positionRisk  (signed)
-      Filter rows where positionAmt != 0
-      side = 'long' if positionAmt > 0 else 'short'
-      size = abs(positionAmt) * markPrice
-
-    Example — Bybit linear:
-      GET /v5/position/list?category=linear
-      side = row['side'].lower()
-      size = float(row['positionValue'])
-
-    ERROR CONTRACT — on any failure, let the exception PROPAGATE. Never
-    catch-and-return {} to "handle errors gracefully": an empty dict reads as
-    "all positions are zero", so reconcile() would re-buy the entire target
-    the moment the link recovers — and the auto-halt wrapper
-    (_get_positions_guarded) can only count failures it actually sees.
+    Replace this body ONLY for a venue WITHOUT official libs (follow
+    references/exchange-connect.md). Keep the ERROR CONTRACT: on any failure
+    let the exception PROPAGATE — never catch-and-return {} ("all flat"), or
+    reconcile() re-buys the entire target the moment the link recovers, and
+    the auto-halt wrapper can only count failures it actually sees.
     """
-    raise NotImplementedError("implement exchange-specific position query")
+    from lib.venue_wiring import auto_get_positions
+    return auto_get_positions()
 
 
-def place_order(symbol, signed_diff, asset_spec=None):
+def place_order(symbol, signed_diff, asset_spec=None, reduce_only=False):
     """
-    Place a market order to close the gap between target and actual.
+    Market order closing the target/actual gap. signed_diff is account
+    currency (USD): > 0 buy, < 0 sell. `symbol` may carry a market suffix
+    ("BTCUSDT@spot") — split with lib.portfolio.split_key.
 
-    signed_diff > 0 → buy  (increase long / reduce short)
-    signed_diff < 0 → sell (increase short / reduce long)
-    signed_diff is in account currency (e.g. USD).
+    OFFICIAL VENUES AUTO-WIRE (see get_positions) — lib/venue_wiring maps the
+    USD diff onto the venue's order lib: spot buys sized in quote currency,
+    spot sells capped at inventory, swap converted at the live mark with
+    reduce legs ceiled to a whole lot and capped at the position.
 
-    CRITICAL — return value convention:
-      return False   if the order was intentionally skipped (qty below exchange minimum,
-                     below one-lot threshold, etc.). This suppresses Telegram notification
-                     and orders.jsonl logging — the user will NOT see a phantom trade.
-      return None    (or any truthy value) on successful order placement.
-      raise          on unexpected errors (network failure, API rejection, etc.).
-
-    QTY PRECISION — REQUIRED before placing any order:
-      Exchanges reject orders whose qty violates the symbol's step size, so fetch
-      the instrument's trading rules FIRST (cache them at startup):
-        Binance futures: GET /fapi/v1/exchangeInfo → LOT_SIZE.stepSize, minQty, MIN_NOTIONAL
-        OKX:             GET /api/v5/public/instruments → lotSz, minSz
-        Bybit:           GET /v5/market/instruments-info → lotSizeFilter.qtyStep, minOrderQty
-      Then floor qty to the step using Decimal — float arithmetic produces
-      0.10000000000000003-style artifacts that exchanges reject:
-        from decimal import Decimal, ROUND_DOWN
-        qty = float(Decimal(str(raw_qty)).quantize(Decimal(step_str), rounding=ROUND_DOWN))
-      Send qty as a plain decimal string — never scientific notation like 1e-05.
-      If the floored qty < minQty or qty*price < minNotional → return False.
-
-    asset_spec: passed through from portfolio_config["asset_specs"]. Use it to convert
-    signed_diff (account currency) into the instrument's native qty.
-
-      asset_spec is None  →  default (fractional qty, no lot constraint):
-        price = get_mark_price(symbol)
-        qty   = abs(signed_diff) / price
-        if qty < EXCHANGE_MINIMUM: return False  # ← must return False, not bare return
-        side  = BUY if signed_diff > 0 else SELL
-
-      asset_spec example for futures contracts (e.g. 台指期):
-        {"type": "futures_contracts", "contract_value": 200,
-         "currency": "TWD", "lot_size": 1}
-        price_twd = get_futures_price(symbol)
-        fx        = get_fx_rate("TWD")           # TWD per 1 account-currency unit
-        notional  = price_twd * asset_spec["contract_value"] / fx
-        contracts = round(abs(signed_diff) / notional)
-        if contracts == 0: return False          # below one-lot threshold
-        side = BUY if signed_diff > 0 else SELL
+    Replace this body ONLY for a venue WITHOUT official libs. Contract:
+      return False  = intentionally skipped (below exchange minimum) — no
+                      Telegram, no orders.jsonl entry, no phantom trade
+      return dict   = exchange-confirmed fills ({'avg_price','executed_qty',
+                      'exchange', ...}) — report fills, never intent
+      raise         = real failure (network, rejection) — surfaces to the user
+    Qty precision: floor to the instrument's step via the order lib's
+    format_qty (Decimal, never float division — measured: 0.01/0.1 floors a
+    whole lot short); asset_spec passes through from portfolio_config for
+    non-fractional instruments (futures contracts etc.).
     """
-    raise NotImplementedError("implement exchange-specific order placement")
+    from lib.venue_wiring import auto_place_order
+    return auto_place_order(symbol, signed_diff, asset_spec, reduce_only)
 
 
 # 這層包裝是基礎設施,交易所無關——實作 get_positions() 時不用碰它。

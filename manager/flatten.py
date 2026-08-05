@@ -14,6 +14,10 @@ Semantics — panic button, not portfolio management:
     A venue with positions but no order lib is reported loudly and skipped.
   - Dust below the exchange minimum can't be closed (format_qty gate) — it is
     logged and left; the exchange rejects sub-minimum orders anyway.
+  - SPOT inventory in the managed scope (lib/portfolio.spot_scope — strategy
+    symbols + previously-managed) is sold down too; personal coins in
+    untargeted symbols are never touched. Spot dust below the venue's sell
+    minimum is logged and left, same rule as swap.
   - Every close is appended to manager/orders.jsonl with its confirmed fill,
     so the web 交易歷史 and the order toast show exactly what happened.
 """
@@ -61,6 +65,61 @@ def _venues(env):
     return sorted(set(out))
 
 
+def _flatten_spot(vid, order, env):
+    """Sell the venue's MANAGED spot inventory (spot_scope symbols) to zero.
+    Personal coins in symbols no strategy ever targeted are not in scope and
+    are never sold. Returns (closed, errors)."""
+    from lib.portfolio import spot_scope
+    from lib.venue_wiring import _spot_base
+    closed = errors = 0
+    try:
+        balances = order.get_spot_balances(env)
+
+        def _inv(sym):
+            amt = balances.get(_spot_base(sym), 0.0)
+            return amt * order.get_spot_price(env, sym) if amt else 0.0
+
+        scope = spot_scope(_inv)
+    except Exception as e:
+        logging.error(f"[{vid}] close-all spot: scope read failed: {e}")
+        _record_order_error("*", vid, f"close-all spot: scope read failed: {e}")
+        return closed, errors + 1
+    for sym, usd in scope.items():
+        amt = balances.get(_spot_base(sym), 0.0)
+        if amt <= 0:
+            continue
+        try:
+            cid = f"flat{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
+            result = order.place_spot_market_order(env, sym, "sell", base_qty=amt,
+                                                   client_order_id=cid)
+        except Exception as e:
+            logging.error(f"[{vid}] close-all spot {sym} failed: {e}")
+            _record_order_error(sym, vid, f"close-all spot: {e}")
+            errors += 1
+            continue
+        if result is False:
+            logging.info(f"[{vid}] {sym} spot {amt} below sell minimum — dust left")
+            continue
+        leg = {"signed_diff": -round(result.get("quote_qty") or usd, 2),
+               "reduce_only": True, "exchange": vid}
+        if result.get("avg_price") is not None:
+            leg["fill_price"] = result["avg_price"]
+        if result.get("executed_qty") is not None:
+            leg["executed_qty"] = result["executed_qty"]
+        _append_reconciler_log({
+            "action": "SELL",
+            "symbol": f"{sym}@spot",
+            "signed_diff": leg["signed_diff"],
+            "exchange": vid,
+            "asset_spec": None,
+            "contributors": [],
+            "legs": [leg],
+        })
+        closed += 1
+        logging.info(f"[{vid}] sold spot {sym} ({amt})")
+    return closed, errors
+
+
 def flatten():
     env = _read_env()
     if not guard.halted():
@@ -90,9 +149,15 @@ def flatten():
             _record_order_error("*", vid, f"close-all: positions exist but no order_{vid} lib")
             errors += 1
             continue
+        order = importlib.import_module(f"lib.order_{vid}") if has_order else None
+        # managed SPOT inventory sells down too(2026-08-05「現貨也賣掉」)—
+        # must run even when swap is flat, so no early-continue before it
+        if order is not None and hasattr(order, "place_spot_market_order"):
+            c2, e2 = _flatten_spot(vid, order, env)
+            closed += c2
+            errors += e2
         if not positions:
             continue
-        order = importlib.import_module(f"lib.order_{vid}")
         for p in positions:
             # One bad row must not abort the rest of the flatten — every branch
             # below either closes, records dust, or records a visible error.
@@ -107,7 +172,13 @@ def flatten():
                     continue
                 price = float(p.get("mark_price", 0) or 0)
                 try:
-                    order.format_qty(env, sym, size, price=price or None)
+                    # step/min_qty gate ONLY — deliberately no price arg: with
+                    # it format_qty also enforces MIN_NOTIONAL, which Binance
+                    # EXEMPTS for reduce-only orders, so a perfectly closable
+                    # position would be left behind as "dust" (audit S2). A
+                    # venue that does reject the close reports it as a visible
+                    # error below, not a silent leave.
+                    order.format_qty(env, sym, size)
                 except ValueError:
                     logging.info(f"[{vid}] {sym} {side} {size} below minimum — dust left")
                     continue

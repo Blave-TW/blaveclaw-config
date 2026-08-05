@@ -37,3 +37,16 @@ def get_positions(env: dict) -> list:
     instrument types, so computing pos * markPx * ctVal will silently return 0.
     """
     raise NotImplementedError
+
+
+# OPTIONAL — implement when the venue has wallets holding coins outside the
+# derivatives account (spot/funding). DISPLAY ONLY: the platform shows these
+# on the web; they are NEVER positions and never reach the reconciler (a spot
+# coin listed as a position would net futures orders against spot inventory).
+#
+# def get_holdings(env: dict) -> list:
+#     """[{'asset': str, 'amount': float, 'usdt_value': float|None,
+#     'wallet': str}, ...] sorted by value desc. usdt_value None when no live
+#     price (delisted coin) — still LIST it (hiding it = money vanishing).
+#     Drop dust under 0.1 USDT. See lib/account_binance.py for the reference
+#     implementation."""
