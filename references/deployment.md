@@ -31,6 +31,34 @@ Never assume the user wants to go live just because they described a strategy or
 Even if the user says "deploy it" or "run it", always confirm with one message before touching the schedule or MODE = "live".
 Once deployed live, send a confirmation message with: strategy name, schedule, account_value, target_vol_pct, and one line noting the healthcheck will alert them if the strategy stops running.
 
+## Editing a FUNDED Strategy (in the 下單組合) — identity vs tunables
+
+A funded strategy's positions track its target live, so what you may change
+in place splits cleanly in two (the industry split too — 3Commas locks the
+pair while deals run; Pionex locks grids entirely):
+
+**Tunables — edit freely, keep the name.** Thresholds, vol targets, windows,
+logic: change `strategy.py` in place; the next signal run picks it up and the
+reconciler adjusts the position to the new target. No confirmation needed —
+this live-follow is the product working as designed.
+
+**Identity — NAME / SYMBOL / MARKET — never change in place on a funded
+strategy.** Changing any of them means "this is a different strategy": the
+old target vanishes (or moves to another instrument/inventory), so the
+reconciler WILL close the old position — correct behaviour, but it must never
+be a surprise. Measured 2026-08-05: an agent renamed a funded strategy to
+flip MARKET to spot; the futures position auto-closed, the web's picker
+showed a ghost entry, and the user read all of it as breakage. The flow for
+an identity change is REMOVE + REBUILD:
+1. Tell the user up front: the old strategy's futures position will be
+   auto-closed / spot inventory auto-sold, and their 下單設定 needs
+   re-saving. Get their OK.
+2. Build the new strategy under its own name (backtest as usual).
+3. Have them re-save 下單設定 (uncheck old name if it lingers, fund the new).
+
+Also: `strategies/<name>/strategy.py` is the only layout the schedule can
+run — never `strategies/<name>.py` at the top level (healthcheck flags it).
+
 ## Deployment Healthcheck
 
 `manager/healthcheck.py` alerts the user when something that should be running has gone quiet — a lost cron entry, a dead daemon, or a deployment that was registered but never scheduled. It complements `alert_failure.py` (which only fires when a run happened and crashed). Heartbeats are written automatically: `run_strategy.sh` touches `state/heartbeat/<name>` on every successful run, and repo daemons (reconciler) touch their own each loop.
