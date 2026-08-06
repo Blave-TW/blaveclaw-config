@@ -26,6 +26,38 @@ Layout rules:
 - No chartjunk: no shadows, no heavy boxes, no background color bands unless they encode data (e.g. in-position spans → `GREEN` at `alpha=0.08`).
 - Title = what the chart shows (symbol, timeframe, metric); put secondary detail (date range, candle count) in a smaller subtitle or axis label, not the title.
 
+## Intraday Kline for TW Stocks / Futures — timezone + session gaps
+
+Two rules, both verified on a live machine (2026-08-06, 2317 1m):
+
+1. **The index is UTC — shift before display.** All `lib/data.py` OHLCV indexes are tz-naive UTC. For Taiwan-market charts add 8 hours before plotting, or the 09:00–13:30 session shows up at 01:00–05:30 while the axis says "Taipei":
+
+```python
+df.index = df.index + pd.Timedelta(hours=8)   # UTC → Taipei, display only
+```
+
+2. **Never plot intraday candles on a raw datetime axis.** TW stocks trade 4.5 h/day, so a datetime axis renders the other 19.5 h as a huge blank between sessions. `mplfinance` is NOT installed — use a positional integer x-axis and take tick labels from the index:
+
+```python
+x = range(len(df))                             # one slot per bar, gaps collapse
+up = df["Close"] >= df["Open"]
+for mask, color in ((up, chart_style.GREEN), (~up, chart_style.RED)):
+    idx = [i for i, m in zip(x, mask) if m]
+    sub = df[mask]
+    ax.vlines(idx, sub["Low"], sub["High"], color=color, linewidth=0.6)
+    ax.bar(idx, (sub["Close"] - sub["Open"]).abs(),
+           bottom=sub[["Open", "Close"]].min(axis=1), width=0.7, color=color)
+
+step = max(1, len(df) // 8)                    # time labels come from the index
+ticks = list(range(0, len(df), step))
+ax.set_xticks(ticks)
+ax.set_xticklabels([df.index[i].strftime("%m-%d %H:%M") for i in ticks])
+```
+
+When the window spans multiple sessions, mark each day boundary with a thin dashed `axvline` (`chart_style.TEXT`, `alpha=0.25`) so the collapsed overnight jump stays visible.
+
+Crypto trades 24/7 — no session gaps, and UTC labels are the norm there; these two rules are for session-bound markets (TW stocks, TW futures).
+
 ## matplotlib — English Only
 
 All chart text must be in English. Chinese characters render as garbled boxes (□□□) on the server — the default font has no CJK glyphs.
