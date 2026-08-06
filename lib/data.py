@@ -238,22 +238,63 @@ def _sanity_check_ohlc(df, label):
     return df
 
 
+def _is_sub_5min(interval):
+    return pd.Timedelta(interval) < pd.Timedelta('5min')
+
+
+def _sub_5min_earliest():
+    """Midnight-floored, mirroring server-side validate_sub_5min_request — start is a
+    date-only string, so an un-floored cutoff would reject the very date the error
+    message advertises as valid (00:00 < now's time-of-day)."""
+    return (datetime.utcnow() - timedelta(days=45)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+
+
+def _validate_sub_5min_start(interval, start):
+    """Sub-5min klines only go back 45 days server-side; fail loudly, never clamp
+    a user-facing range — a silently shortened backtest window is worse than an error."""
+    if _is_sub_5min(interval):
+        earliest = _sub_5min_earliest()
+        if datetime.strptime(start, '%Y-%m-%d') < earliest:
+            raise ValueError(
+                f'{interval} kline only goes back 45 days '
+                f'(start must be {earliest.strftime("%Y-%m-%d")} or later)')
+
+
 def _fetch_kline_raw(symbol, interval, start, end, headers):
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    sub_5min = _is_sub_5min(interval)
     s = datetime.strptime(start, '%Y-%m-%d')
     e = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d')
+    if sub_5min:
+        # The cache layer widens ranges to month starts, which can reach past the
+        # API's 45-day floor even when the user's own start is legal — clamp only
+        # here (internal ranges); user-facing starts are validated before this,
+        # on the same _sub_5min_earliest basis so a start exactly at the validated
+        # earliest is never silently clamped away.
+        s = max(s, _sub_5min_earliest())
+        if s >= e:
+            return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume'])
     chunks, cursor = [], s
+    chunk_days = 30 if sub_5min else 365
     while cursor < e:
-        chunk_end = min(cursor + timedelta(days=365), e)
+        chunk_end = min(cursor + timedelta(days=chunk_days), e)
         chunks.append((cursor.strftime('%Y-%m-%d'), chunk_end.strftime('%Y-%m-%d')))
         cursor = chunk_end
 
     def _fetch_one(cs, ce):
-        r = requests.get(f'{BASE}/kline', headers=headers, params={
-            'symbol': symbol, 'period': interval,
-            'start_date': cs, 'end_date': ce,
-        }, timeout=60)
-        r.raise_for_status()
+        # Sub-5min cold fetches hit Binance fapi server-side and can take minutes;
+        # _retry_get also covers transient 429/5xx/timeouts a bare requests.get dropped.
+        try:
+            r = _retry_get(f'{BASE}/kline', headers=headers, params={
+                'symbol': symbol, 'period': interval,
+                'start_date': cs, 'end_date': ce,
+            }, timeout=300 if sub_5min else 60)
+        except requests.HTTPError as exc:
+            resp = exc.response
+            raise RuntimeError(
+                f'/kline {symbol} {interval} HTTP {resp.status_code}: {resp.text[:200]}'
+            ) from exc
         return r.json()
 
     rows = []
@@ -262,19 +303,29 @@ def _fetch_kline_raw(symbol, interval, start, end, headers):
         for future in as_completed(futures):
             rows.extend(future.result())
 
+    if not rows:
+        return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume'])
     df = pd.DataFrame(rows)
     df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
     df = df.set_index('time').sort_index()
     df = df[~df.index.duplicated(keep='first')]
-    df = df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'})
-    df['Volume'] = 0
+    df = df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low',
+                            'close': 'Close', 'volume': 'Volume'})
+    if 'Volume' not in df.columns:
+        df['Volume'] = 0
     return df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float)
 
 
 def fetch_kline(symbol, interval, start, end, headers):
-    """Fetch OHLCV kline data from Blave API with annual chunking and local cache."""
+    """Fetch OHLCV kline data from Blave API with date chunking and local cache.
+
+    Sub-5min intervals (1min..4min): served live from Binance by the API,
+    45-day lookback max, real volume. Cache namespace is kline2 — the old
+    kline cache has Volume hard-zeroed and must not be mixed with real volume.
+    """
+    _validate_sub_5min_start(interval, start)
     df = _extend_cache_monthly(
-        'kline', {'symbol': symbol, 'period': interval},
+        'kline2', {'symbol': symbol, 'period': interval},
         lambda s, e: _fetch_kline_raw(symbol, interval, s, e, headers),
         start, end,
     )
@@ -285,24 +336,28 @@ def fetch_kline_batch(symbols, interval, start, end, headers):
     """Batch fetch OHLCV kline for many symbols via /kline/batch (chunk_size=20).
     Returns dict {symbol: DataFrame(Open, High, Low, Close, Volume)}.
 
-    Uses the same monthly cache dir naming as fetch_kline ('kline_{interval}_{symbol}')
+    Uses the same monthly cache dir naming as fetch_kline ('kline2_{interval}_{symbol}')
     so single-symbol and batch calls share cache — a symbol already cached via
     fetch_kline is a warm hit here too, and vice versa. Warm ids are extended through
     the batch endpoint too (not one call per symbol) — see _fetch_batch_cached."""
+    _validate_sub_5min_start(interval, start)
     def _parse(records):
         df = pd.DataFrame(records)
         df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
         df = df.set_index('time').sort_index()
         df = df[~df.index.duplicated(keep='first')]
-        df = df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'})
-        df['Volume'] = 0
+        df = df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low',
+                                'close': 'Close', 'volume': 'Volume'})
+        if 'Volume' not in df.columns:
+            df['Volume'] = 0
         return df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float)
 
     results = _fetch_batch_cached(
-        f'kline_{interval}', f'{BASE}/kline/batch?period={interval}', 'symbols',
+        f'kline2_{interval}', f'{BASE}/kline/batch?period={interval}', 'symbols',
         lambda sid, s, e, hdrs: _fetch_kline_raw(sid, interval, s, e, hdrs),
         _parse, symbols, start, end, headers,
-        chunk_size=20, start_param='start_date', end_param='end_date', date_chunk_days=365,
+        chunk_size=20, start_param='start_date', end_param='end_date',
+        date_chunk_days=30 if _is_sub_5min(interval) else 365,
     )
     return {sid: _sanity_check_ohlc(df, f'{sid} {interval} kline') for sid, df in results.items()}
 
@@ -1194,9 +1249,11 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
 
     def _fetch_batch_range(id_list, range_start, range_end):
         """chunk_size ids per request x date_chunk_days-sized date spans, all issued
-        concurrently. Returns {id: DataFrame} merged across spans, missing/empty ids
-        simply absent (caller treats absence as 'no data')."""
-        out = {}
+        concurrently. Returns ({id: DataFrame}, failed_ids): frames merged across spans,
+        missing/empty ids simply absent (caller treats absence as 'no data') — EXCEPT
+        ids in failed_ids, whose chunk errored or was server-side rate-limited; for
+        those, absence is unknown, not 'empty', and must never be cached as empty."""
+        out, failed_ids = {}, set()
         id_chunks = [id_list[i:i + chunk_size] for i in range(0, len(id_list), chunk_size)]
         date_spans = _date_spans(range_start, range_end)
         jobs = [(idx, chunk, span) for idx, chunk in enumerate(id_chunks) for span in date_spans]
@@ -1211,11 +1268,13 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
                 failed = body.get('failed', [])
                 if failed:
                     print(f'  [batch] {batch_url} rate-limited after retries, dropped: {failed}')
+                    failed_ids.update(failed)
                 for _id, records in body.get('data', {}).items():
                     if records:
                         partial[_id] = _normalise_index(parse_fn(records))
             except Exception as e:
                 print(f'  [batch] {batch_url} chunk {idx + 1} {span}: error: {e}')
+                failed_ids.update(chunk)
             return partial
 
         with ThreadPoolExecutor(max_workers=8) as pool:
@@ -1226,7 +1285,7 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
 
         for _id, df in out.items():
             out[_id] = df[~df.index.duplicated(keep='last')].sort_index()
-        return out
+        return out, failed_ids
 
     # Pre-fetch the current-month delta for every to_extend id in one batched pass
     # instead of per-id inside _extend_one below. _extend_cache_monthly always asks
@@ -1238,7 +1297,7 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
         now = datetime.utcnow()
         current_ym = now.strftime('%Y-%m')
         tomorrow = (now + timedelta(days=1)).strftime('%Y-%m-%d')
-        current_month_batch = _fetch_batch_range(to_extend, f'{current_ym}-01', tomorrow)
+        current_month_batch, _ = _fetch_batch_range(to_extend, f'{current_ym}-01', tomorrow)
 
     def _make_fetch_fn(_id):
         def _fetch(s, e):
@@ -1270,7 +1329,7 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
             except Exception:
                 uncached.append(_id)
 
-    fetched = _fetch_batch_range(uncached, start, end)
+    fetched, failed_ids = _fetch_batch_range(uncached, start, end)
     end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
     start_ts = pd.Timestamp(start)
     end_ts = pd.Timestamp(end_str) + pd.Timedelta(days=1)
@@ -1280,9 +1339,14 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
         # the same range regardless of how much extra the raw fetch pulled back
         results[_id] = df[(df.index >= start_ts) & (df.index < end_ts)]
     # Mark every in-range past month with no data as an empty parquet, so the next
-    # run is a cache hit instead of re-fetching the empty months.
+    # run is a cache hit instead of re-fetching the empty months. Ids with any
+    # failed chunk are skipped for the whole range: a transient fetch failure is
+    # not evidence of an empty month, and a wrongly-frozen empty parquet would
+    # hide that id's history on every future warm run.
     if start and mark_empty_months:
         for _id in uncached:
+            if _id in failed_ids:
+                continue
             _mark_empty_months(prefix, _id, start, end)
 
     return results
