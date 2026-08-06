@@ -58,20 +58,21 @@ GET /openclaw/marketplace/strategies/{id}
    - Exit 0 (clean) → proceed
    - Exit 1 (warnings) → show findings to user, ask for confirmation before running
    - Exit 2 (critical) → show findings, do NOT run — a broken `compute_signals()` contract means the backtest about to run produces garbage results
-8. `python3 strategies/<filename>.py`
+8. **Run it — MANDATORY, never skip:** `python3 strategies/<filename>.py`. Every run writes `strategies/<name>/stats.json` (metrics + daily returns); that file is what makes the strategy selectable in the web workspace's 下單設定 › 選擇策略 picker — a downloaded-but-never-run strategy is invisible there and reads as a broken install. Report the resulting stats to the user.
 
 Purchases and shared-with-me are separate lists — checking only purchases will miss shared strategies.
 
 ## Forking a strategy (use one as a base for the user's own)
 
-**Fork ≠ install.** When the user wants an existing strategy as a *starting point to modify* — 「用 X 當底」, "fork", "copy it into my own strategy", or a web-workspace message shaped like 「我想用官方策略「{title}」(#{id})當底,幫我複製成一支我自己的策略來修改」 — do NOT run the install flow above. Instead:
+**Fork ≠ install.** When the user wants an existing strategy as a *starting point to modify* — 「用 X 當底」, "fork", "copy it into my own strategy", or a web-workspace message shaped like 「我想用官方策略「{title}」（#{id}）當底，幫我複製成一支我自己的策略（另取新名），並先跑一次基準回測回報結果」 — do NOT run the install flow above. Instead:
 
 1. Identify the base strategy: if the message names it (title or #id), use that; otherwise list accessible strategies (official + purchases + shared-with-me, merged) and let the user pick.
 2. `GET /openclaw/marketplace/strategies/{id}/code` → save to `tmp/<filename>.py`.
 3. **Security scan** — `python3 lib/security_check.py tmp/<filename>.py`, same exit rules as installing (exit 2 → delete, do not proceed).
-4. **Rename before anything runs.** Pick a NEW `STRATEGY_NAME` (ask the user or default to `<orig>_custom`), set `DISPLAY_NAME`/`DESCRIPTION` to describe the user's variant, and save to `strategies/<new_name>/strategy.py`. Never overwrite or collide with an installed copy of the original — the fork is a separate strategy from day one.
-5. **A fork is a draft, not a deployment.** Do not schedule it, do not add it to the 下單組合. From here it is the user's own Type A/C strategy: follow `references/strategy-code.md` (three-layer architecture, real `FEE`, naming rules), run `python3 lib/quality_check.py` before the first backtest, and backtest before any live use. Iteration Brakes apply as usual.
-6. Tell the user what the base strategy does (from its description/report) and ask what they want to change first — do not invent modifications on your own.
+4. **Rename before anything runs.** Pick a NEW `STRATEGY_NAME` (ask the user or default to `<orig>_custom`), set `DISPLAY_NAME`/`DESCRIPTION` to describe the user's variant, set `MODE = "backtest"` (a fork is a draft — never leave the source's `"live"` in place), and save to `strategies/<new_name>/strategy.py`. Never overwrite or collide with an installed copy of the original — the fork is a separate strategy from day one.
+5. **Run the baseline backtest immediately** (Type A/C): `python3 lib/quality_check.py strategies/<new_name>/strategy.py` first, then `python3 strategies/<new_name>/strategy.py`. This baseline run is part of the fork request itself, not an extra iteration under Iteration Brakes. It writes `stats.json`, which also makes the fork selectable in the 下單設定 › 選擇策略 picker — without it the fork is invisible there.
+6. **A fork is a draft, not a deployment.** Do not schedule it, do not add it to the 下單組合. From here it is the user's own strategy: follow `references/strategy-code.md`, and backtest again after any change before live use. Iteration Brakes apply as usual after the baseline run.
+7. Report the baseline stats, tell the user what the base strategy does (from its description/report), and ask what they want to change — do not invent modifications on your own.
 
 ## Deploying a multi-strategy bundle
 
@@ -131,6 +132,7 @@ Response: `[{id, title, description, category, shared_at}, ...]`
    - Exit 1 (warnings) → show findings to user, ask for confirmation; if confirmed, move to `strategies/` and run
    - Exit 2 (critical) → show findings, delete `tmp/<filename>.py`, do NOT run
 5. **Quality scan** (Type A and C — skip only Type B) — run `python3 lib/quality_check.py strategies/<filename>.py`; exit 1: confirm with user before running; exit 2: do NOT run
+6. **Run it — MANDATORY, never skip:** `python3 strategies/<filename>.py` — writes `stats.json`, which the 下單設定 › 選擇策略 picker requires (same as step 8 of the install flow above). Report the stats to the user.
 
 ## Strategy report (performance data)
 

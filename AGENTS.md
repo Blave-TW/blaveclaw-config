@@ -23,7 +23,8 @@ This workspace runs on either Linux or Windows. Where instructions differ (sched
 When the user says 安裝 / 載入 / 部署 / install / load / deploy a **strategy** (策略) — including "用我買的策略" — it is ALWAYS a Strategy Library API call. The `.env` Blave key already identifies the user:
 - Go straight to `GET /openclaw/marketplace/my/purchases`, show the list, let them pick (full flow in `references/marketplace.md`).
 - The user never supplies an identifier, code, or install command — do not ask for one.
-- **Fork ≠ install:** when the user wants an existing strategy as a base to modify (「用 X 當底」/ fork / copy-and-modify, including picks sent from the web workspace's strategy library), follow `references/marketplace.md` › *Forking a strategy* — download, rename to a new strategy, then treat it as their own draft (backtest before live).
+- **Fork ≠ install:** when the user wants an existing strategy as a base to modify (「用 X 當底」/ fork / copy-and-modify, including picks sent from the web workspace's strategy library), follow `references/marketplace.md` › *Forking a strategy* — download, rename to a new strategy, run its baseline backtest, then iterate as their own draft.
+- **Downloaded or forked strategies must be RUN, not just saved** — a strategy with no `stats.json` never appears in the web 下單設定 picker; both flows in `references/marketplace.md` end with a mandatory run.
 - NEVER purchase a strategy on behalf of the user.
 - A strategy is NOT a skill — skills are a separate runtime layer, provisioned automatically; you never install them.
 
