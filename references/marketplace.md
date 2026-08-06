@@ -64,7 +64,7 @@ Purchases and shared-with-me are separate lists — checking only purchases will
 
 ## Forking a strategy (use one as a base for the user's own)
 
-**Fork ≠ install.** When the user wants an existing strategy as a *starting point to modify* — 「用 X 當底」, "fork", "copy it into my own strategy", or a web-workspace message shaped like 「我想用官方策略「{title}」（#{id}）當底，幫我複製成一支我自己的策略（另取新名），並先跑一次基準回測回報結果」 — do NOT run the install flow above. Instead:
+**Fork ≠ install.** When the user wants an existing strategy as a *starting point to modify* — 「用 X 當底」, "fork", "copy it into my own strategy" — do NOT run the install flow above. (A web-workspace library pick shaped like 「幫我下載官方策略「{title}」（#{id}），跑一次回測看看結果」 is a plain install, NOT a fork — run the install flow above with the given id.) Instead:
 
 1. Identify the base strategy: if the message names it (title or #id), use that; otherwise list accessible strategies (official + purchases + shared-with-me, merged) and let the user pick.
 2. `GET /openclaw/marketplace/strategies/{id}/code` → save to `tmp/<filename>.py`.
