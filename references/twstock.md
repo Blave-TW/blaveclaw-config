@@ -114,7 +114,47 @@ quotes = fetch_twstock_quote_batch(['2330', '2317'], headers)
 
 ---
 
-## 台股分K（1分鐘 OHLCV）
+## Minute-Line OHLCV（現股分線）— preferred
+
+Use `fetch_twstock_ohlcv` / `fetch_twstock_ohlcv_symbols` in `lib/data.py` — do not
+hand-roll requests (the lib layer adds retry, chunking, monthly parquet cache, and
+OHLC sanity checks).
+
+- `fetch_twstock_ohlcv(stock_id, schema, headers, start=None, end=None, adjust=False)` →
+  DataFrame with Open/High/Low/Close/Volume, UTC index (Asia/Taipei for `1d`).
+  `schema`: `'1m'`/`'5m'`/`'15m'`/`'30m'`/`'60m'`/`'1d'`. **Volume is in lots (張),
+  not shares.** Bars carry minute-START labels; the 13:30 Taipei bar is the closing
+  auction. History from 2019-01. `adjust=True` returns forward-adjusted (後復權)
+  OHLC — use for backtests spanning ex-dividend dates; same factor pipeline as
+  `fetch_twstock_price_adj`, volume unchanged; the server returns 503 (fail-loud)
+  if adjustment factors are unavailable, never silently raw prices.
+- `fetch_twstock_ohlcv_symbols(headers)` → list of stock_ids that already have
+  minute-line data server-side.
+
+**Coverage is demand-driven — check `fetch_twstock_ohlcv_symbols` first.** Any listed
+TWSE/TPEx stock_id can be queried: the first-ever query auto-seeds only ~30 recent
+days and enrolls the stock for ongoing tracking (from the next day: intraday
+real-time bars + a daily official correction after market close). Deep history
+(2019-01 →) backfills server-side afterwards — do NOT request years of history right
+after first touching a stock, or the still-empty past months get cached locally as
+permanently empty. Backtest deep history only once the symbol appears in
+`fetch_twstock_ohlcv_symbols` and actually returns it.
+
+```python
+symbols = fetch_twstock_ohlcv_symbols(headers)
+if '2330' in symbols:
+    df = fetch_twstock_ohlcv('2330', '5m', headers, start='2025-01-01', end='2025-06-30')
+else:
+    # first touch: seed + start tracking; only recent days will come back for now
+    df = fetch_twstock_ohlcv('2330', '1m', headers)
+```
+
+---
+
+## 台股分K（1分鐘 OHLCV）— legacy endpoint
+
+> Superseded for most uses by the minute-line section above (`fetch_twstock_ohlcv`
+> supports 1m–60m/1d resampling, caching, and retry). Kept for reference only.
 
 ```python
 import requests

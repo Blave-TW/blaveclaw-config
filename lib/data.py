@@ -721,6 +721,114 @@ def fetch_twstock_quote_batch(stock_ids, headers):
     return r.json().get('data', {})
 
 
+# ── Taiwan stock minute-line OHLCV ────────────────────────────────────────────
+
+_TWSTOCK_MINUTE_CHUNK_DAYS = {'1d': 3650, '1m': 28, '5m': 28, '15m': 28, '30m': 28, '60m': 28}
+# Server-side per-request range caps — also used as the default lookback window
+# when start is omitted, matching the endpoint's own default.
+_TWSTOCK_MINUTE_MAX_DAYS = {'1d': 3650, '1m': 31, '5m': 62, '15m': 93, '30m': 186, '60m': 365}
+
+
+def _fetch_twstock_minute_raw(stock_id, schema, start, end, headers, adjust=False):
+    s = datetime.strptime(start, '%Y-%m-%d')
+    e = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d')
+    chunk_days = _TWSTOCK_MINUTE_CHUNK_DAYS.get(schema, 28)
+
+    chunks, cursor = [], s
+    while cursor < e:
+        chunk_end = min(cursor + timedelta(days=chunk_days), e)
+        chunks.append((cursor.strftime('%Y-%m-%d'), chunk_end.strftime('%Y-%m-%d')))
+        cursor = chunk_end
+
+    def _fetch_one(cs, ce):
+        r = _retry_get(
+            f'{BASE}/studio/market/twstock/minute/ohlcv/{stock_id}/{schema}',
+            headers=headers,
+            params={'start': cs, 'end': ce, 'adjust': '1' if adjust else '0'},
+            timeout=60,
+        )
+        return r.json().get('data', [])
+
+    rows = []
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {pool.submit(_fetch_one, cs, ce): (cs, ce) for cs, ce in chunks}
+        for future in as_completed(futures):
+            rows.extend(future.result())
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df['time'] = pd.to_datetime(df['ts'], utc=True)
+    df = df.set_index('time').sort_index()
+    df = df[~df.index.duplicated(keep='first')]
+    df = df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low',
+                             'close': 'Close', 'volume': 'Volume'})
+    return df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float)
+
+
+def fetch_twstock_ohlcv(stock_id, schema, headers, start=None, end=None, adjust=False):
+    """台股現股分線 OHLCV. Returns DataFrame with Open/High/Low/Close/Volume columns.
+
+    stock_id: any listed TWSE/TPEx security (e.g. '2330')
+    schema: '1d' | '1m' | '5m' | '15m' | '30m' | '60m'
+    Volume is in lots (張), NOT shares. Bars carry minute-START labels (UTC
+    index); the 13:30 Taipei bar is the closing auction. start/end optional
+    (YYYY-MM-DD): omitted end = today, omitted start = end minus the server's
+    max window for the schema (1m→31d, 5m→62d, 15m→93d, 30m→186d, 60m→365d,
+    1d→3650d).
+
+    adjust=True returns forward-adjusted (後復權) OHLC — use for backtests
+    spanning ex-dividend dates; same factor pipeline as fetch_twstock_price_adj
+    so the numbers match the Studio daily adjusted series exactly. Volume is
+    unchanged. If the factor source is unavailable the server fails loud (503,
+    retried then raised here) instead of silently returning raw prices.
+    Raw and adjusted bars are cached in separate monthly cache dirs.
+
+    Coverage is demand-driven — call fetch_twstock_ohlcv_symbols(headers) first
+    to see which stocks already have minute-line data. Any listed stock_id CAN
+    be queried: the first-ever query auto-seeds only ~30 recent days and starts
+    ongoing tracking (next day onward: intraday live bars + daily official
+    correction); deep history (from 2019-01) backfills server-side afterwards.
+    So do NOT request years of history right after first touching a stock —
+    the still-empty past months would be cached locally as permanently empty.
+    Backtest deep history only once the symbol appears in
+    fetch_twstock_ohlcv_symbols and actually returns it.
+
+    For 1d: index is Asia/Taipei tz so df.index[-1].date() returns the correct trading date.
+    """
+    end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
+    if not start:
+        lookback = _TWSTOCK_MINUTE_MAX_DAYS.get(schema, 31)
+        start = (datetime.strptime(end_str, '%Y-%m-%d')
+                 - timedelta(days=lookback)).strftime('%Y-%m-%d')
+    df = _extend_cache_monthly(
+        f'twstock_minute_{schema}', {'id': stock_id, 'adj': int(adjust)},
+        lambda s, e: _fetch_twstock_minute_raw(stock_id, schema, s, e, headers, adjust=adjust),
+        start, end,
+    )
+    df = _sanity_check_ohlc(df, f'{stock_id} {schema} twstock minute')
+    if schema == '1d' and not df.empty:
+        # Cache stores naive UTC (midnight TWN = prev-day 16:00 UTC). Convert to Asia/Taipei
+        # so the index date matches the actual trading date.
+        df = df.copy()
+        df.index = pd.to_datetime(df.index, utc=True).tz_convert('Asia/Taipei')
+    return df
+
+
+def fetch_twstock_ohlcv_symbols(headers):
+    """Stocks that currently have minute-line data server-side — the covered set
+    for fetch_twstock_ohlcv. Returns a plain list of stock_id strings.
+
+    Unlike the stock-futures variant, absence here is not a hard 400: any listed
+    TWSE/TPEx stock_id can still be queried, and the first query seeds recent
+    data + enrolls the stock for ongoing collection. Call this first anyway to
+    know whether deep history is already backfilled before running a backtest.
+    """
+    r = _retry_get(f'{BASE}/studio/market/twstock/minute/ohlcv/symbols',
+                   headers=headers, timeout=30)
+    return r.json().get('data', [])
+
+
 def _fetch_twstock_inst_raw(stock_id, start, end, headers):
     end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
     r = _retry_get(f'{BASE}/studio/market/twstock/institutional/{stock_id}',
