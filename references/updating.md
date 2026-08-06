@@ -12,6 +12,8 @@ Clone https://github.com/Blave-TW/blaveclaw-config to `/tmp/oc-config` as **refe
 
 **Hard rule, no exceptions:** never blindly overwrite `lib/` wholesale. For `lib/order_*.py` / `lib/account_*.py`, the filename alone doesn't tell you if it's user-created — check whether that exact filename exists in the reference clone: if it does (e.g. `order_bingx.py`, `order_binance.py`, `order_okx.py`, `order_gateio.py`, `order_sinopac.py`, `account_bingx.py`, `account_binance.py`, `account_okx.py`, `account_gateio.py`, `account_TEMPLATE.py`, `order_TEMPLATE.py` — official broker libs shipped in the repo), merge it like any other `lib/` file (same as `lib/runner.py`: preserve local edits, pull in upstream fixes). Only skip a file entirely — never touch it — if it does **not** exist in the reference clone at all; that's the user's own exchange integration.
 
+After the merge, copy the reference clone's `VERSION` file to the workspace root verbatim — the machine reports it to the platform and it drives the web workspace's "update available" indicator. An update that skips this step keeps telling the user an update is available.
+
 Remove `/tmp/oc-config` when done.
 
 Report exactly what changed (or that everything was already up to date) — don't claim "updated" without checking.
