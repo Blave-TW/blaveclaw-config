@@ -62,6 +62,17 @@ GET /openclaw/marketplace/strategies/{id}
 
 Purchases and shared-with-me are separate lists — checking only purchases will miss shared strategies.
 
+## Forking a strategy (use one as a base for the user's own)
+
+**Fork ≠ install.** When the user wants an existing strategy as a *starting point to modify* — 「用 X 當底」, "fork", "copy it into my own strategy", or a web-workspace message shaped like 「我想用官方策略「{title}」(#{id})當底,幫我複製成一支我自己的策略來修改」 — do NOT run the install flow above. Instead:
+
+1. Identify the base strategy: if the message names it (title or #id), use that; otherwise list accessible strategies (official + purchases + shared-with-me, merged) and let the user pick.
+2. `GET /openclaw/marketplace/strategies/{id}/code` → save to `tmp/<filename>.py`.
+3. **Security scan** — `python3 lib/security_check.py tmp/<filename>.py`, same exit rules as installing (exit 2 → delete, do not proceed).
+4. **Rename before anything runs.** Pick a NEW `STRATEGY_NAME` (ask the user or default to `<orig>_custom`), set `DISPLAY_NAME`/`DESCRIPTION` to describe the user's variant, and save to `strategies/<new_name>/strategy.py`. Never overwrite or collide with an installed copy of the original — the fork is a separate strategy from day one.
+5. **A fork is a draft, not a deployment.** Do not schedule it, do not add it to the 下單組合. From here it is the user's own Type A/C strategy: follow `references/strategy-code.md` (three-layer architecture, real `FEE`, naming rules), run `python3 lib/quality_check.py` before the first backtest, and backtest before any live use. Iteration Brakes apply as usual.
+6. Tell the user what the base strategy does (from its description/report) and ask what they want to change first — do not invent modifications on your own.
+
 ## Deploying a multi-strategy bundle
 
 When the downloaded code contains `# ===== STRATEGY N: <name> =====` markers, treat it as a bundle:
