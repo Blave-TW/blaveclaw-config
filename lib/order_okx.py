@@ -29,6 +29,13 @@ official docs + live orders 2026-08-05):
   spot SELLs size in base (tgtCcy=base_ccy)
 - conditional (SL/TP) orders live on /api/v5/trade/order-algo with their own
   algoId + pending/cancel endpoints — regular order queries never see them
+- a crossing post_only order is NEVER rejected at placement — OKX accepts it
+  (sCode 0, ordId) and the engine auto-cancels it (cancelSource 31); the
+  limit layer probes the order once after placement to surface the chase
+  contract's {'status': 'post_only_rejected'}
+- cancel failures 51400/51401/51402/51410 all mean "already gone" (does not
+  exist / already canceled / already filled / already cancelling) — the
+  idempotent-safe cancel returns a status for these instead of raising
 """
 
 import base64
@@ -299,6 +306,12 @@ def format_price(env, symbol, price):
     return format(_floor_to_step(price, r["tick_sz"]), "f")
 
 
+def format_spot_price(env, symbol, price):
+    """Spot twin of format_price — spot instruments carry their own tickSz."""
+    r = _instrument(env, _spot_inst(symbol), "SPOT")
+    return format(_floor_to_step(price, r["tick_sz"]), "f")
+
+
 # ── position mode ───────────────────────────────────────────────────────────
 
 def get_position_mode(env):
@@ -313,9 +326,10 @@ def get_position_mode(env):
 # ── orders (swap) ───────────────────────────────────────────────────────────
 
 def get_order(env, symbol, ord_id):
-    """Swap order by id, normalized. executed_qty is BASE units (accFillSz is
-    contracts — converted here). commission from the order's fee field
-    (negative on OKX — abs'd), commission_asset = feeCcy."""
+    """Swap order by id, normalized. orig_qty / executed_qty are BASE units
+    (sz / accFillSz are contracts — converted here; partial-fill accounting
+    needs the original size, chase contract). commission from the order's fee
+    field (negative on OKX — abs'd), commission_asset = feeCcy."""
     inst = _swap_inst(symbol)
     rows = _send("GET", "/api/v5/trade/order", env,
                  params={"instId": inst, "ordId": str(ord_id)})
@@ -328,6 +342,7 @@ def get_order(env, symbol, ord_id):
         "order_id": str(o.get("ordId", "")),
         "status": o.get("state"),
         "avg_price": float(o.get("avgPx") or 0),
+        "orig_qty": float(o.get("sz") or 0) * ct_val,
         "executed_qty": filled_ct * ct_val,
         "commission": abs(float(o.get("fee") or 0)),
         "commission_asset": o.get("feeCcy") or "",
@@ -393,12 +408,106 @@ def place_market_order(env, symbol, direction, qty, client_order_id=None,
     return _confirm(env, symbol, ord_id, get_order, timeout=confirm_timeout)
 
 
+# time_in_force → OKX ordType: OKX has no separate TIF field, the order type
+# IS the TIF dialect (market/limit/post_only/fok/ioc — skill reference).
+_TIF_TO_ORDTYPE = {"GTC": "limit", "IOC": "ioc", "FOK": "fok"}
+
+
+def _post_only_probe(env, symbol, ord_id, getter):
+    """OKX never rejects a crossing post_only order at placement — it is
+    ACCEPTED (sCode 0, ordId) and the matching engine auto-cancels it,
+    marking cancelSource 31 ("POST_ONLY would take liquidity",
+    nautilus_trader-verified; ccxt/gocryptotrader confirm no placement sCode
+    exists for this). One probe right after placement turns that into the
+    chase contract's {'status': 'post_only_rejected'} — a same-instant cancel
+    of a fresh post-only order has no other engine-side cause, and a wrong
+    guess only costs the caller one re-post. Probe failure is NOT a placement
+    failure: the order exists — return None and report it as resting."""
+    try:
+        o = getter(env, symbol, ord_id)
+    except Exception:
+        return None
+    if o["status"] == "canceled":
+        return {"status": "post_only_rejected", "order_id": str(ord_id),
+                "cancel_source": o["raw"].get("cancelSource", ""), "raw": o["raw"]}
+    return None
+
+
+def place_limit_order(env, symbol, direction, qty, price, client_order_id=None,
+                      reduce_only=False, time_in_force="GTC", post_only=False):
+    """Swap limit order, UNCONFIRMED — it may rest; track via get_order and
+    cancel via cancel_order, always by the returned order_id (chase contract).
+    qty is BASE units (converted to contracts internally, same as
+    place_market_order), price a raw float floored to the instrument tick
+    here. post_only=True sends ordType=post_only and probes the accepted
+    order once — see _post_only_probe. Below min sz → False (intentional
+    skip). Guard classification rides reduceOnly/posSide exactly like the
+    market path — ordType is not consulted."""
+    inst = _swap_inst(symbol)
+    mode = get_position_mode(env)
+    try:
+        sz = format_qty(env, symbol, qty)
+    except ValueError as e:
+        if "not open for trading" in str(e):
+            raise
+        return False
+    if reduce_only:
+        side = "sell" if direction == "long" else "buy"
+    else:
+        side = "buy" if direction == "long" else "sell"
+    tif = str(time_in_force).upper()
+    if not post_only and tif not in _TIF_TO_ORDTYPE:
+        raise ValueError(f"unsupported time_in_force {time_in_force!r}")
+    body = {
+        "instId": inst,
+        "tdMode": "cross",
+        "side": side,
+        "ordType": "post_only" if post_only else _TIF_TO_ORDTYPE[tif],
+        "sz": sz,
+        "px": format_price(env, symbol, price),
+    }
+    if mode == "long_short_mode":
+        body["posSide"] = direction
+    elif reduce_only:
+        body["reduceOnly"] = "true"
+    if client_order_id:
+        body["clOrdId"] = client_order_id
+    rows = _request("POST", "/api/v5/trade/order", env, body)
+    ord_id = (rows[0] if rows else {}).get("ordId")
+    if not ord_id:
+        raise OKXError("N/A", f"limit order response missing ordId: {rows}",
+                       "trade/order")
+    if post_only:
+        rejected = _post_only_probe(env, symbol, ord_id, get_order)
+        if rejected is not None:
+            return rejected
+    return {"order_id": str(ord_id), "status": "open",
+            "client_order_id": client_order_id or "", "raw": rows[0]}
+
+
 def get_mark_price(env, symbol):
     """Live swap price (public ticker last) — the cross-venue wiring contract
     for USD→qty conversion (lib/venue_wiring.py)."""
     rows = _send("GET", "/api/v5/market/ticker", env,
                  params={"instId": _swap_inst(symbol)})
     return float((rows[0] if rows else {})["last"])
+
+
+def _bbo(env, inst, symbol):
+    rows = _send("GET", "/api/v5/market/ticker", env, params={"instId": inst})
+    t = rows[0] if rows else {}
+    bid, ask = t.get("bidPx"), t.get("askPx")
+    if not bid or not ask:
+        raise OKXError("N/A", f"{symbol} ticker missing top-of-book "
+                       f"(bid={bid!r} ask={ask!r})", "market/ticker")
+    return {"bid": float(bid), "ask": float(ask)}
+
+
+def get_bbo(env, symbol):
+    """Real top-of-book {'bid','ask'} from the public ticker's bidPx/askPx
+    (fields verified: ccxt parseTicker + live response samples) — never
+    mark/last price (chase contract). Fails loud on an empty book side."""
+    return _bbo(env, _swap_inst(symbol), symbol)
 
 
 def close_position_partial(env, symbol, direction, qty, client_order_id=None):
@@ -408,22 +517,59 @@ def close_position_partial(env, symbol, direction, qty, client_order_id=None):
                               client_order_id=client_order_id, reduce_only=True)
 
 
+def _annotate_open_rows(rows):
+    """Cross-venue open-order row contract (venue_wiring.sweep_orphan_orders):
+    every row carries canonical dashless 'symbol' + 'order_id' +
+    'client_order_id' alongside OKX's raw fields — the reconciler sweeps
+    orphaned rc*-prefixed orders by these keys after a restart."""
+    for o in rows:
+        o["symbol"] = (o.get("instId") or "").replace("-SWAP", "").replace("-", "")
+        o["order_id"] = str(o.get("ordId", ""))
+        o["client_order_id"] = o.get("clOrdId") or ""
+    return rows
+
+
 def get_open_orders(env, symbol=None):
+    """Open swap orders (market/limit — conditionals live on the algo
+    endpoints), rows annotated per _annotate_open_rows."""
     params = {"instType": "SWAP"}
     if symbol:
         params["instId"] = _swap_inst(symbol)
-    return _send("GET", "/api/v5/trade/orders-pending", env, params=params)
+    return _annotate_open_rows(
+        _send("GET", "/api/v5/trade/orders-pending", env, params=params) or [])
 
 
-def cancel_order(env, symbol, ord_id=None, client_order_id=None):
-    body = {"instId": _swap_inst(symbol)}
-    if ord_id:
-        body["ordId"] = str(ord_id)
+# Cancellation-failure sCodes that mean the order is already gone/terminal
+# (ccxt + gocryptotrader both verify the meanings): 51400 does not exist,
+# 51401 already canceled, 51402 already completed, 51410 already under
+# cancelling. 51403 (type does not support cancellation) stays a raise — that
+# is a caller bug, not a race.
+_CANCEL_GONE_SCODES = {"51400", "51401", "51402", "51410"}
+
+
+def _cancel(env, inst, order_id, client_order_id):
+    body = {"instId": inst}
+    if order_id:
+        body["ordId"] = str(order_id)
     elif client_order_id:
         body["clOrdId"] = client_order_id
     else:
-        raise ValueError("ord_id or client_order_id required")
-    return _request("POST", "/api/v5/trade/cancel-order", env, body)
+        raise ValueError("order_id or client_order_id required")
+    try:
+        return _request("POST", "/api/v5/trade/cancel-order", env, body)
+    except OKXError as e:
+        if str(e.code) in _CANCEL_GONE_SCODES:
+            return {"status": "already_gone", "code": str(e.code),
+                    "msg": e.msg, "order_id": str(order_id or client_order_id)}
+        raise
+
+
+def cancel_order(env, symbol, order_id=None, client_order_id=None):
+    """Cancel one swap order by ordId (or clOrdId). Idempotent-safe (chase
+    contract): an order that is already filled / canceled / unknown RETURNS
+    {'status': 'already_gone', ...} instead of raising — the caller always
+    re-reads fills afterwards. Other refusals raise."""
+    return _cancel(env, _swap_inst(symbol), order_id, client_order_id)
 
 
 # ── protective orders (swap) ────────────────────────────────────────────────
@@ -537,7 +683,10 @@ def format_spot_qty(env, symbol, qty):
 
 
 def get_spot_order(env, symbol, ord_id):
-    """Spot order by id — accFillSz is BASE units on spot (no ctVal)."""
+    """Spot order by id — accFillSz is BASE units on spot (no ctVal).
+    orig_qty is the order's sz: BASE units for limit orders and market sells
+    (the chase consumers); for a market BUY sized in quote (tgtCcy=quote_ccy)
+    sz — and therefore orig_qty — is QUOTE units."""
     rows = _send("GET", "/api/v5/trade/order", env,
                  params={"instId": _spot_inst(symbol), "ordId": str(ord_id)})
     o = rows[0] if rows else {}
@@ -549,6 +698,7 @@ def get_spot_order(env, symbol, ord_id):
         "order_id": str(o.get("ordId", "")),
         "status": o.get("state"),
         "avg_price": avg,
+        "orig_qty": float(o.get("sz") or 0),
         "executed_qty": executed,
         "quote_qty": executed * avg,
         "commission": abs(float(o.get("fee") or 0)),
@@ -598,6 +748,78 @@ def place_spot_market_order(env, symbol, side, base_qty=None, quote_qty=None,
     if not ord_id:
         raise OKXError("N/A", f"spot order response missing ordId: {rows}", "trade/order")
     return _confirm(env, symbol, ord_id, get_spot_order, timeout=confirm_timeout)
+
+
+def place_spot_limit_order(env, symbol, side, base_qty, price, client_order_id=None,
+                           post_only=False):
+    """Spot limit order, UNCONFIRMED — it may rest; track via get_spot_order,
+    cancel via cancel_spot_order (chase contract). sz is BASE units on BOTH
+    sides for limit orders — tgtCcy only applies to spot MARKET orders, the
+    quote-sized market-buy convention does NOT carry over (OKX docs +
+    ccxt-verified: ccxt only branches on tgtCcy for market buys). price a raw
+    float floored to the SPOT tick here. post_only=True sends
+    ordType=post_only and probes the accepted order once — see
+    _post_only_probe. Below min sz → False (intentional skip).
+    Guard: buy=entry (halt blocks), sell=reduce — off tdMode=cash."""
+    inst = _spot_inst(symbol)
+    side = side.lower()
+    if side not in ("buy", "sell"):
+        raise ValueError(f"side must be buy|sell, got {side!r}")
+    try:
+        sz = format_spot_qty(env, symbol, base_qty)
+    except ValueError as e:
+        if "not open for spot trading" in str(e):
+            raise
+        return False
+    body = {
+        "instId": inst,
+        "tdMode": "cash",
+        "side": side,
+        "ordType": "post_only" if post_only else "limit",
+        "sz": sz,
+        "px": format_spot_price(env, symbol, price),
+    }
+    if client_order_id:
+        body["clOrdId"] = client_order_id
+    try:
+        rows = _request("POST", "/api/v5/trade/order", env, body)
+    except OKXError as e:
+        # 51020 = order amount below the minimum — the contract's skip
+        if str(e.code) == "51020":
+            return False
+        raise
+    ord_id = (rows[0] if rows else {}).get("ordId")
+    if not ord_id:
+        raise OKXError("N/A", f"spot limit order response missing ordId: {rows}",
+                       "trade/order")
+    if post_only:
+        rejected = _post_only_probe(env, symbol, ord_id, get_spot_order)
+        if rejected is not None:
+            return rejected
+    return {"order_id": str(ord_id), "status": "open",
+            "client_order_id": client_order_id or "", "raw": rows[0]}
+
+
+def cancel_spot_order(env, symbol, order_id=None, client_order_id=None):
+    """Spot twin of cancel_order — same idempotent-safe contract
+    (already filled / canceled / unknown → {'status': 'already_gone'})."""
+    return _cancel(env, _spot_inst(symbol), order_id, client_order_id)
+
+
+def get_spot_bbo(env, symbol):
+    """Spot twin of get_bbo — real top-of-book from the spot ticker's
+    bidPx/askPx, never last price."""
+    return _bbo(env, _spot_inst(symbol), symbol)
+
+
+def get_spot_open_orders(env, symbol=None):
+    """Open spot orders, rows annotated per _annotate_open_rows (spot instIds
+    have no -SWAP suffix — the same strip is a no-op)."""
+    params = {"instType": "SPOT"}
+    if symbol:
+        params["instId"] = _spot_inst(symbol)
+    return _annotate_open_rows(
+        _send("GET", "/api/v5/trade/orders-pending", env, params=params) or [])
 
 
 def get_spot_balances(env):

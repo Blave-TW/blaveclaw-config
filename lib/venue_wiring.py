@@ -108,7 +108,8 @@ def _no_venue():
 
 
 def _cid():
-    return "rc" + datetime.utcnow().strftime("%y%m%d%H%M%S%f")
+    from datetime import timezone
+    return "rc" + datetime.now(timezone.utc).strftime("%y%m%d%H%M%S%f")
 
 
 def auto_get_positions():
@@ -194,6 +195,159 @@ def _reduce_qty(env, vid, order, sym, direction, qty):
     except Exception as e:
         logging.warning(f"[venue_wiring] reduce ceil/cap skipped ({e}) — floor path")
     return qty
+
+
+_TERMINAL_FILLED = {"filled"}
+# every venue's own terminal-dead states must be here — a missing one makes the
+# chase loop treat a dead order as open and idle out its whole window
+# (expired_in_match = Binance STP, failed = BingX, mmp_canceled = OKX)
+_TERMINAL_GONE = {"canceled", "cancelled", "rejected", "expired",
+                  "expired_in_match", "failed", "mmp_canceled"}
+
+
+def _norm_status(raw):
+    s = str(raw or "").lower()
+    if s in _TERMINAL_FILLED:
+        return "filled"
+    if s in _TERMINAL_GONE:
+        return "canceled"
+    if s == "post_only_rejected":
+        return "post_only_rejected"
+    return "open"
+
+
+def auto_limit_toolkit(symbol, reduce_only=False):
+    """Limit-layer toolkit for the chase executor (lib.execute), or None when
+    the bound venue does not ship the limit layer — the caller then falls back
+    to a market order, loudly.
+
+    All quantities are the reconciler's USD terms; conversion to base qty
+    happens here at the caller-supplied limit price. Returned callables:
+      bbo()                    -> (bid, ask) floats
+      place(usd, price, cid)   -> {'order_id', ...} | {'status':'post_only_rejected'}
+                                  | False (below venue minimum). Always post-only.
+      status(order_id)         -> {'status': open|filled|canceled|post_only_rejected,
+                                   'orig_qty','executed_qty','avg_price'} (base qty)
+      cancel(order_id)         -> best-effort; "already filled/gone" must not raise
+    `usd` is UNSIGNED — direction is fixed at toolkit build time from the leg's
+    signed_diff sign (chase never flips a leg mid-flight; a flipped target stops
+    the execution instead).
+    """
+    env = read_env()
+    vid = detect_venue(env)
+    if vid is None:
+        _no_venue()
+    order = importlib.import_module(f"lib.order_{vid}")
+    sym, market = split_key(symbol)
+
+    if market == "spot":
+        need = ("place_spot_limit_order", "cancel_spot_order",
+                "get_spot_order", "get_spot_bbo", "get_spot_balances")
+        if not all(hasattr(order, n) for n in need):
+            return None
+
+        def _place(usd, price, cid, _buy):
+            base_qty = abs(usd) / price
+            if not _buy:
+                held = order.get_spot_balances(env).get(_spot_base(sym), 0.0)
+                base_qty = min(base_qty, held)
+            return order.place_spot_limit_order(
+                env, sym, "buy" if _buy else "sell", base_qty, price,
+                client_order_id=cid or _cid(), post_only=True)
+
+        def _spot_bbo():
+            b = order.get_spot_bbo(env, sym)
+            return float(b["bid"]), float(b["ask"])
+
+        return {
+            "venue": vid,
+            "bbo": _spot_bbo,
+            "place": lambda usd, price, cid, _buy: _place(usd, price, cid, _buy),
+            "status": lambda oid: _norm_order(order.get_spot_order(env, sym, oid)),
+            "cancel": lambda oid: order.cancel_spot_order(env, sym, oid),
+        }
+
+    need = ("place_limit_order", "cancel_order", "get_order", "get_bbo")
+    if not all(hasattr(order, n) for n in need):
+        return None
+
+    def _place(usd, price, cid, _buy):
+        qty = abs(usd) / price
+        if reduce_only:
+            direction = "long" if not _buy else "short"  # closing that side
+            qty = _reduce_qty(env, vid, order, sym, direction, qty)
+        else:
+            direction = "long" if _buy else "short"
+        return order.place_limit_order(
+            env, sym, direction, qty, price, client_order_id=cid or _cid(),
+            reduce_only=reduce_only, post_only=True)
+
+    def _swap_bbo():
+        b = order.get_bbo(env, sym)
+        return float(b["bid"]), float(b["ask"])
+
+    return {
+        "venue": vid,
+        "bbo": _swap_bbo,
+        "place": lambda usd, price, cid, _buy: _place(usd, price, cid, _buy),
+        "status": lambda oid: _norm_order(order.get_order(env, sym, oid)),
+        "cancel": lambda oid: order.cancel_order(env, sym, order_id=oid),
+    }
+
+
+def _norm_order(row):
+    row = dict(row or {})
+    return {
+        "status": _norm_status(row.get("status")),
+        "orig_qty": float(row.get("orig_qty") or 0),
+        "executed_qty": float(row.get("executed_qty") or 0),
+        "avg_price": float(row.get("avg_price") or 0),
+    }
+
+
+# Our resting-order fingerprint: _cid() mints "rc" + a UTC microsecond
+# timestamp. A user's own manual order will not carry it, so the sweep can
+# cancel on match without touching anything the user placed themselves.
+_RC_CID_RE = re.compile(r"rc\d{12,}")
+
+
+def sweep_orphan_orders():
+    """Cancel resting limit orders a dead reconciler left behind (chase posts
+    them; a crash mid-chase strands one on the venue). Called once at
+    reconciler startup — best-effort, never blocks the loop. Returns the count
+    cancelled."""
+    env = read_env()
+    vid = detect_venue(env)
+    if vid is None:
+        return 0
+    order = importlib.import_module(f"lib.order_{vid}")
+    lanes = []
+    if hasattr(order, "get_open_orders") and hasattr(order, "cancel_order"):
+        lanes.append((order.get_open_orders,
+                      lambda s, oid: order.cancel_order(env, s, order_id=oid)))
+    if hasattr(order, "get_spot_open_orders") and hasattr(order, "cancel_spot_order"):
+        lanes.append((order.get_spot_open_orders,
+                      lambda s, oid: order.cancel_spot_order(env, s, oid)))
+    n = 0
+    for fetch, cancel in lanes:
+        try:
+            rows = fetch(env) or []
+        except Exception as e:
+            logging.warning(f"[venue_wiring] orphan sweep read failed: {e}")
+            continue
+        for row in rows:
+            if not _RC_CID_RE.search(str(row.get("client_order_id") or "")):
+                continue
+            sym, oid = row.get("symbol"), row.get("order_id")
+            if not sym or not oid:
+                continue
+            try:
+                cancel(sym, oid)
+                n += 1
+                logging.info(f"[venue_wiring] cancelled orphaned order {oid} on {sym}")
+            except Exception as e:
+                logging.warning(f"[venue_wiring] orphan cancel {oid} failed: {e}")
+    return n
 
 
 def auto_place_order(symbol, signed_diff, asset_spec=None, reduce_only=False,

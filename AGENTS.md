@@ -184,11 +184,15 @@ Three rules to always remember:
 
 The slope/std optimiser is the default weighting method, not the only one — when the user wants their own way of weighting, write it as `allocators/<name>/allocator.py` and use `--allocator`: `references/allocator-code.md`.
 
+Execution styles (市價/TWAP per strategy) are set from the web 下單設定 — never hand-wire TWAP into the reconciler. When the user wants their own execution shape, write `manager/executors/<name>.py` per `references/lib.md` › *Custom executors*.
+
 ## Broker Onboarding
 
 **Any broker with an API is supported** — the ones below just have ready-made references; others you wire up on request (get API docs from the user, build a `lib/` helper following the existing broker patterns). Never answer "only these are supported".
 
 **Web-initiated exchange connect:** when a chat message says the user just connected an exchange from the web (its API key already stored on the machine), follow `references/exchange-connect.md` (write `lib/account_{id}.py` if missing, PASS the read-only validation first, only then write `lib/order_{id}.py` + wire the reconciler; no orders ever).
+
+**One machine, one trading venue (TW brokers included).** When writing a new venue's credentials into `.env`, delete the previously bound venue's credential lines — every ID that has BOTH `{ID}_API_KEY` and `{ID}_SECRET_KEY` (plus its `_PASSPHRASE`). Keep `blave_*`, singleton service keys (`OPENAI_API_KEY` etc. — no secret sibling = not an exchange), and non-credential lines like CA paths. Stale keys from a previous venue confuse venue detection and keep dead access alive.
 
 When a user asks to connect a broker (e.g. "我想串永豐", "connect SinoPac", "我想串統一期貨"), read the relevant reference first:
 - **SinoPac (永豐金):** `references/sinopac-broker.md`

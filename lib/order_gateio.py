@@ -43,6 +43,10 @@ on a real account, single and dual mode, futures + spot):
   readable part and is surfaced first
 - attribution lands verifiably: fills carry biz_info "ch:blave", price
   orders carry broker "blave" (measured on live orders)
+- limit layer (chase executor contract): post_only maps to tif "poc"; a poc
+  order that would cross the book is REJECTED with 4xx label
+  POC_FILL_IMMEDIATELY / ORDER_POC_IMMEDIATE (live-verified) — surfaced as
+  {'status': 'post_only_rejected'}, never an exception
 """
 
 import hashlib
@@ -337,6 +341,7 @@ def get_order(env, symbol, order_id):
         "status": norm_status,
         "avg_price": float(o.get("fill_price", 0) or 0),
         "executed_qty": filled_ct * mult,
+        "orig_qty": abs(size) * mult,
         "commission": commission,
         "commission_asset": commission_asset,
         "client_order_id": o.get("text") or "",
@@ -396,6 +401,78 @@ def place_market_order(env, symbol, direction, qty, client_order_id=None,
     return _confirm(env, symbol, order_id, get_order, timeout=confirm_timeout)
 
 
+def place_limit_order(env, symbol, direction, qty, price, client_order_id=None,
+                      reduce_only=False, time_in_force="GTC", post_only=False):
+    """Futures limit order, UNCONFIRMED — limit orders may rest; track via
+    get_order and cancel via cancel_order, always by the returned order_id.
+    qty is BASE units (signed contracts internally, same convention as
+    place_market_order), price a raw float formatted to the contract tick
+    here. post_only=True maps to tif "poc"; a poc order that would cross is
+    rejected with label POC_FILL_IMMEDIATELY and returned as
+    {'status': 'post_only_rejected'} instead of raising (chase contract —
+    the executor re-reads the book and re-posts). Below min contracts →
+    False (intentional skip)."""
+    c = _contract(symbol)
+    try:
+        ct = int(format_qty(env, symbol, qty))
+    except ValueError as e:
+        if "not open for trading" in str(e):
+            raise
+        return False
+    if reduce_only:
+        signed = -ct if direction == "long" else ct   # sell closes long
+    else:
+        signed = ct if direction == "long" else -ct
+    tif = "poc" if post_only else str(time_in_force).lower()
+    if tif not in ("gtc", "ioc", "poc", "fok"):
+        raise ValueError(f"unsupported time_in_force {time_in_force!r}")
+    body = {
+        "contract": c,
+        "size": signed,
+        "price": format_price(env, symbol, price),
+        "tif": tif,
+        "text": _text(client_order_id),
+    }
+    if reduce_only:
+        body["reduce_only"] = True
+    try:
+        placed = _request("POST", "/futures/usdt/orders", env, body)
+    except GateioError as e:
+        if e.code in ("POC_FILL_IMMEDIATELY", "ORDER_POC_IMMEDIATE"):
+            # ORDER_POC_IMMEDIATE is what futures actually returns (live-verified
+            # 2026-08); POC_FILL_IMMEDIATELY is the ccxt/docs spelling — keep both
+            return {"status": "post_only_rejected"}
+        raise
+    order_id = placed.get("id")
+    if not order_id:
+        raise GateioError("N/A", f"limit order response missing id: {placed}", "orders")
+    if placed.get("status") == "finished":  # crossed and filled on arrival
+        filled_ct = abs(float(placed.get("size", 0) or 0)) - abs(float(placed.get("left", 0) or 0))
+        status = "filled" if (placed.get("finish_as") == "filled" or filled_ct > 0) else "canceled"
+    else:
+        status = "open"
+    return {
+        "order_id": str(order_id),
+        "status": status,
+        "client_order_id": placed.get("text") or "",
+        "raw": placed,
+    }
+
+
+def get_bbo(env, symbol):
+    """Real top-of-book {'bid','ask'} from the public futures ticker —
+    highest_bid / lowest_ask (SDK FuturesTicker model + CCXT-verified).
+    Fails loud when a book side is empty; never substitutes mark/last."""
+    rows = _send("GET", "/futures/usdt/tickers", env,
+                 query=f"contract={_contract(symbol)}")
+    t = rows[0] if rows else {}
+    bid, ask = t.get("highest_bid"), t.get("lowest_ask")
+    if not bid or not ask:
+        raise GateioError("N/A", f"{symbol} ticker missing top-of-book "
+                          f"(bid={bid!r} ask={ask!r})", "tickers")
+    return {"bid": float(bid), "ask": float(ask)}
+
+
 def get_mark_price(env, symbol):
     """Live mark price (public futures ticker) — the cross-venue wiring
     contract for USD→qty conversion (lib/venue_wiring.py)."""
@@ -420,14 +497,32 @@ def close_position_partial(env, symbol, direction, qty, client_order_id=None):
 
 
 def get_open_orders(env, symbol=None):
+    """Open futures orders — raw rows annotated with the cross-venue keys the
+    reconciler's orphan sweep reads: symbol (canonical dashless), order_id
+    (str), client_order_id (the full `text`, t- prefix preserved — the rc
+    fingerprint match is a substring search)."""
     query = "status=open"
     if symbol:
         query += f"&contract={_contract(symbol)}"
-    return _send("GET", "/futures/usdt/orders", env, query=query)
+    rows = _send("GET", "/futures/usdt/orders", env, query=query) or []
+    for o in rows:
+        o["symbol"] = (o.get("contract") or "").replace("_", "")
+        o["order_id"] = str(o.get("id", ""))
+        o["client_order_id"] = o.get("text") or ""
+    return rows
 
 
 def cancel_order(env, symbol, order_id):
-    return _request("DELETE", f"/futures/usdt/orders/{order_id}", env)
+    """Cancel a futures order by exchange id. Idempotent-safe (chase
+    contract): already-finished / unknown ids — labels ORDER_NOT_FOUND /
+    ORDER_FINISHED (CCXT-verified) — return {'status': <label>} instead of
+    raising; the caller re-reads fills afterwards."""
+    try:
+        return _request("DELETE", f"/futures/usdt/orders/{order_id}", env)
+    except GateioError as e:
+        if e.code in ("ORDER_NOT_FOUND", "ORDER_FINISHED"):
+            return {"status": str(e.code).lower(), "order_id": str(order_id)}
+        raise
 
 
 def cancel_all_orders(env, symbol):
@@ -574,6 +669,10 @@ def _spot_rules(env, symbol):
         _rules_cache[key] = {
             "amount_step": str(Decimal(1).scaleb(-int(r.get("amount_precision") or 0))
                                .normalize()),
+            # `precision` is the PRICE scale, `amount_precision` the amount
+            # scale (SDK CurrencyPair model + CCXT parseMarket, cross-checked)
+            "price_step": str(Decimal(1).scaleb(-int(r.get("precision") or 0))
+                              .normalize()),
             "min_base": float(r.get("min_base_amount") or 0),
             "min_quote": float(r.get("min_quote_amount") or 0),
             "active": r.get("trade_status") == "tradable",
@@ -603,6 +702,12 @@ def format_spot_qty(env, symbol, qty):
     return format(q, "f")
 
 
+def format_spot_price(env, symbol, price):
+    r = _spot_rules(env, symbol)
+    step = Decimal(r["price_step"]).normalize()
+    return format(Decimal(str(price)).quantize(step, rounding=ROUND_DOWN), "f")
+
+
 def get_spot_order(env, symbol, order_id):
     """Spot order by id — fee rides the order itself here (no trades call).
     executed_qty is BASE units (filled quote ÷ avg price)."""
@@ -613,6 +718,12 @@ def get_spot_order(env, symbol, order_id):
     avg = float(o.get("avg_deal_price", 0) or 0)
     quote_filled = float(o.get("filled_total", 0) or 0)
     executed = quote_filled / avg if avg > 0 else 0.0
+    amt = float(o.get("amount", 0) or 0)
+    if o.get("type") == "market" and o.get("side") == "buy":
+        # market-buy amount is the QUOTE spend — derive base when possible
+        orig = amt / avg if avg > 0 else executed
+    else:
+        orig = amt  # limit orders (and market sells) size amount in BASE
     status = o.get("status")  # open | closed | cancelled
     if status == "closed":
         norm_status = "filled"
@@ -627,6 +738,7 @@ def get_spot_order(env, symbol, order_id):
         "status": norm_status,
         "avg_price": avg,
         "executed_qty": executed,
+        "orig_qty": orig,
         "quote_qty": quote_filled,
         "commission": abs(float(o.get("fee", 0) or 0)),
         "commission_asset": o.get("fee_currency") or "",
@@ -676,6 +788,104 @@ def place_spot_market_order(env, symbol, side, base_qty=None, quote_qty=None,
     if not order_id:
         raise GateioError("N/A", f"spot order response missing id: {placed}", "orders")
     return _confirm(env, symbol, order_id, get_spot_order, timeout=confirm_timeout)
+
+
+def place_spot_limit_order(env, symbol, side, base_qty, price, client_order_id=None,
+                           post_only=False):
+    """Spot limit order, UNCONFIRMED — may rest; track via get_spot_order,
+    cancel via cancel_spot_order. amount is BASE units on BOTH sides for
+    limit orders (unlike market buys). tif "gtc", or "poc" when post_only —
+    a crossing poc order is rejected with POC_FILL_IMMEDIATELY, returned as
+    {'status': 'post_only_rejected'}. Below the pair minimums → False.
+    Guard: buy=entry (halt blocks), sell=reduce."""
+    pair = _spot_pair(symbol)
+    side = side.lower()
+    if side not in ("buy", "sell"):
+        raise ValueError(f"side must be buy|sell, got {side!r}")
+    try:
+        amount = format_spot_qty(env, symbol, base_qty)
+    except ValueError as e:
+        if "not open for spot trading" in str(e):
+            raise
+        return False
+    px = format_spot_price(env, symbol, price)
+    if float(amount) * float(px) < _spot_rules(env, symbol)["min_quote"]:
+        return False  # min_quote_amount gates limit notionals too
+    body = {
+        "currency_pair": pair,
+        "side": side,
+        "type": "limit",
+        "amount": amount,
+        "price": px,
+        "time_in_force": "poc" if post_only else "gtc",
+        "account": "spot",
+        "text": _text(client_order_id),
+    }
+    try:
+        placed = _request("POST", "/spot/orders", env, body)
+    except GateioError as e:
+        if e.code in ("POC_FILL_IMMEDIATELY", "ORDER_POC_IMMEDIATE"):
+            # ORDER_POC_IMMEDIATE is what futures actually returns (live-verified
+            # 2026-08); POC_FILL_IMMEDIATELY is the ccxt/docs spelling — keep both
+            return {"status": "post_only_rejected"}
+        raise
+    order_id = placed.get("id")
+    if not order_id:
+        raise GateioError("N/A", f"spot limit order response missing id: {placed}",
+                          "orders")
+    return {
+        "order_id": str(order_id),
+        "status": {"closed": "filled", "cancelled": "canceled"}.get(
+            placed.get("status"), "open"),
+        "client_order_id": placed.get("text") or "",
+        "raw": placed,
+    }
+
+
+def cancel_spot_order(env, symbol, order_id):
+    """Cancel a spot order by id (currency_pair is a required query param on
+    Gate.io's DELETE). Idempotent-safe: already-closed / unknown ids — labels
+    ORDER_NOT_FOUND / ORDER_CLOSED / ORDER_CANCELLED (CCXT-verified) — return
+    {'status': <label>} instead of raising."""
+    try:
+        return _request("DELETE", f"/spot/orders/{order_id}", env,
+                        query=f"currency_pair={_spot_pair(symbol)}")
+    except GateioError as e:
+        if e.code in ("ORDER_NOT_FOUND", "ORDER_CLOSED", "ORDER_CANCELLED"):
+            return {"status": str(e.code).lower(), "order_id": str(order_id)}
+        raise
+
+
+def get_spot_bbo(env, symbol):
+    """Real top-of-book {'bid','ask'} from the public spot ticker —
+    highest_bid / lowest_ask (SDK Ticker model + CCXT-verified). Fails loud
+    when a book side is empty; never substitutes last."""
+    rows = _send("GET", "/spot/tickers", env,
+                 query=f"currency_pair={_spot_pair(symbol)}")
+    t = rows[0] if rows else {}
+    bid, ask = t.get("highest_bid"), t.get("lowest_ask")
+    if not bid or not ask:
+        raise GateioError("N/A", f"{symbol} spot ticker missing top-of-book "
+                          f"(bid={bid!r} ask={ask!r})", "tickers")
+    return {"bid": float(bid), "ask": float(ask)}
+
+
+def get_spot_open_orders(env, symbol=None):
+    """Open spot orders across all pairs (or one pair), rows annotated with
+    symbol (canonical dashless) / order_id (str) / client_order_id (full
+    `text`) for the reconciler's orphan sweep. /spot/open_orders groups rows
+    per pair — flattened here."""
+    if symbol:
+        rows = _send("GET", "/spot/orders", env,
+                     query=f"currency_pair={_spot_pair(symbol)}&status=open") or []
+    else:
+        groups = _send("GET", "/spot/open_orders", env) or []
+        rows = [o for g in groups for o in (g.get("orders") or [])]
+    for o in rows:
+        o["symbol"] = (o.get("currency_pair") or "").replace("_", "")
+        o["order_id"] = str(o.get("id", ""))
+        o["client_order_id"] = o.get("text") or ""
+    return rows
 
 
 def get_spot_balances(env):

@@ -54,6 +54,17 @@ DEMO_URL = "https://open-api-vst.bingx.com"  # VST paper trading, swap only
 RETRYABLE_CODES = {100410, 100500}  # 100410 = rate limited (no Retry-After; backoff), 100500 = internal
 RECV_WINDOW = "5000"
 
+# Limit-layer error codes, from the official error-code reference
+# (github.com/BingX-API/api-ai-skills references/error-codes.md):
+# 101215 = "Post Only order was cancelled because it would have been filled
+# immediately" (futures; no spot twin is documented — spot detection falls back
+# to message matching). 109421 = swap order does not exist (filled / cancelled /
+# wrong id); 80016/80017 = older order-not-found codes ccxt still maps in
+# production; 100404 = spot order does not exist (filled or cancelled).
+POST_ONLY_REJECT_CODES = {101215}
+SWAP_ORDER_GONE_CODES = {80016, 80017, 109421}
+SPOT_ORDER_GONE_CODES = {100404}
+
 _rules_cache = {}  # symbol -> contract rules (per-process)
 _position_mode_cache = {}  # api_key -> "hedge" | "oneway"
 
@@ -320,6 +331,42 @@ def _unwrap_order(data):
     return order
 
 
+def _is_post_only_reject(err):
+    """True when a BingXError is the venue refusing a would-cross PostOnly
+    order (code 101215 per the official error list; message match as a net
+    for undocumented spot/gateway variants — BingX docs quality)."""
+    if err.code in POST_ONLY_REJECT_CODES:
+        return True
+    msg = str(err.msg or "").lower()
+    return "post only" in msg or "post-only" in msg or "postonly" in msg
+
+
+def _is_order_gone(err, codes):
+    """True when a cancel failed only because the order already left the book
+    (filled / cancelled / unknown id) — the idempotent-safe cancel cases."""
+    if err.code in codes:
+        return True
+    msg = str(err.msg or "").lower()
+    return ("not exist" in msg or "does not exist" in msg
+            or "order not found" in msg or "already filled" in msg
+            or "already cancel" in msg)
+
+
+def _normalize_open_rows(orders):
+    """In-place: give each open-order row the reconciler contract's trio —
+    symbol (canonical dashless uppercase), order_id, client_order_id (BingX
+    responses spell it clientOrderId; accept every spelling) — while keeping
+    the raw fields (orderId stays, stringified)."""
+    for o in orders:
+        if "orderId" in o:
+            o["orderId"] = str(o["orderId"])
+        o["order_id"] = str(o.get("orderId", ""))
+        o["symbol"] = str(o.get("symbol", "")).replace("-", "").upper()
+        o["client_order_id"] = (o.get("clientOrderId") or o.get("clientOrderID")
+                                or o.get("newClientOrderId") or "")
+    return orders
+
+
 def _attach_protection(params, sl_price=None, tp_price=None, qty=None):
     """Attach stopLoss/takeProfit to an entry order as BingX's stringified-JSON
     fields — one atomic request, no naked-position window."""
@@ -376,35 +423,62 @@ def place_market_order(env, symbol, direction, qty, client_order_id=None,
 
 
 def place_limit_order(env, symbol, direction, qty, price, client_order_id=None,
-                      reduce_only=False, time_in_force="GTC"):
-    """Limit order. Returns the raw (unconfirmed) order dict with orderId —
-    limit orders may rest; use confirm_order / get_order to track it."""
+                      reduce_only=False, time_in_force="GTC", post_only=False):
+    """Limit order, UNCONFIRMED (may rest) — track via confirm_order /
+    get_order. Returns the raw order dict with orderId + order_id (the
+    chase-limit contract key), False when qty floors below the venue minimum
+    (intentional skip — the chase executor treats it as dust), or
+    {'status': 'post_only_rejected'} when a post-only order would cross.
+
+    post_only=True sends timeInForce=PostOnly (BingX's maker-only dialect —
+    official api-ai-skills repo + ccxt production; overrides time_in_force).
+    A would-cross rejection is error 101215 per the official error list;
+    NOT yet verified live — if the venue instead accepts then auto-cancels,
+    the order surfaces as CANCELED via get_order and the chase executor
+    accounts it the same way. price is floored to the symbol's tick here
+    (callers pass a raw float)."""
     symbol = _bingx_symbol(symbol)
     mode = get_position_mode(env)
     if reduce_only:
         side = "SELL" if direction == "long" else "BUY"
     else:
         side = "BUY" if direction == "long" else "SELL"
+    try:
+        qty_s = format_qty(env, symbol, qty, price=price)
+    except ValueError as e:
+        if "not open for API trading" in str(e):
+            raise
+        return False  # below min qty/notional — intentional skip
     params = {
         "symbol": symbol,
         "side": side,
         "positionSide": _position_side(env, direction),
         "type": "LIMIT",
-        "quantity": format_qty(env, symbol, qty, price=price),
+        "quantity": qty_s,
         "price": format_price(env, symbol, price),
-        "timeInForce": time_in_force,
+        "timeInForce": "PostOnly" if post_only else time_in_force,
     }
     if reduce_only and mode == "oneway":
         params["reduceOnly"] = "true"
     if client_order_id:
         params["clientOrderID"] = client_order_id
-    return _unwrap_order(_request("POST", "/openApi/swap/v2/trade/order", env, params))
+    try:
+        order = _unwrap_order(_request("POST", "/openApi/swap/v2/trade/order", env, params))
+    except BingXError as e:
+        if post_only and _is_post_only_reject(e):
+            return {"status": "post_only_rejected"}
+        raise
+    if not order.get("orderId"):
+        raise BingXError("N/A", f"limit order response missing orderId: {order}", "trade/order")
+    order["order_id"] = order["orderId"]
+    return order
 
 
 def get_order(env, symbol, order_id):
     """Order details by orderId. Normalized: status, avg_price, executed_qty,
     orig_qty, commission (abs — BingX returns it negative), client_order_id,
     plus the raw dict under 'raw'."""
+    symbol = _bingx_symbol(symbol)
     data = _request("GET", "/openApi/swap/v2/trade/order", env,
                     {"symbol": symbol, "orderId": str(order_id)})
     o = _unwrap_order(data)
@@ -449,21 +523,38 @@ def confirm_order(env, symbol, order_id, timeout=15):
 
 
 def get_open_orders(env, symbol=None):
-    """All open orders (entry + conditional). Returns a list of raw order dicts
-    with orderId normalized to str."""
+    """All open orders (entry + conditional). Returns a list of raw order
+    dicts, each augmented with the reconciler contract's symbol (canonical
+    dashless) / order_id / client_order_id trio (see _normalize_open_rows)."""
     symbol = _bingx_symbol(symbol) if symbol else symbol
     params = {"symbol": symbol} if symbol else {}
     data = _request("GET", "/openApi/swap/v2/trade/openOrders", env, params) or {}
     orders = data.get("orders", []) if isinstance(data, dict) else data
-    for o in orders:
-        if "orderId" in o:
-            o["orderId"] = str(o["orderId"])
-    return orders
+    return _normalize_open_rows(orders)
+
+
+def get_bbo(env, symbol):
+    """Top-of-book {'bid': float, 'ask': float} from /quote/depth — the real
+    book, never mark/last price. Robust to BingX's inconsistent level ordering
+    (ccxt's live captures show asks DESCENDING while the official docs say
+    best-first): best bid = max, best ask = min over the returned levels.
+    Fails loud on an empty book."""
+    data = _request("GET", "/openApi/swap/v2/quote/depth", env,
+                    {"symbol": _bingx_symbol(symbol), "limit": "5"},
+                    signed=False) or {}
+    bids, asks = data.get("bids") or [], data.get("asks") or []
+    if not bids or not asks:
+        raise BingXError("N/A", f"empty depth for {symbol}: {list(data)}", "quote/depth")
+    return {"bid": max(float(r[0]) for r in bids),
+            "ask": min(float(r[0]) for r in asks)}
 
 
 def cancel_order(env, symbol, order_id=None, client_order_id=None):
     """Cancel one order by orderId or clientOrderID. Returns the canceled
-    order's raw dict. Raises BingXError if the exchange refuses."""
+    order's raw dict (with order_id). Idempotent-safe: an order that is
+    already filled / cancelled / unknown (109421, legacy 80016/80017) returns
+    {'status': 'already_gone', ...} instead of raising — the caller always
+    re-reads fills afterwards. Other refusals still raise BingXError."""
     symbol = _bingx_symbol(symbol)
     params = {"symbol": symbol}
     if order_id:
@@ -472,7 +563,15 @@ def cancel_order(env, symbol, order_id=None, client_order_id=None):
         params["clientOrderID"] = client_order_id
     else:
         raise ValueError("order_id or client_order_id required")
-    return _unwrap_order(_request("DELETE", "/openApi/swap/v2/trade/order", env, params))
+    try:
+        order = _unwrap_order(_request("DELETE", "/openApi/swap/v2/trade/order", env, params))
+    except BingXError as e:
+        if _is_order_gone(e, SWAP_ORDER_GONE_CODES):
+            return {"status": "already_gone", "order_id": str(order_id or ""),
+                    "client_order_id": client_order_id or ""}
+        raise
+    order["order_id"] = str(order.get("orderId", order_id or ""))
+    return order
 
 
 def cancel_all_orders(env, symbol):
@@ -754,6 +853,7 @@ def get_spot_balances(env):
 
 def get_spot_order(env, symbol, order_id):
     """Spot order by id, normalized: status, avg_price, executed_qty,
+    orig_qty (origQty — partial-fill accounting needs the original size),
     quote_qty, client_order_id, raw."""
     o = _request("GET", "/openApi/spot/v1/trade/query", env,
                  {"symbol": _bingx_symbol(symbol), "orderId": str(order_id)}) or {}
@@ -766,8 +866,10 @@ def get_spot_order(env, symbol, order_id):
         "status": o.get("status"),
         "avg_price": (quote / executed) if executed else 0.0,
         "executed_qty": executed,
+        "orig_qty": float(o.get("origQty") or 0),
         "quote_qty": quote,
-        "client_order_id": o.get("clientOrderId") or o.get("newClientOrderId") or "",
+        "client_order_id": (o.get("clientOrderId") or o.get("clientOrderID")
+                            or o.get("newClientOrderId") or ""),
         "raw": o,
     }
 
@@ -825,3 +927,111 @@ def place_spot_market_order(env, symbol, side, base_qty=None, quote_qty=None,
         f"spot order {order_id} still {result['status'] if result else 'UNKNOWN'} "
         f"after {confirm_timeout}s"
     )
+
+
+# ── spot limit layer (chase-limit executor contract) ─────────────────────────
+
+def format_spot_price(env, symbol, price):
+    """Floor a price to the spot tick (tickSize is a SIZE, unlike swap's digit
+    counts). Plain decimal string."""
+    rules = get_spot_rules(env, symbol)
+    return format(_floor_to_step(price, rules["tick"]), "f")
+
+
+def place_spot_limit_order(env, symbol, side, base_qty, price, client_order_id=None,
+                           post_only=False):
+    """Limit spot order, UNCONFIRMED (may rest) — track via get_spot_order.
+    side: 'buy'|'sell'; sized in BASE qty for BOTH sides (unlike market buys,
+    which take quote_qty — limit orders carry their own price). Returns the
+    order dict with order_id, False below min qty/notional (intentional skip,
+    same convention as place_spot_market_order), or
+    {'status': 'post_only_rejected'} when a post-only order would cross.
+
+    post_only=True sends timeInForce=PostOnly (official api-ai-skills repo +
+    ccxt production — same dialect as swap). The spot rejection presentation
+    is NOT verified live and the official error list has no spot twin of
+    swap's 101215, so detection is message-based; an accept-then-auto-cancel
+    dialect surfaces as CANCELED via get_spot_order instead, which the chase
+    executor accounts the same way. qty is floored to the spot step and price
+    to the spot tick here (callers pass raw floats).
+    Guard: buy=entry (halt blocks), sell=reduce (never trapped)."""
+    sym = _bingx_symbol(symbol)
+    side = side.lower()
+    if side not in ("buy", "sell"):
+        raise ValueError(f"side must be buy|sell, got {side!r}")
+    rules = get_spot_rules(env, sym)
+    try:
+        qty_s = format_spot_qty(env, sym, base_qty)
+    except ValueError as e:
+        if "not open for spot trading" in str(e):
+            raise
+        return False  # below min qty — intentional skip
+    price_s = format_spot_price(env, sym, price)
+    if float(qty_s) * float(price_s) < rules["min_notional"]:
+        return False  # below min notional — intentional skip
+    params = {
+        "symbol": sym,
+        "side": side.upper(),
+        "type": "LIMIT",
+        "quantity": qty_s,
+        "price": price_s,
+        "timeInForce": "PostOnly" if post_only else "GTC",
+    }
+    if client_order_id:
+        params["newClientOrderId"] = client_order_id  # spot param name (swap uses clientOrderID)
+    try:
+        data = _request("POST", "/openApi/spot/v1/trade/order", env, params)
+    except BingXError as e:
+        if post_only and _is_post_only_reject(e):
+            return {"status": "post_only_rejected"}
+        raise
+    order = data if isinstance(data, dict) else {}
+    if not order.get("orderId"):
+        raise BingXError("N/A", f"spot limit response missing orderId: {list(order)}",
+                         "trade/order")
+    order["orderId"] = str(order["orderId"])
+    order["order_id"] = order["orderId"]
+    return order
+
+
+def cancel_spot_order(env, symbol, order_id):
+    """Cancel one spot order by orderId (POST — BingX spot has no DELETE
+    cancel). Idempotent-safe: already filled / not found (100404 per the
+    official spot error list) returns {'status': 'already_gone', ...} instead
+    of raising — the caller always re-reads fills afterwards."""
+    try:
+        data = _request("POST", "/openApi/spot/v1/trade/cancel", env,
+                        {"symbol": _bingx_symbol(symbol), "orderId": str(order_id)})
+    except BingXError as e:
+        if _is_order_gone(e, SPOT_ORDER_GONE_CODES):
+            return {"status": "already_gone", "order_id": str(order_id)}
+        raise
+    order = data if isinstance(data, dict) else {}
+    if "orderId" in order:
+        order["orderId"] = str(order["orderId"])
+    order["order_id"] = str(order.get("orderId", order_id))
+    return order
+
+
+def get_spot_bbo(env, symbol):
+    """Spot top-of-book {'bid': float, 'ask': float} from /market/depth — the
+    real book. Same ordering-robust max/min read as the swap get_bbo (BingX's
+    level ordering is inconsistent between docs and live captures)."""
+    data = _request("GET", "/openApi/spot/v1/market/depth", env,
+                    {"symbol": _bingx_symbol(symbol), "limit": "5"},
+                    signed=False) or {}
+    bids, asks = data.get("bids") or [], data.get("asks") or []
+    if not bids or not asks:
+        raise BingXError("N/A", f"empty spot depth for {symbol}: {list(data)}", "market/depth")
+    return {"bid": max(float(r[0]) for r in bids),
+            "ask": min(float(r[0]) for r in asks)}
+
+
+def get_spot_open_orders(env, symbol=None):
+    """Open spot orders (all pairs when symbol=None). Returns raw order dicts,
+    each augmented with the reconciler contract's symbol (canonical dashless) /
+    order_id / client_order_id trio (see _normalize_open_rows)."""
+    params = {"symbol": _bingx_symbol(symbol)} if symbol else {}
+    data = _request("GET", "/openApi/spot/v1/trade/openOrders", env, params) or {}
+    orders = data.get("orders", []) if isinstance(data, dict) else data
+    return _normalize_open_rows(orders or [])

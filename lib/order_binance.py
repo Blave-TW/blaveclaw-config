@@ -424,28 +424,60 @@ def place_market_order(env, symbol, direction, qty, client_order_id=None,
 
 
 def place_limit_order(env, symbol, direction, qty, price, client_order_id=None,
-                      reduce_only=False, time_in_force="GTC"):
-    """Limit order. Returns the raw (unconfirmed) order dict with orderId —
-    limit orders may rest; use confirm_order / get_order to track it."""
+                      reduce_only=False, time_in_force="GTC", post_only=False):
+    """Limit order, UNCONFIRMED (it may rest) — use confirm_order / get_order
+    to track it. Returns the raw order dict plus a normalized 'order_id' key
+    (the chase-limit contract: every later cancel/status call is by order_id).
+    Below min qty/notional → returns False (intentional skip, same convention
+    as place_market_order — the chase toolkit sizes legs in USD and small
+    residuals are expected). price is floored to the symbol's tick here —
+    callers pass a raw float.
+
+    post_only=True sends timeInForce=GTX (Binance futures' post-only dialect,
+    overriding time_in_force); a GTX order that would cross is refused with
+    -5022 GTX_ORDER_REJECT and RETURNS {'status': 'post_only_rejected'}
+    instead of raising — the chase executor re-reads the book and re-posts."""
     symbol = _canonical(symbol)
     mode = get_position_mode(env)
     if reduce_only:
         side = "SELL" if direction == "long" else "BUY"
     else:
         side = "BUY" if direction == "long" else "SELL"
+    price_str = format_price(env, symbol, price)
+    try:
+        # Binance EXEMPTS reduce-only orders from MIN_NOTIONAL (-4164, same
+        # exemption place_market_order relies on) — skip the notional pre-check
+        # there so small residual closes ($10-100) aren't blocked by our own
+        # gate; step/min_qty checks still apply either way.
+        qty_str = format_qty(env, symbol, qty,
+                             price=None if reduce_only else price_str)
+    except ValueError as e:
+        # a suspended symbol is a FAULT, not an intentional min-size skip
+        if "not open for trading" in str(e):
+            raise
+        return False
     params = {
         "symbol": symbol,
         "side": side,
         "positionSide": _position_side(env, direction),
         "type": "LIMIT",
-        "quantity": format_qty(env, symbol, qty, price=price),
-        "price": format_price(env, symbol, price),
-        "timeInForce": time_in_force,
+        "quantity": qty_str,
+        "price": price_str,
+        "timeInForce": "GTX" if post_only else time_in_force,
         "newClientOrderId": _cid(client_order_id),
     }
     if reduce_only and mode == "oneway":
         params["reduceOnly"] = "true"
-    return _norm_ids(_request("POST", "/fapi/v1/order", env, params))
+    try:
+        placed = _norm_ids(_request("POST", "/fapi/v1/order", env, params))
+    except BinanceError as e:
+        if post_only and e.code == -5022:
+            return {"status": "post_only_rejected"}
+        raise
+    if not placed.get("orderId"):
+        raise BinanceError("N/A", f"order response missing orderId: {placed}", "order")
+    placed["order_id"] = placed["orderId"]
+    return placed
 
 
 def get_order(env, symbol, order_id):
@@ -517,11 +549,24 @@ def _order_commission(env, symbol, order_id):
     return (0.0, "USDT")
 
 
+def _norm_open_row(o):
+    """Open-order row contract (venue_wiring.sweep_orphan_orders): every row
+    carries canonical 'symbol' + 'order_id' + 'client_order_id' alongside the
+    venue's raw fields — the reconciler sweeps orphaned rc*-prefixed orders by
+    these keys after a restart."""
+    o = _norm_ids(o)
+    o["symbol"] = _canonical(o.get("symbol"))
+    o["order_id"] = o.get("orderId", "")
+    o["client_order_id"] = o.get("clientOrderId") or ""
+    return o
+
+
 def get_open_orders(env, symbol=None):
-    """All open REGULAR orders (market/limit), orderId normalized to str.
+    """All open REGULAR orders (market/limit), orderId normalized to str and
+    each row normalized per _norm_open_row (symbol/order_id/client_order_id).
     Conditional SL/TP orders are NOT here — see get_open_algo_orders()."""
     params = {"symbol": _canonical(symbol)} if symbol else {}
-    return [_norm_ids(o) for o in
+    return [_norm_open_row(o) for o in
             (_request("GET", "/fapi/v1/openOrders", env, params) or [])]
 
 
@@ -539,7 +584,12 @@ def get_open_algo_orders(env, symbol=None):
 def cancel_order(env, symbol, order_id=None, client_order_id=None):
     """Cancel one REGULAR order by orderId or the FULL newClientOrderId
     (prefix included — pass what get_order returned). Conditional orders go
-    through cancel_algo_order. Raises BinanceError on refusal."""
+    through cancel_algo_order.
+
+    Idempotent-safe (chase-limit contract): an order that is already filled
+    or gone rejects the cancel with -2011 CANCEL_REJECTED ("Unknown order
+    sent") — that RETURNS {'status': 'already_gone', ...} instead of raising;
+    the caller always re-reads fills afterwards. Other refusals raise."""
     params = {"symbol": _canonical(symbol)}
     if order_id:
         params["orderId"] = str(order_id)
@@ -547,7 +597,12 @@ def cancel_order(env, symbol, order_id=None, client_order_id=None):
         params["origClientOrderId"] = client_order_id
     else:
         raise ValueError("order_id or client_order_id required")
-    return _norm_ids(_request("DELETE", "/fapi/v1/order", env, params))
+    try:
+        return _norm_ids(_request("DELETE", "/fapi/v1/order", env, params))
+    except BinanceError as e:
+        if e.code == -2011:
+            return {"status": "already_gone", "code": e.code, "msg": e.msg}
+        raise
 
 
 def cancel_algo_order(env, algo_id=None, client_algo_id=None):
@@ -701,6 +756,14 @@ def get_mark_price(env, symbol):
     return float(data["markPrice"])
 
 
+def get_bbo(env, symbol):
+    """Top-of-book {'bid': float, 'ask': float} from the public bookTicker —
+    real best bid/ask, never mark/last price (chase-limit contract)."""
+    data = _send("GET", "/fapi/v1/ticker/bookTicker", env,
+                 {"symbol": _canonical(symbol)}, signed=False)
+    return {"bid": float(data["bidPrice"]), "ask": float(data["askPrice"])}
+
+
 def get_leverage(env, symbol):
     """Current leverage for the symbol, from the position-risk row (present
     even when flat)."""
@@ -736,10 +799,10 @@ def _spot_cid(client_order_id=None):
 
 def get_spot_rules(env, symbol):
     """Spot trading rules for one symbol: {'step': str, 'min_qty': float,
-    'min_notional': float, 'active': bool}. Spot's notional filter is named
-    NOTIONAL on current symbols but MIN_NOTIONAL on older doc examples —
-    accept both. Cached per process; queried per symbol (spot exchangeInfo
-    for ALL symbols is a multi-MB payload, unlike fapi's)."""
+    'min_notional': float, 'price_tick': str, 'active': bool}. Spot's
+    notional filter is named NOTIONAL on current symbols but MIN_NOTIONAL on
+    older doc examples — accept both. Cached per process; queried per symbol
+    (spot exchangeInfo for ALL symbols is a multi-MB payload, unlike fapi's)."""
     symbol = _canonical(symbol)
     if symbol not in _spot_rules_cache:
         info = _send("GET", "/api/v3/exchangeInfo", env,
@@ -756,6 +819,7 @@ def get_spot_rules(env, symbol):
             "step": lot.get("stepSize") or "1",
             "min_qty": float(lot.get("minQty", 0)),
             "min_notional": float(notional.get("minNotional", 0)),
+            "price_tick": filters.get("PRICE_FILTER", {}).get("tickSize", "0.01"),
             "active": s.get("status") == "TRADING",
         }
     return _spot_rules_cache[symbol]
@@ -773,6 +837,12 @@ def format_spot_qty(env, symbol, qty):
             f"{symbol} spot qty {qty} floors to {q}, below minimum {rules['min_qty']}"
         )
     return format(q, "f")
+
+
+def format_spot_price(env, symbol, price):
+    """Floor price to the spot symbol's tick size. Plain decimal string."""
+    rules = get_spot_rules(env, symbol)
+    return format(_floor_to_step(price, rules["price_tick"]), "f")
 
 
 def place_spot_market_order(env, symbol, side, base_qty=None, quote_qty=None,
@@ -871,3 +941,127 @@ def get_spot_price(env, symbol):
     data = _send("GET", "/api/v3/ticker/price", env,
                  {"symbol": _canonical(symbol)}, signed=False, spot=True)
     return float(data["price"])
+
+
+# ── spot limit layer (chase-limit contract, references/exchange-connect.md) ──
+
+def place_spot_limit_order(env, symbol, side, base_qty, price,
+                           client_order_id=None, post_only=False):
+    """Spot limit order, UNCONFIRMED (it may rest) — track via get_spot_order.
+    side: 'buy'|'sell'. base_qty is BASE currency on BOTH sides (unlike market
+    buys, a limit has a price to convert with — no quoteOrderQty lane); price
+    is floored to the spot tick here. Below min qty/notional → returns False
+    (intentional skip). Returns a normalized dict with 'order_id' (+ status /
+    orig_qty / executed_qty / avg_price / raw).
+
+    post_only=True sends type LIMIT_MAKER — spot's post-only is an order TYPE,
+    not a timeInForce, and LIMIT_MAKER takes quantity+price only. A maker
+    order that would cross is refused with -2010 "Order would immediately
+    match and take." and RETURNS {'status': 'post_only_rejected'} instead of
+    raising; other -2010 messages (insufficient balance, …) stay fatal.
+    Guard: buy=entry (halt blocks), sell=reduce (never trapped)."""
+    symbol = _canonical(symbol)
+    side = side.lower()
+    if side not in ("buy", "sell"):
+        raise ValueError(f"side must be buy|sell, got {side!r}")
+    rules = get_spot_rules(env, symbol)
+    try:
+        qty_str = format_spot_qty(env, symbol, base_qty)
+    except ValueError as e:
+        # a suspended symbol is a FAULT, not an intentional min-size skip
+        if "not open for trading" in str(e):
+            raise
+        return False
+    price_str = format_spot_price(env, symbol, price)
+    if float(qty_str) * float(price_str) < rules["min_notional"]:
+        return False  # below min notional — intentional skip
+    params = {
+        "symbol": symbol,
+        "side": side.upper(),
+        "type": "LIMIT_MAKER" if post_only else "LIMIT",
+        "quantity": qty_str,
+        "price": price_str,
+        "newClientOrderId": _spot_cid(client_order_id),
+    }
+    if not post_only:
+        params["timeInForce"] = "GTC"  # LIMIT_MAKER rejects timeInForce
+    try:
+        o = _norm_ids(_request("POST", "/api/v3/order", env, params, spot=True))
+    except BinanceError as e:
+        if post_only and e.code == -2010 and "immediately match" in (e.msg or ""):
+            return {"status": "post_only_rejected"}
+        raise
+    if not o.get("orderId"):
+        raise BinanceError("N/A", f"spot order response missing orderId: {o}", "order")
+    executed = float(o.get("executedQty") or 0)
+    quote = float(o.get("cummulativeQuoteQty") or 0)
+    return {
+        "order_id": o["orderId"],
+        "status": o.get("status") or "",
+        "avg_price": (quote / executed) if executed else 0.0,
+        "executed_qty": executed,
+        "orig_qty": float(o.get("origQty") or 0),
+        "client_order_id": o.get("clientOrderId") or "",
+        "raw": o,
+    }
+
+
+def get_spot_order(env, symbol, order_id):
+    """Spot order details by orderId. Normalized: status, avg_price,
+    executed_qty, orig_qty, client_order_id, plus the raw dict under 'raw'.
+    avg_price is derived from cummulativeQuoteQty/executedQty — the spot
+    order query has no avgPrice field."""
+    o = _norm_ids(_request("GET", "/api/v3/order", env,
+                           {"symbol": _canonical(symbol), "orderId": str(order_id)},
+                           spot=True))
+    if "status" not in o:
+        raise BinanceError("N/A", f"spot order query missing status: {o}", "order")
+    executed = float(o.get("executedQty") or 0)
+    quote = float(o.get("cummulativeQuoteQty") or 0)
+    return {
+        "order_id": o["orderId"],
+        "status": o["status"],
+        "avg_price": (quote / executed) if executed else 0.0,
+        "executed_qty": executed,
+        "orig_qty": float(o.get("origQty") or 0),
+        "client_order_id": o.get("clientOrderId") or "",
+        "raw": o,
+    }
+
+
+def cancel_spot_order(env, symbol, order_id=None, client_order_id=None):
+    """Cancel one spot order by orderId or the FULL newClientOrderId.
+    Idempotent-safe like cancel_order: already filled / gone rejects with
+    -2011 CANCEL_REJECTED and RETURNS {'status': 'already_gone', ...} instead
+    of raising — the caller re-reads fills afterwards."""
+    params = {"symbol": _canonical(symbol)}
+    if order_id:
+        params["orderId"] = str(order_id)
+    elif client_order_id:
+        params["origClientOrderId"] = client_order_id
+    else:
+        raise ValueError("order_id or client_order_id required")
+    try:
+        return _norm_ids(_request("DELETE", "/api/v3/order", env, params, spot=True))
+    except BinanceError as e:
+        if e.code == -2011:
+            return {"status": "already_gone", "code": e.code, "msg": e.msg}
+        raise
+
+
+def get_spot_bbo(env, symbol):
+    """Spot top-of-book {'bid': float, 'ask': float} from the public
+    bookTicker — real best bid/ask, never last price (chase-limit contract)."""
+    data = _send("GET", "/api/v3/ticker/bookTicker", env,
+                 {"symbol": _canonical(symbol)}, signed=False, spot=True)
+    return {"bid": float(data["bidPrice"]), "ask": float(data["askPrice"])}
+
+
+def get_spot_open_orders(env, symbol=None):
+    """All open spot orders, each row normalized per _norm_open_row
+    (canonical symbol / order_id / client_order_id — the reconciler's orphan
+    sweep keys on these). Symbol omitted = all symbols (heavier call weight;
+    used once at reconciler startup)."""
+    params = {"symbol": _canonical(symbol)} if symbol else {}
+    return [_norm_open_row(o) for o in
+            (_request("GET", "/api/v3/openOrders", env, params, spot=True) or [])]

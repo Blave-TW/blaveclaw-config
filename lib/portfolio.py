@@ -419,11 +419,17 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
         # DIFFERENT live venue (venue_wiring audit H3) — older hand-wired
         # place_order fns don't take it, same signature-sniff as reduce_only
         _supports_exchange = 'exchange' in _place_params or _has_var_kw
+        # contributors passthrough lets lib.execute resolve the per-strategy
+        # execution style (市價/TWAP/custom) for this netted order — again
+        # optional, so hand-wired place_order fns keep working untouched
+        _supports_contributors = 'contributors' in _place_params or _has_var_kw
     except (TypeError, ValueError):
         _supports_reduce_only = False
         _supports_exchange = False
+        _supports_contributors = False
 
-    def _call_place(symbol, sub_diff, asset_spec, reduce_only, exchange=None):
+    def _call_place(symbol, sub_diff, asset_spec, reduce_only, exchange=None,
+                    contributors=None):
         # Returns False if place_order_fn skipped the order (e.g. below exchange minimum).
         # Returns None/truthy on success. Propagates exceptions on failure.
         kw = {}
@@ -431,6 +437,8 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
             kw['reduce_only'] = reduce_only
         if _supports_exchange:
             kw['exchange'] = exchange
+        if _supports_contributors:
+            kw['contributors'] = contributors
         if kw:
             return place_order_fn(symbol, sub_diff, asset_spec, **kw)
         return place_order_fn(symbol, sub_diff, asset_spec)
@@ -487,7 +495,8 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
 
             try:
                 placed = _call_place(symbol, sub_diff, asset_spec, reduce_only,
-                                     exchange=order.get('exchange'))
+                                     exchange=order.get('exchange'),
+                                     contributors=order.get('contributors'))
             except Exception as e:
                 log_msg = f"order error {symbol}: {e}"
                 logging.error(log_msg)
@@ -499,8 +508,11 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
                 break
 
             if placed is False:
-                # place_order skipped (e.g. qty below exchange minimum) — no notification or log
-                logging.info(f"[reconcile] {symbol} skipped by place_order — below exchange minimum")
+                # place_order skipped: qty below exchange minimum, or the leg was
+                # handed to / deferred behind an async executor (lib.execute) —
+                # either way nothing filled synchronously, nothing to log here
+                logging.info(f"[reconcile] {symbol} skipped by place_order — "
+                             f"below minimum or async execution in flight")
                 continue
 
             # 進出場價格:order libs return the exchange-confirmed fill — record

@@ -59,25 +59,41 @@ Taiwan stock data (universe, batch functions, fundamental factors, lookahead-bia
 `lib/execute.py` — all order execution logic (state management + algo orders):
 - `from lib.execute import update_state, load_state, save_state` — state management
 - `state.json` schema: `{"position": float, "symbol": str}` — `position` is the current signal value (positive=long, negative=short, 0=flat); all deployment config (exchange, asset_spec) lives in `portfolio_config.json`, not in state
-- `from lib.execute import run_twap` — TWAP execution engine (exchange-agnostic). Use for any strategy type (A/B/C) when the user wants to split a large order over time instead of a single market order.
-  - `run_twap(symbol, side, total_qty, duration_min, n_slices, place_slice_fn, twap_key, signal_price=None, send_telegram_fn=None)`
-  - `place_slice_fn(symbol, side, qty) → {'fill_price': float, 'fill_qty': float}` — implement this per exchange (e.g. Binance, Bybit); raise on failure
+- `from lib.execute import run_twap` — TWAP execution engine (exchange-agnostic). The reconciler's execution dispatch (below) drives it automatically; call it directly only for standalone Type B tooling.
+  - `run_twap(symbol, side, total_qty, duration_min, n_slices, place_slice_fn, twap_key, signal_price=None, send_telegram_fn=None, stop_event=None, notify_slices=True)`
+  - `place_slice_fn(symbol, side, qty) → {'fill_price': float, 'fill_qty': float}` — raise on failure; 3 consecutive slice failures abort the run
+  - `stop_event` (threading.Event): once set, remaining slices are skipped and the summary carries `aborted=True`; `notify_slices=False` silences per-slice Telegrams (start/errors/summary still send)
   - `twap_key`: **symbol+direction** key like `'btcusdt_long'` / `'btcusdt_short'` — NOT a strategy name. Reconciler nets orders per symbol, so there is no single strategy name at execution time.
-  - Logs every slice + summary to `manager/twap/{twap_key}.jsonl` (under `manager/`, never `strategies/`); sends Telegram per slice and on completion
+  - Logs every slice + summary to `manager/twap/{twap_key}.jsonl` (under `manager/`, never `strategies/`)
   - `signal_price` (optional): price at signal time — used to compute `slippage_bps` per slice and in the summary
 - `from lib.execute import load_twap_log` — `load_twap_log(twap_key)` returns `(slices, summaries)` from `manager/twap/{twap_key}.jsonl`; use to analyze how TWAP parameters (duration, n_slices) affect execution quality vs strategy signal price
-- **TWAP wiring pattern** — when the user asks to use TWAP, modify `reconciler.py`. **Key insight: `reconcile()` nets orders per symbol** (see `lib/portfolio.py` — one order per symbol, multiple `contributors`, flips split into reduce-only + open legs). There is NO single strategy name at order-placement time, so TWAP is keyed by symbol+direction, not by strategy:
-  1. Add a key generator so config, lookup, and log path always agree:
-     ```python
-     def _twap_key(symbol, signed_diff):
-         return f"{symbol.lower()}_{'long' if signed_diff > 0 else 'short'}"
-     ```
-  2. Add `TWAP_CONFIG = {"btcusdt_long": {"duration_min": 30, "n_slices": 10}, "btcusdt_short": {...}, ...}` at the top — keys are `symbol_direction`, NOT strategy names.
-  3. Implement `_place_slice(symbol, side, qty)` for the exchange (read the relevant `skills/blave-quant/references/` file first).
-  4. In `place_order(symbol, signed_diff, ...)`, compute `key = _twap_key(symbol, signed_diff)`, check `TWAP_CONFIG.get(key)`, and call `run_twap(..., twap_key=key, ...)` if present, else fall back to a direct market order.
-  - `place_order` does NOT need a `strategy_name` parameter — the key is derived from `symbol + signed_diff`.
-  - Symbol/directions not in `TWAP_CONFIG` continue using market orders unchanged.
-  - Never write TWAP logs under `strategies/` — that folder is for `strategy.py` files; doing so creates orphan folders with no strategy.
+
+**Execution styles (下單方式) — BUILT IN, do not hand-wire TWAP into the reconciler anymore.** `portfolio_config.json["execution"]` maps strategy name → spec; the reconciler template routes every order through `lib.execute.dispatch_order`, which resolves the spec and executes. No entry = market order (unchanged default).
+  - Specs: `{"type": "market"}` | `{"type": "twap", "duration_min": 1–1440}` | `{"type": "chase"}` | `{"type": "custom", "module": "<name>"}` (the web offers market / TWAP 15 min / chase; other TWAP durations are chat-set only)
+  - The web 下單設定 writes market/TWAP/chase specs itself (via the `execution` command) — when the user asks in chat, prefer pointing them at the web control; edit the config key directly only when they can't use the web.
+  - **Resolution is per netted symbol order**: `reconcile()` nets strategies per symbol, so the largest-|contribution| strategy's spec decides for that symbol. One strategy per symbol (the normal case) behaves exactly per-strategy.
+  - TWAP sizing is automatic: ~1 slice/minute, every slice ≥ $20; orders too small to slice fall back to a single market order. Slices are market orders through `lib/venue_wiring` — HALT, audit and broker attribution all apply.
+  - **Chase (限價追價)**: post-only limit at our own side's best price, cancel-replace as the BBO moves, 45 s window, remainder then goes market — better average price than a straight market order, still guaranteed to converge. Zero user parameters. Requires the venue lib's limit layer (`references/exchange-connect.md` rule 6); a venue without it degrades to market, loudly.
+  - TWAP/chase/custom run in a background thread: the reconcile loop keeps serving other symbols; repeat legs for an in-flight symbol are deferred (returned `False`); a mid-flight signal flip stops the execution before its next slice (chase also cancels its resting order) and the residual re-reconciles; completion touches `state/execution/kick` to trigger an immediate round and appends the fill summary to `manager/orders.jsonl`.
+  - An unusable spec (missing module, bad duration) does NOT strand the position: it places a market order and tells the user via Telegram, every occurrence.
+  - Auto-wired official venues only — Taiwan brokers (sinopac/president/capital) keep their hand-wired signed-diff reconcilers and never enter this path.
+
+**Custom executors — "write my own execution style".** When the user wants an execution shape the standard options don't cover (front-loaded slicing, randomized intervals, price-reactive pacing), write `manager/executors/<name>.py` (name: `[a-z0-9_]{1,64}`) exporting:
+  ```python
+  def execute(symbol, side, total_usd, ctx):
+      # side: 'buy' | 'sell'; total_usd: positive USD to execute
+      remaining = total_usd
+      while remaining > 20 and not ctx.stop_requested():
+          fill = ctx.place_slice(min(remaining, total_usd / 10))
+          remaining -= fill["fill_qty"]          # fill_qty is USD
+          if not ctx.sleep(60):                  # False = stop requested
+              return
+  ```
+  then set `{"type": "custom", "module": "<name>"}` for the strategy in `portfolio_config.json["execution"]`.
+  - `ctx.place_slice(usd)` — one market slice of the order's own direction, returns `{'fill_price', 'fill_qty'}` (fill_qty in USD); raises on failure. `ctx.sleep(s)` — interruptible, returns False when the platform wants out (signal flip / HALT / overdue): **return promptly then** — a custom style shapes HOW the target is reached, never whether. `ctx.stop_requested()`, `ctx.mark_price()`, `ctx.notify(msg)`.
+  - Everything still goes through the venue wiring: HALT, audit log, attribution, minimums. There is no way (and no need) to place raw orders from an executor.
+  - Partial fills are fine — the reconciler re-diffs whatever is left after the executor returns. Do not loop forever "to be safe"; executions are expected to end (24 h hard deadline, then the platform requests stop and warns the user).
+  - Keep executors small and boring; test the shape with a dry run of the math in `tmp/` first. Never write TWAP/execution logs under `strategies/`.
 
 `lib/analysis.py`:
 - `from lib.analysis import regime_analysis, plot_regime` — regime breakdown and regime chart

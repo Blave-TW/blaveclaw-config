@@ -101,6 +101,39 @@ do not assume casing or invent names.
    `close_position_partial` — missing any of them crashes at reconcile time
    (mid-trade), not at integration time. Never rename or omit them.
 
+   **Limit layer (execution styles need it — see `references/lib.md` › Execution
+   styles).** The chase-limit executor calls FIVE more fixed names; a venue missing
+   any of them silently degrades every chase order to market (loud Telegram fallback),
+   so ship the full set with any new integration:
+   - `place_limit_order(env, symbol, direction, qty, price, client_order_id=None,
+     reduce_only=False, time_in_force="GTC", post_only=False)` — MUST return a dict
+     containing `order_id` (the venue's own id: every later cancel/status call is by
+     order_id, never by client id — client-id lookup is not portable across venues).
+     `post_only=True` maps to the venue's own dialect (Binance `timeInForce=GTX`,
+     OKX `ordType=post_only`, Gate.io `tif=poc`, …); a post-only rejection (the
+     order would have crossed) RETURNS `{'status': 'post_only_rejected'}` instead
+     of raising — the chase executor re-reads the book and re-posts on it. The lib
+     formats `price` to the instrument's tick itself (callers pass a raw float).
+   - `cancel_order(env, symbol, order_id)` — cancel by order_id; idempotent-safe:
+     "already filled / not found" returns a status instead of raising, the caller
+     always re-reads fills afterwards.
+   - `get_order(env, symbol, order_id)` — MUST include `orig_qty` alongside
+     `executed_qty` / `avg_price` / `status` (partial-fill accounting needs the
+     original size, not just the filled part).
+   - `get_bbo(env, symbol)` → `{'bid': float, 'ask': float}` — real top-of-book,
+     never mark/last price (several venues' tickers already carry bid/ask fields —
+     read them; do not substitute `get_mark_price`).
+   - `get_open_orders(env, symbol=None)` — open resting orders; each row MUST
+     carry `symbol` (canonical dashless-uppercase), `order_id` and
+     `client_order_id` — the reconciler's startup sweep matches the
+     `rc<timestamp>` client-id fingerprint and cancels by (symbol, order_id).
+   Spot-capable venues ship the spot twins (`place_spot_limit_order`,
+   `cancel_spot_order`, `get_spot_order` with `orig_qty`, `get_spot_bbo`,
+   `get_spot_open_orders`). New mutating endpoints (cancel, limit place) must be
+   registered in the lib's `_MUTATING_PATHS`/guard classification — the existing
+   `_order_intent` logic keys off reduce semantics, not order type, so limit orders
+   classify correctly without guard changes.
+
 7. **Reconciler wiring is AUTOMATIC for official venues** — the template's
    `get_positions`/`place_order` route through `lib/venue_wiring.py`, which
    detects the bound venue and maps the USD-diff contract (swap + spot) for

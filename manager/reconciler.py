@@ -30,6 +30,10 @@ def _active_state_mtimes():
     # flag and the user expects orders within seconds, not at the next tick.
     halt_path = 'state/HALT'
     mtimes['__halt__'] = os.path.getmtime(halt_path) if os.path.exists(halt_path) else 0
+    # an async execution (TWAP/custom, lib.execute) touches this on completion
+    # so the residual gap converges within one poll, not the 5-min heartbeat
+    kick_path = 'state/execution/kick'
+    mtimes['__execution__'] = os.path.getmtime(kick_path) if os.path.exists(kick_path) else 0
     for name, amt in strategy_amounts().items():
         if amt <= 0:
             continue
@@ -62,20 +66,26 @@ def get_positions():
     return auto_get_positions()
 
 
-def place_order(symbol, signed_diff, asset_spec=None, reduce_only=False):
+def place_order(symbol, signed_diff, asset_spec=None, reduce_only=False,
+                exchange=None, contributors=None):
     """
-    Market order closing the target/actual gap. signed_diff is account
+    Order closing the target/actual gap. signed_diff is account
     currency (USD): > 0 buy, < 0 sell. `symbol` may carry a market suffix
     ("BTCUSDT@spot") — split with lib.portfolio.split_key.
 
-    OFFICIAL VENUES AUTO-WIRE (see get_positions) — lib/venue_wiring maps the
-    USD diff onto the venue's order lib: spot buys sized in quote currency,
-    spot sells capped at inventory, swap converted at the live mark with
-    reduce legs ceiled to a whole lot and capped at the position.
+    OFFICIAL VENUES AUTO-WIRE (see get_positions) — lib.execute.dispatch_order
+    resolves the user's per-strategy execution style (下單方式: market / TWAP /
+    custom, portfolio_config["execution"]) and routes market legs straight
+    through lib/venue_wiring (spot buys sized in quote currency, spot sells
+    capped at inventory, swap converted at the live mark with reduce legs
+    ceiled to a whole lot and capped at the position). TWAP / custom legs run
+    in a background thread — this returns False while one is in flight and the
+    reconcile loop keeps serving every other symbol.
 
     Replace this body ONLY for a venue WITHOUT official libs. Contract:
-      return False  = intentionally skipped (below exchange minimum) — no
-                      Telegram, no orders.jsonl entry, no phantom trade
+      return False  = intentionally skipped (below exchange minimum, or the
+                      leg is executing asynchronously) — no Telegram here,
+                      no phantom trade
       return dict   = exchange-confirmed fills ({'avg_price','executed_qty',
                       'exchange', ...}) — report fills, never intent
       raise         = real failure (network, rejection) — surfaces to the user
@@ -84,8 +94,10 @@ def place_order(symbol, signed_diff, asset_spec=None, reduce_only=False):
     whole lot short); asset_spec passes through from portfolio_config for
     non-fractional instruments (futures contracts etc.).
     """
-    from lib.venue_wiring import auto_place_order
-    return auto_place_order(symbol, signed_diff, asset_spec, reduce_only)
+    from lib.execute import dispatch_order
+    return dispatch_order(symbol, signed_diff, asset_spec=asset_spec,
+                          reduce_only=reduce_only, exchange=exchange,
+                          contributors=contributors)
 
 
 # 這層包裝是基礎設施,交易所無關——實作 get_positions() 時不用碰它。
@@ -138,6 +150,18 @@ HEARTBEAT_PATH = Path('state/heartbeat/reconciler')
 
 if __name__ == '__main__':
     logging.info(f"Reconciler started (poll={POLL_INTERVAL}s, threshold={THRESHOLD})")
+
+    # A crash mid-chase strands a resting limit order on the venue (market/TWAP
+    # slices die clean — only chase posts resting orders). Sweep our own
+    # fingerprinted orders once at startup; best-effort, never blocks the loop.
+    try:
+        from lib.venue_wiring import sweep_orphan_orders
+        _swept = sweep_orphan_orders()
+        if _swept:
+            send_telegram(f"♻️ cancelled {_swept} resting order(s) left by a previous run")
+    except Exception as _e:
+        logging.warning(f"[reconciler] orphan sweep skipped: {_e}")
+
     last_mtimes = {}
     last_reconcile_at = 0.0
     force_next = False  # 下單後強制再對帳一輪:把成交後的實際部位寫進快照,
