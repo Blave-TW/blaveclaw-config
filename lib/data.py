@@ -1,3 +1,4 @@
+import os
 import time
 import threading
 import requests
@@ -106,11 +107,52 @@ def _normalise_index(df):
     return df
 
 
-def _extend_cache_monthly(prefix, params, fetch_raw_fn, start, end):
+def _stale_empty_marker(path, ttl_hours):
+    """True if `path` is an empty-month marker parquet older than `ttl_hours`.
+
+    Only called when a TTL is set. mtime is checked first (cheap stat) so
+    files younger than the TTL never touch the parquet at all; past the age
+    gate only the footer metadata is read (row count) — data pages are never
+    loaded. An unreadable file counts as stale → re-fetch.
+    """
+    try:
+        if time.time() - path.stat().st_mtime <= ttl_hours * 3600:
+            return False
+        import pyarrow.parquet as pq
+        return pq.ParquetFile(path).metadata.num_rows == 0
+    except Exception:
+        return True
+
+
+def _atomic_to_parquet(df, path):
+    """Write `df` to `path` via same-directory tmp file + os.replace.
+
+    Readers (and concurrent writers racing on the same month) never see a
+    half-written parquet: a crash/kill mid-write leaves only a *.tmp file,
+    and os.replace on the same filesystem is atomic.
+    """
+    tmp = path.with_name(f'{path.name}.{os.getpid()}.tmp')
+    try:
+        df.to_parquet(tmp)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _extend_cache_monthly(prefix, params, fetch_raw_fn, start, end,
+                          empty_marker_ttl_hours=None):
     """Monthly-partitioned cache.
 
     Past months (before current month) are stored immutably — fetched once, never re-fetched.
     Current month is delta-updated: load cached, fetch from last bar to now, merge.
+
+    empty_marker_ttl_hours (opt-in): by default (None) an empty past month is
+    marked once and never re-fetched — correct for sources whose history is
+    truly immutable. Sources that backfill history progressively server-side
+    (e.g. twstock minute lines) pass a TTL: an empty-month marker whose mtime
+    is older than the TTL is treated as a cache miss and re-fetched. If the
+    re-fetch is still empty the marker is rewritten (mtime refreshed), so the
+    source is hit at most once per TTL window per empty span.
 
     Directory: cache/{prefix}_{params}/
     Files:     YYYY-MM.parquet  (one per month)
@@ -131,8 +173,16 @@ def _extend_cache_monthly(prefix, params, fetch_raw_fn, start, end):
     # Past months are immutable. Fetch each contiguous run of missing months with a
     # SINGLE ranged call — raw_fn chunks it concurrently internally — instead of one
     # slow sequential call per month, then split the result into per-month parquets.
-    # Empty months still get a marker file so they are never re-fetched.
-    missing = [ym for ym in past_months if not (cache_dir / f'{ym}.parquet').exists()]
+    # Empty months still get a marker file so they are never re-fetched —
+    # unless empty_marker_ttl_hours is set, in which case an expired empty
+    # marker is treated as missing and re-fetched (see docstring).
+    def _needs_fetch(ym):
+        path = cache_dir / f'{ym}.parquet'
+        if not path.exists():
+            return True
+        return (empty_marker_ttl_hours is not None
+                and _stale_empty_marker(path, empty_marker_ttl_hours))
+    missing = [ym for ym in past_months if _needs_fetch(ym)]
     for span in _contiguous_spans(missing):
         span_start = f'{span[0]}-01'
         span_end   = f'{_next_month(span[-1])}-01'   # exclusive upper bound
@@ -145,7 +195,8 @@ def _extend_cache_monthly(prefix, params, fetch_raw_fn, start, end):
             by_month = {}
         for ym in span:
             grp = by_month.get(ym)
-            (grp if grp is not None else pd.DataFrame()).to_parquet(cache_dir / f'{ym}.parquet')
+            _atomic_to_parquet(grp if grp is not None else pd.DataFrame(),
+                               cache_dir / f'{ym}.parquet')
 
     frames = []
     for ym in past_months:
@@ -165,7 +216,7 @@ def _extend_cache_monthly(prefix, params, fetch_raw_fn, start, end):
                 delta  = _normalise_index(delta)
                 merged = pd.concat([cached, delta])
                 merged = merged[~merged.index.duplicated(keep='last')].sort_index()
-                merged.to_parquet(path)
+                _atomic_to_parquet(merged, path)
                 frames.append(merged)
             else:
                 frames.append(cached)
@@ -175,7 +226,7 @@ def _extend_cache_monthly(prefix, params, fetch_raw_fn, start, end):
                 continue
             df = _normalise_index(df)
             df = df[~df.index.duplicated(keep='last')].sort_index()
-            df.to_parquet(path)
+            _atomic_to_parquet(df, path)
             frames.append(df)
 
     if not frames:
@@ -784,15 +835,18 @@ def fetch_twstock_ohlcv(stock_id, schema, headers, start=None, end=None, adjust=
     retried then raised here) instead of silently returning raw prices.
     Raw and adjusted bars are cached in separate monthly cache dirs.
 
-    Coverage is demand-driven — call fetch_twstock_ohlcv_symbols(headers) first
-    to see which stocks already have minute-line data. Any listed stock_id CAN
-    be queried: the first-ever query auto-seeds only ~30 recent days and starts
-    ongoing tracking (next day onward: intraday live bars + daily official
-    correction); deep history (from 2019-01) backfills server-side afterwards.
-    So do NOT request years of history right after first touching a stock —
-    the still-empty past months would be cached locally as permanently empty.
-    Backtest deep history only once the symbol appears in
-    fetch_twstock_ohlcv_symbols and actually returns it.
+    History starts at 2019-01-01 (FinMind TaiwanStockKBar data origin); an
+    earlier start is silently clamped to 2019-01-01 so pre-2019 months are
+    never queried or cached.
+
+    Server-side, the whole market's history is already backfilled from
+    2019-01; only very newly listed stocks are demand-driven — seeded on
+    their first-ever query and queued for deep backfill, so that query may
+    return only recent data, with full history usually landing by the next
+    day. Locally,
+    an empty past month is cached with a 24-hour TTL (not permanently): once
+    the server has the data, the next query after the TTL re-fetches and
+    self-heals the cache.
 
     For 1d: index is Asia/Taipei tz so df.index[-1].date() returns the correct trading date.
     """
@@ -801,10 +855,13 @@ def fetch_twstock_ohlcv(stock_id, schema, headers, start=None, end=None, adjust=
         lookback = _TWSTOCK_MINUTE_MAX_DAYS.get(schema, 31)
         start = (datetime.strptime(end_str, '%Y-%m-%d')
                  - timedelta(days=lookback)).strftime('%Y-%m-%d')
+    if start < '2019-01-01':
+        start = '2019-01-01'
     df = _extend_cache_monthly(
         f'twstock_minute_{schema}', {'id': stock_id, 'adj': int(adjust)},
         lambda s, e: _fetch_twstock_minute_raw(stock_id, schema, s, e, headers, adjust=adjust),
         start, end,
+        empty_marker_ttl_hours=24,
     )
     df = _sanity_check_ohlc(df, f'{stock_id} {schema} twstock minute')
     if schema == '1d' and not df.empty:

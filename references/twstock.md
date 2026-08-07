@@ -131,22 +131,16 @@ OHLC sanity checks).
 - `fetch_twstock_ohlcv_symbols(headers)` → list of stock_ids that already have
   minute-line data server-side.
 
-**Coverage is demand-driven — check `fetch_twstock_ohlcv_symbols` first.** Any listed
-TWSE/TPEx stock_id can be queried: the first-ever query auto-seeds only ~30 recent
-days and enrolls the stock for ongoing tracking (from the next day: intraday
-real-time bars + a daily official correction after market close). Deep history
-(2019-01 →) backfills server-side afterwards — do NOT request years of history right
-after first touching a stock, or the still-empty past months get cached locally as
-permanently empty. Backtest deep history only once the symbol appears in
-`fetch_twstock_ohlcv_symbols` and actually returns it.
+**Coverage.** The whole market is backfilled server-side from 2019-01; requesting an
+earlier `start` is silently clamped to 2019-01-01. Ongoing tracking per stock:
+intraday real-time bars + a daily official correction after market close. Only very
+newly listed stocks are demand-driven: seeded on their first query and queued for
+deep backfill, so that query may return only recent data — full history usually
+lands by the next day. Empty past months are cached locally with a 24-hour TTL
+(not permanently), so the cache self-heals once the server has the data.
 
 ```python
-symbols = fetch_twstock_ohlcv_symbols(headers)
-if '2330' in symbols:
-    df = fetch_twstock_ohlcv('2330', '5m', headers, start='2025-01-01', end='2025-06-30')
-else:
-    # first touch: seed + start tracking; only recent days will come back for now
-    df = fetch_twstock_ohlcv('2330', '1m', headers)
+df = fetch_twstock_ohlcv('2330', '5m', headers, start='2025-01-01', end='2025-06-30')
 ```
 
 ---
