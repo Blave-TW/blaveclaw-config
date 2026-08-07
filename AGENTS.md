@@ -108,6 +108,7 @@ Key rules:
 - All data fetching: `lib/data.py`; execution logic: `lib/execute.py`; param scan: `lib/param_scan.py`; notifications: `lib/notify.py`
 - **Pairing check — only when the run actually notifies via Telegram:** if a strategy sends Telegram messages, check pairing first (see `references/strategy-code.md`) and stop if unpaired. A web-workspace user may never connect Telegram — never block a backtest or a data question on pairing.
 - New reusable logic goes in `lib/` first (e.g. `lib/order_binance.py`), then import in strategy
+- `get_positions()` symbols are canonical dashless uppercase (`BTCUSDT`, never `BTC-USDT`) — normalize both sides before comparing, or the match silently fails as "no position" (see `references/lib.md`)
 - Marketplace strategies: signal logic stays in strategy file; lib/ contains only IO utilities
 
 ## Charts (matplotlib)
