@@ -82,7 +82,7 @@ If unsure between A and C: Type A has ONE symbol and ONE position (long/short/fl
 
 **Type A:** uses `_add_indicators`, `fetch_data`, `compute_signals` three-layer architecture. Long AND short strategies require FOUR independent thresholds + stateful loop — see `references/strategy-code.md`.
 
-**FEE must reflect the real market — never 0, never the template placeholder.** Replace `TEMPLATE_A.py`'s `FEE = 0.0005` with a rate you have verified for the actual symbol/exchange (e.g. Taiwan futures ≈ 0.03% round-trip incl. tax, Binance spot/perp taker ≈ 0.04–0.1%); never copy `FEE` from another strategy without checking it. `FEE = 0` silently overstates every return and Sharpe number — treat it as a bug.
+**FEE must reflect the real market — never 0, never the template placeholder.** Replace `TEMPLATE_A.py`'s `FEE = 0.0005` with a rate you have verified for the actual symbol/exchange (Taiwan index futures: use the per-instrument TXF/MXF/TMF cost table in `references/lib.md` — 0.03% is a conservative ceiling that overtaxes 1m strategies; Binance spot/perp taker ≈ 0.04–0.1%); never copy `FEE` from another strategy without checking it. `FEE = 0` silently overstates every return and Sharpe number — treat it as a bug.
 
 **Type B:** BEFORE any exchange API call, read the relevant `skills/blave-quant/references/` file (e.g. `binance-skill.md`, `bybit-skill.md`) — wrong endpoints and missing broker headers cause silent failures. Also check `lib/` for an existing helper for that exchange before writing one; any new exchange helper goes in `lib/`, not inline in the strategy. **BingX orders: `lib/order_bingx.py` ships implemented (atomic entry+SL/TP, fill confirmation, idempotency) — never hand-write BingX order calls; see `references/lib.md`. Same rule for SinoPac Taiwan stocks: `lib/order_sinopac.py` (odd-lot, fill confirmation — Shioaji rejects silently without it).**
 
@@ -99,6 +99,8 @@ All `lib/data.py` functions accept a `headers` dict. See `references/strategy-co
 ## Exchange API Keys
 
 When the user pastes an exchange API key/secret into chat: write it to `.env` immediately, and never echo the key or secret back in any reply — refer to it as "your API key". Remind the user once that the chat history keeps the plaintext, and recommend a key with trade-only permissions (no withdrawal).
+
+**Never change the Administrator/RDP password** — the dashboard serves the platform-stored copy, so a local reset locks the user out. Read it from the local credentials file instead (path per machine type — see `references/capital-broker.md`).
 
 ## Shared Library (lib/)
 

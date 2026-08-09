@@ -68,7 +68,7 @@ Blave Agent Windows machine** via RDP. The user does NOT need their own Windows 
 Flow (agent orchestrates):
 
 RDP is a standing feature of Windows Blave Agent machines — enabled at provision time, credentials
-shown in the Blave Agent web dashboard (「手動連線資訊」link: IP, Administrator, password + reset).
+shown in the Blave Agent web dashboard (「遠端桌面連線」link: IP, Administrator, password).
 
 1. Agent pre-downloads the issuance tool to the desktop (run as admin) so the user only has to
    run the wizard. **`www2.capital.com.tw` is a dead hostname as of 2026-07-16 (confirmed NXDOMAIN,
@@ -85,20 +85,23 @@ shown in the Blave Agent web dashboard (「手動連線資訊」link: IP, Admini
    inside the same RDP session with the user instead of pre-staging it silently.
 2. Tell the user (Telegram):
    > 請連進你的 Blave Agent 機器桌面，跑一次群益的憑證精靈（約兩分鐘）：
-   > 1. 到 Blave 網站的 Blave Agent 頁面，點「遠端桌面連線」——瀏覽器會直接開你的機器桌面，不用裝任何軟體
+   > 1. 到 Blave 網站的 Blave Agent 頁面，點「遠端桌面連線」看連線資訊（IP／帳號／密碼），用電腦內建的遠端桌面程式（Windows 按 Win+R 輸入 mstsc；Mac 裝 Windows App）連進去
    > 2. 點開桌面上的 RAWinApp.exe（我已下載好）
    > 3. 輸入身分證字號＋交易密碼登入，手機會收到簡訊驗證碼，照精靈完成憑證安裝
    > 4. 完成後跟我說一聲
    The GUI wizard itself cannot be driven by the agent (no GUI automation on the machine; the
    SMS OTP goes to the user's phone) — this 2-minute RDP session is the one manual step.
-   **Fallback** (dashboard card not available yet / RDP not enabled on an older machine): enable
-   it directly —
-   ```powershell
-   net user Administrator "<random-strong-password>"
-   Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
-   Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
-   ```
-   and send the user the IP + password yourself.
+   **NEVER change the Administrator password** (`net user Administrator ...` / `Set-LocalUser`):
+   the dashboard's 「遠端桌面連線」card serves the password stored platform-side, so a locally
+   changed password silently locks the user out of their own machine (this exact incident,
+   2026-08-08). RDP is already enabled and the password already set at provision time on every
+   Blave Agent Windows machine. If you need the password yourself, read it locally from
+   `C:\blave-agent\credentials\rdp_password.txt` (Blave Agent machines; BlaveClaw machines use
+   `C:\openclaw\credentials\rdp_password.txt`; the oldest machines keep it in `.env` as
+   `admin_password` and have no dashboard card). If no password can be found in any of those
+   places, enabling RDP at the OS level (`fDenyTSConnections=0` + firewall rule) is fine — it
+   does not touch the password — but never "fix" access by resetting the password; report to
+   the user that the password is unavailable instead.
 3. Certificate facts: needs 身分證字號 + 交易密碼 + SMS OTP; user sets a certificate password
    during issuance (issuance-time only — not needed at API runtime); **valid 1 year**, renew via
    the same RAWinApp flow (renewable from ~1 month before expiry) — warn the user it recurs.
@@ -123,8 +126,9 @@ Practical consequence for the agent: **you cannot run Capital login/order code d
 own shell** (the gateway service context) or via SSH — it will 602 even though everything is
 installed correctly. Always execute Capital-touching scripts through a password-logon vehicle:
 the NSSM service (production path) or a one-shot `schtasks /create ... /ru Administrator
-/rp <password> /rl HIGHEST` + `/run` + `/delete` (ad-hoc testing path; password is in `.env` as
-`admin_password`, or `C:\openclaw\credentials\rdp_password.txt` on newer machines).
+/rp <password> /rl HIGHEST` + `/run` + `/delete` (ad-hoc testing path; read the password from
+`C:\blave-agent\credentials\rdp_password.txt` — `C:\openclaw\credentials\rdp_password.txt` on
+BlaveClaw machines, or `.env` `admin_password` on the oldest ones. Never reset it — see Step 2).
 
 ---
 

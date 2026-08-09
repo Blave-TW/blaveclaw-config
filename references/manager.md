@@ -150,9 +150,11 @@ to Administrator before starting it:
 ```
 nssm set blaveclaw-reconciler ObjectName .\Administrator "<Administrator password>"
 ```
-Read the password from `C:\openclaw\credentials\rdp_password.txt` on the machine itself (agent has
-local read access — no need to ask the user, they'd only be repeating what's already on their own
-「遠端桌面連線資訊」dashboard card). No certificate export/import needed — this replaces the old
+Read the password from `C:\blave-agent\credentials\rdp_password.txt` on the machine itself
+(`C:\openclaw\credentials\rdp_password.txt` on BlaveClaw machines; agent has local read access —
+no need to ask the user, they'd only be repeating what's already on their own
+「遠端桌面連線」dashboard card). Never change this password — the dashboard serves the
+platform-stored copy, so a local reset locks the user out. No certificate export/import needed — this replaces the old
 POC guidance about moving the cert to a different account store.
 
 **After starting the reconciler, register it for health monitoring** — add to `state/deployments.json` (create the file if missing):
