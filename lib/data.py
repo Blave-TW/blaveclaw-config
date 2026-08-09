@@ -367,6 +367,17 @@ def _fetch_kline_raw(symbol, interval, start, end, headers):
     return df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float)
 
 
+def normalize_symbol(symbol):
+    """Any venue/ccxt symbol form → platform canonical dashless uppercase
+    ('BTC/USDT', 'BTC-USDT', 'BTC_USDT', 'btcusdt' → 'BTCUSDT').
+
+    THE single normalization recipe (the get_positions() symbol contract in
+    references/lib.md quotes it) — a new venue whose symbol format introduces a
+    separator not covered here must extend this function, not a local copy.
+    """
+    return symbol.replace('/', '').replace('-', '').replace('_', '').upper()
+
+
 def fetch_kline(symbol, interval, start, end, headers):
     """Fetch OHLCV kline data from Blave API with date chunking and local cache.
 
@@ -374,6 +385,9 @@ def fetch_kline(symbol, interval, start, end, headers):
     45-day lookback max, real volume. Cache namespace is kline2 — the old
     kline cache has Volume hard-zeroed and must not be mixed with real volume.
     """
+    # Venue forms like 'BTC/USDT' → Binance 'BTCUSDT'; the API 400s on
+    # separator forms and the separator would leak into the cache dir name.
+    symbol = normalize_symbol(symbol)
     _validate_sub_5min_start(interval, start)
     df = _extend_cache_monthly(
         'kline2', {'symbol': symbol, 'period': interval},
@@ -385,12 +399,15 @@ def fetch_kline(symbol, interval, start, end, headers):
 
 def fetch_kline_batch(symbols, interval, start, end, headers):
     """Batch fetch OHLCV kline for many symbols via /kline/batch (chunk_size=20).
-    Returns dict {symbol: DataFrame(Open, High, Low, Close, Volume)}.
+    Returns dict {symbol: DataFrame(Open, High, Low, Close, Volume)} — keys are
+    the NORMALIZED canonical symbols (see normalize_symbol), not the caller's
+    original strings: index the result with 'BTCUSDT' even if you passed 'BTC/USDT'.
 
     Uses the same monthly cache dir naming as fetch_kline ('kline2_{interval}_{symbol}')
     so single-symbol and batch calls share cache — a symbol already cached via
     fetch_kline is a warm hit here too, and vice versa. Warm ids are extended through
     the batch endpoint too (not one call per symbol) — see _fetch_batch_cached."""
+    symbols = [normalize_symbol(s) for s in symbols]
     _validate_sub_5min_start(interval, start)
     def _parse(records):
         df = pd.DataFrame(records)

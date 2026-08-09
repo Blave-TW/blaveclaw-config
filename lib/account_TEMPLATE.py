@@ -36,8 +36,8 @@ def get_positions(env: dict) -> list:
     'symbol' MUST be canonical dashless uppercase ('BTCUSDT', never 'BTC-USDT' /
     'BTC_USDT') — every shipped account_*.py normalizes to this and the
     reconciler keys target/actual on it. Callers comparing against a venue-format
-    symbol must normalize BOTH sides first
-    (sym.replace('-', '').replace('_', '').upper()); a raw
+    symbol must normalize BOTH sides first via lib.data.normalize_symbol (the
+    single recipe — do not hand-roll replace chains); a raw
     comparison never matches and silently reads as "no position" (caused a live
     incident: strategy re-opened on top of an existing position).
 
