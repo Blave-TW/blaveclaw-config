@@ -233,56 +233,51 @@ def get_flows(env: dict, since: int) -> list:
 
     Returns [{'ts', 'direction' ('in'/'out'), 'currency', 'amount', 'txid'}, ...]
     ascending by ts; amounts always positive. COMPLETED records only — the
-    endpoints mirror Binance's capital shape (verified against BingX's official
-    api-ai-skills reference + ccxt): deposits status 1 or 6 (the official
-    reference's "1=Not credited" wording conflicts with ccxt's executed
-    mapping AND its own status-6-only alternative; ccxt maps both 1 and 6 to
-    completed, and a live-shape sample shows status 1 with 12/12 confirms —
-    code wins), withdrawals status 6 (Completed; 4=review, 5=failed).
-    transferType is not in BingX's documented response, but is skipped as
-    internal when it ever appears non-zero (Binance-mirror semantics) — only
-    real external flows count for netting equity-snapshot PnL.
+    endpoints mirror Binance's capital field names but NOT its transferType
+    semantics: on BingX capital history, transferType is a direction flag
+    (0=deposit, 1=withdrawal — how ccxt's parse_transaction reads it), NOT
+    Binance's 0=external/1=internal. So it is NOT a filter — every withdrawal
+    carries transferType=1 (verified on a live account 2026-08-05: a real
+    48.5-USDT TRC20 on-chain withdrawal came back status=6, transferType=1);
+    filtering on it drops all withdrawals. These capital endpoints are on-chain
+    only — same-exchange internal transfers (spot↔swap↔funding, sub-account)
+    live on the separate Asset-transfer-records endpoint and never appear here,
+    so status alone selects the completed external flows.
+
+    Completed = deposits status 1 or 6 (the official reference's "1=Not
+    credited" wording conflicts with ccxt's executed mapping AND its own
+    status-6-only alternative; ccxt maps both 1 and 6 to completed, and a
+    live-shape sample shows status 1 with 12/12 confirms — code wins),
+    withdrawals status 6 (Completed; 4=review, 5=failed).
 
     No documented window cap; 89-day windows are used anyway (mirror caution).
     `txid` is the chain tx hash; withdrawals fall back to BingX's record id,
-    deposits (which have no record id field) to a deterministic synthetic key.
+    deposits (which have no record id field) to a deterministic synthetic key
+    derived ONLY from invariant deposit fields — never from pull/pagination
+    order, or an overlapping re-pull would mint a different key for the same
+    deposit and the platform would double-count it.
     Withdrawal `amount` excludes the network fee (transactionFee separate).
     """
     since_ms = int(since) * 1000
     now_ms = int(time.time() * 1000)
     flows = []
+    dep_rows = []  # deposits gathered first, synthetic keys assigned deterministically below
     window = 89 * 24 * 3600 * 1000
     start = since_ms
-    synth = {}  # synthetic-key base -> count (dedup for hash-less deposits)
     while start <= now_ms:
         end = min(start + window, now_ms)
         for d in _flow_pages(env, "/openApi/api/v3/capital/deposit/hisrec", start, end):
-            if int(d.get("status") or -1) not in (1, 6) \
-                    or int(d.get("transferType") or 0) != 0:
+            # status only — transferType is a direction flag here (0=deposit),
+            # not internal/external; internal transfers use a different endpoint
+            if int(d.get("status") or -1) not in (1, 6):
                 continue
-            amt = float(d.get("amount") or 0)
-            if amt <= 0:
+            if float(d.get("amount") or 0) <= 0:
                 continue
-            txid = d.get("txId")
-            if not txid:
-                # deterministic synthetic key — network/address widen it, and a
-                # per-pull sequence suffix keeps two same-coin/amount/ms rows
-                # (exchange-side split credits) from colliding into one dedup key
-                base = "bingx-dep-" + "-".join(
-                    str(d.get(k) or "") for k in
-                    ("coin", "insertTime", "amount", "network", "address"))
-                n = synth[base] = synth.get(base, 0) + 1
-                txid = base if n == 1 else f"{base}-{n}"
-            flows.append({
-                "ts": _flow_ts(d),
-                "direction": "in",
-                "currency": d.get("coin") or "",
-                "amount": amt,
-                "txid": txid,
-            })
+            dep_rows.append(d)
         for w in _flow_pages(env, "/openApi/api/v3/capital/withdraw/history", start, end):
-            if int(w.get("status") or -1) != 6 \
-                    or int(w.get("transferType") or 0) != 0:
+            # status only — every withdrawal carries transferType=1 here
+            # (direction flag, not internal); filtering it drops all withdrawals
+            if int(w.get("status") or -1) != 6:
                 continue
             amt = float(w.get("amount") or 0)
             if amt <= 0:
@@ -295,6 +290,39 @@ def get_flows(env: dict, since: int) -> list:
                 "txid": w.get("txId") or str(w.get("id") or ""),
             })
         start = end + 1
+
+    # Synthetic txid for hash-less deposits. It MUST be identical across
+    # overlapping re-pulls (REPULL_OVERLAP re-fetches the same rows) or the
+    # platform double-counts the deposit — so the key comes ONLY from invariant
+    # fields, never encounter/pagination order. Genuinely indistinguishable
+    # duplicates (same coin/insertTime/amount/network/address — e.g. exchange
+    # split credits) are ranked within a CONTENT-sorted group, not the order the
+    # API happened to return them: the resulting txid SET is then stable across
+    # pulls even if two identical rows swap positions (they are fungible, so
+    # which physical row takes -1 vs -2 is irrelevant — dedup only sees the set).
+    synth_groups = {}
+    for d in dep_rows:
+        txid = d.get("txId")
+        if txid:
+            flows.append({
+                "ts": _flow_ts(d), "direction": "in",
+                "currency": d.get("coin") or "", "amount": float(d.get("amount") or 0),
+                "txid": str(txid),
+            })
+        else:
+            base = "bingx-dep-" + "-".join(
+                str(d.get(k) or "") for k in
+                ("coin", "insertTime", "amount", "network", "address"))
+            synth_groups.setdefault(base, []).append(d)
+    for base, rows in synth_groups.items():
+        rows.sort(key=lambda r: repr(sorted((str(k), str(v)) for k, v in r.items())))
+        for i, d in enumerate(rows):
+            flows.append({
+                "ts": _flow_ts(d), "direction": "in",
+                "currency": d.get("coin") or "", "amount": float(d.get("amount") or 0),
+                "txid": base if i == 0 else f"{base}-{i + 1}",
+            })
+
     flows = [f for f in flows if f["ts"] >= int(since)]
     flows.sort(key=lambda f: f["ts"])
     return flows
