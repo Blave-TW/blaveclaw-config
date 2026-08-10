@@ -187,6 +187,7 @@ oi_series = front_month.set_index("date")["open_interest"]
 - `contract_date` 含 `/` 的為價差合約（e.g. `202505/202506`），通常過濾掉
 - `trading_session = "position"` 為正規盤，`"after_market"` 為盤後交易
 - 近月連續序列需自行用成交量或到期日判斷；TXF 分K 仍使用 `/twfutures/ohlcv/TXF/<schema>`
+- `fetch_twfutures_ohlcv` 也接受 Shioaji 式 `R1` 連續月命名（`TXFR1`→`TXF` 自動映射，底層資料本來就是 R1 連續序列）；`R2`（次月連續）不是這條資料、不映射。映射只在 lib 層——直接打 API 端點仍須用 `TXF` 這種無後綴名稱，`TXFR1` 會 400。查 `fetch_stock_futures_ohlcv_symbols` 白名單前也要先去掉 `R1` 後綴（它回的是無後綴名稱）
 
 ---
 

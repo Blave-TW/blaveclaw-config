@@ -263,6 +263,8 @@ latest = per.iloc[-1]        # dividend_yield / PER / PBR
 當日資料在盤後直接取自 TWSE／TPEx 官方報表；上櫃比上市晚幾小時發布，未發布時退回 FinMind
 （會慢一天）。ETF 沒有 PE 資料——官方報表與 FinMind 都不含，回傳空 DataFrame。
 
+多支股票（價值選股）用 `fetch_twstock_per_batch(stock_ids, start, end, headers)`，見下方 Batch 資料函式。
+
 ---
 
 ## 借券成交明細
@@ -342,6 +344,8 @@ Notes:
 ```python
 from lib.data import (
     fetch_twstock_price_adj_batch,              # (stock_ids, start, end, headers) → Open/Close
+    fetch_twstock_price_batch,                  # (stock_ids, start, end, headers) → 原始日K OHLCV（含 High/Low）
+    fetch_twstock_per_batch,                    # (stock_ids, start, end, headers) → dividend_yield/PER/PBR
     fetch_twstock_institutional_batch,          # (stock_ids, start, end, headers) → foreign_net 及原始欄位
     fetch_twstock_shareholding_batch,           # (stock_ids, start, end, headers) → shareholders 欄
     fetch_twstock_foreign_shareholding_batch,   # (stock_ids, start, end, headers) → 外資持股比率/股數
@@ -363,6 +367,25 @@ from lib.data import (
 
 分點資料（非 batch，按 trader 維度）：
 - `fetch_twstock_trader_flows(trader_id, start, end, headers)` → MultiIndex (date, stock_id)，`net` 欄（買 - 賣股數）；trader_id 例如 `'9217'`（凱基-松山）
+
+---
+
+## 全市場選股（Screening）
+
+**絕不對多支股票 fan-out 單檔 fetcher（含自開 ThreadPool 平行打）** —— 單檔 endpoint 有
+rate limit，300 支就會 429 退避到分鐘級；上表的 batch 函式一次 50 支、全市場約 40 個請求。
+
+流程走漏斗，先縮池再拉時間序列（實測 uid=1 機器）：
+
+1. **縮池（秒級）**：`fetch_twstock_list`（產業別；注意 list **沒有市值欄**——市值在逐股的
+   `/market_value/` 端點，只能對縮完的池子逐支拉，不能拿來當第一層濾網）、`fetch_twstock_quote_batch`
+   （全市場漲幅/量比約 24s）、`fetch_twstock_monthly_revenue_batch`／`fetch_twstock_per_batch`
+   （基本面/價值條件）→ 縮到幾百支。
+2. **時間序列條件（每百支約 10–30s）**：對縮完的池子用
+   `fetch_twstock_price_batch`（KD/突破等需 High/Low 的技術條件）、
+   `fetch_twstock_price_adj_batch`（均線/報酬類）、`fetch_twstock_institutional_batch`（法人連買）。
+3. 全市場直接拉時間序列（不縮池）一次約 2–3 分鐘——用戶明確要全市場掃描才這樣做，
+   並先講清楚要等多久。
 
 ---
 

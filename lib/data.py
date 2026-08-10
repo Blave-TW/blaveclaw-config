@@ -1449,7 +1449,7 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
                 body = r.json()
                 failed = body.get('failed', [])
                 if failed:
-                    print(f'  [batch] {batch_url} rate-limited after retries, dropped: {failed}')
+                    print(f'  [batch] {batch_url} server-side fetch failed (rate limit or upstream error), dropped: {failed}')
                     failed_ids.update(failed)
                 for _id, records in body.get('data', {}).items():
                     if records:
@@ -1565,6 +1565,39 @@ def fetch_twstock_price_adj_batch(stock_ids, start, end, headers):
         return df.replace(0, float('nan')).ffill()
     return _fetch_twstock_cached_batch(
         'twstock_price', 'price_adj', _fetch_twstock_price_raw, _parse,
+        stock_ids, start, end, headers)
+
+
+def fetch_twstock_price_batch(stock_ids, start, end, headers):
+    """Batch fetch 台股原始日K OHLCV（未除權息）. Returns dict {stock_id: DataFrame(Open,
+    High, Low, Close, Volume)}. Same data and cache as fetch_twstock_price — use for
+    High/Low-based screens (KD, breakout, range) across many stocks; do NOT use for
+    backtesting across ex-dividend dates (use fetch_twstock_price_adj_batch)."""
+    def _parse(records):
+        df = pd.DataFrame(records)
+        df['date'] = pd.to_datetime(df['date'])
+        cols = [c for c in ['open', 'high', 'low', 'close', 'volume'] if c in df.columns]
+        df = df.set_index('date').sort_index()[cols].rename(
+            columns={'open': 'Open', 'high': 'High', 'low': 'Low',
+                     'close': 'Close', 'volume': 'Volume'}).astype(float)
+        return df.replace(0, float('nan')).ffill()
+    results = _fetch_twstock_cached_batch(
+        'twstock_price_nonadj', 'price', _fetch_twstock_price_nonadj_raw, _parse,
+        stock_ids, start, end, headers)
+    return {sid: _sanity_check_ohlc(df, f'{sid} twstock price')
+            for sid, df in results.items()}
+
+
+def fetch_twstock_per_batch(stock_ids, start, end, headers):
+    """Batch fetch 台股每日本益比/股價淨值比/殖利率. Returns dict {stock_id:
+    DataFrame(dividend_yield, PER, PBR)}. Same data and cache as fetch_twstock_per —
+    use for value screens (殖利率 > x%, PER < y) across many stocks."""
+    def _parse(records):
+        df = pd.DataFrame(records)
+        df['date'] = pd.to_datetime(df['date'])
+        return df.set_index('date').sort_index()
+    return _fetch_twstock_cached_batch(
+        'twstock_per', 'per', _fetch_twstock_per_raw, _parse,
         stock_ids, start, end, headers)
 
 
@@ -1823,8 +1856,15 @@ def fetch_twfutures_ohlcv(symbol, schema, start, end, headers):
     schema: '1d' | '1m' | '5m' | '15m' | '30m' | '60m'
     Volume is in contracts (口數).
 
+    A Shioaji-style 'R1' suffix (TXFR1, MXFR1, CDFR1…) is accepted and mapped to
+    the endpoint's own name (TXF…): the underlying series IS the R1 continuous
+    near-month, only the naming differs. 'R2' (next-month continuous) is NOT this
+    data and is deliberately not mapped — it still 400s server-side.
+
     For 1d: index is Asia/Taipei tz so df.index[-1].date() returns the correct trading date.
     """
+    if symbol.endswith('R1') and len(symbol) > 2:
+        symbol = symbol[:-2]
     df = _extend_cache_monthly(
         f'twfutures_{schema}', {'symbol': symbol},
         lambda s, e: _fetch_twfutures_raw_smart(symbol, schema, s, e, headers),
@@ -2006,6 +2046,10 @@ def fetch_stock_futures_ohlcv_symbols(headers):
 
     Call this before fetch_twfutures_ohlcv on a stock future to check coverage
     up front, instead of trial-and-erroring against the 400 response.
+
+    Entries are suffix-less names ('TXF', 'CDF') — strip a Shioaji-style 'R1'
+    suffix before the membership check (fetch_twfutures_ohlcv itself accepts
+    'CDFR1' and maps it, but 'CDFR1' will never appear in this list).
     """
     r = _retry_get(f'{BASE}/studio/market/twfutures/ohlcv/symbols', headers=headers, timeout=30)
     return r.json().get('data', [])
