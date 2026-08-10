@@ -103,7 +103,8 @@ shown in the Blave Agent web dashboard (「遠端桌面連線」link: IP, Admini
    does not touch the password — but never "fix" access by resetting the password; report to
    the user that the password is unavailable instead.
 3. Certificate facts: needs 身分證字號 + 交易密碼 + SMS OTP; user sets a certificate password
-   during issuance (issuance-time only — not needed at API runtime); **valid 1 year**, renew via
+   during issuance (not needed at API runtime, but keep it — it protects the desktop `.pfx`
+   backup and private-key recovery needs both, see Step 5); **valid 1 year**, renew via
    the same RAWinApp flow (renewable from ~1 month before expiry) — warn the user it recurs.
 
 **CONFIRMED (2026-07-16 POC, uid 12890):** SKCOM binds the certificate to the **Windows identity
@@ -146,8 +147,16 @@ the desktop for the user to double-click.**
    `Expand-Archive -Path <zip> -DestinationPath C:\skcom\x64\` — keeping `SKCOM.dll` together
    with its certificate/quote sub-components in one folder (they must be co-located for
    registration to work).
-3. Agent installs the Microsoft VC++ redistributable (`vc_redist.x64.exe`, bundled in the zip),
-   silently: `Start-Process C:\skcom\x64\vc_redist.x64.exe -ArgumentList '/install','/quiet','/norestart' -Wait`.
+3. Agent installs the **VC++ 2010** redistributable — `CTSecuritiesATL.dll` (the cert component)
+   links against `mfc100.dll`/`msvcr100.dll`, absent on a fresh Server 2022 image; without them
+   `regsvr32 SKCOM.dll` fails with exit code 3 (LoadLibrary) and CreateObject gives "Class not
+   registered". The 2.13.58 component zip does NOT bundle it — `vcredist_x64.exe` ships in the
+   separate `SKCOMVerifyDJ` zip instead, **and that installer (both `/q` install and `/x` extract)
+   hung past a 120 s timeout in a non-interactive SSH session and had to be killed** (measured
+   2026-08-09). Install via `choco install vcredist2010 -y --no-progress` instead (choco verified
+   present on the 12890 box; whether every Windows base image ships it is unverified — bootstrap
+   choco first if missing), then verify `Test-Path C:\Windows\System32\mfc100.dll` before
+   registering.
 4. Agent runs `元件\x64\install.bat` **as administrator** (registers SKCOM.dll via regsvr32).
 5. **Bitness must match Python**: x64 Python ↔ x64 component (mismatch → "Class not registered").
 6. Agent verifies with the bundled `SKCOMTester.exe` CLI/silent mode if available; otherwise ask
@@ -205,8 +214,27 @@ print(code, center.SKCenterLib_GetReturnCodeMessage(code))
 
 **成功**：`code == 0`（`2003` = 已登入，也算成功）。
 **失敗常見代碼**：300 密碼錯誤 / 307 密碼被鎖定 / 600 憑證錯誤（未安裝或有過期舊憑證，刪除過期的那張）/
-604 憑證過期或已註銷 / 2017 未先註冊 OnReplyMessage。
+602 憑證驗證失敗（見下）/ 604 憑證過期或已註銷 / 2017 未先註冊 OnReplyMessage。
 `SKCenterLib_GetLastLogInfo()` gives more detail on failures.
+
+**602 with a cert visibly in the store — check for an orphaned private key** (measured 2026-08-09,
+uid 12890). First rule out the two known 602 causes above (wrong Windows identity, key-auth SSH
+instead of a password logon — see Step 2's CONFIRMED notes), and run the diagnostic itself under
+the schtasks password vehicle too — a key-auth session cannot unlock DPAPI, so certutil there can
+misreport a healthy key. Then: `certutil -user -store My` showing **"Missing stored keyset"**
+means the cert lost its private key. Mechanism: an administrative Administrator password reset
+(`net user`/`Set-LocalUser`, the exact thing Step 2 bans) breaks DPAPI access to keys created
+before the reset — the likeliest cause in the measured case (timeline matches the 2026-08-08
+reset incident), though not isolated experimentally. Fix from the issuance-time `.pfx` backup
+(observed on the desktop after the wizard; its password is the **certificate password** the user
+chose in the wizard — NOT the trading password):
+```powershell
+certutil -user -delstore My <serial>       # delete the keyless entry FIRST — importing over it
+                                           # merges and keeps the broken key link
+certutil -user -p <cert-password> -importpfx <backup.pfx>
+```
+Run under a password logon (schtasks vehicle) and confirm `certutil -user -store My` now says
+"Encryption test passed". No pfx backup or password forgotten → re-run the RAWinApp wizard.
 
 ---
 
@@ -245,7 +273,11 @@ print("Stock accounts:", OrderEvents.stock_accounts)
 ```
 
 Empty for a market → that market's declaration isn't active yet (next-day for futures; unconfirmed
-for securities, see Step 1) or no account of that type exists under this ID.
+for securities, see Step 1) or **no account of that type exists under this ID at all** — signing
+the futures declaration does not create a futures account; a user with only a securities account
+gets no `TF` row ever, and the fix is opening a 期貨戶, not waiting (measured 2026-08-10). Other
+market codes seen live: `OS` = overseas securities (複委託); ignore rows that are neither `TF` nor
+`TS`.
 
 ---
 
