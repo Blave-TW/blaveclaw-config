@@ -11,6 +11,7 @@ separate accounts with no auto-transfer, so a spot-only user's balance won't
 show up here.
 """
 
+import calendar
 import hashlib
 import hmac
 import time
@@ -34,6 +35,10 @@ def _call(path_and_query, headers):
         try:
             r = requests.get(f"{base}{path_and_query}", headers=headers, timeout=10)
             data = r.json()
+            # /openApi/api/v3/capital/* history endpoints return a bare JSON
+            # array with no {code,msg,data} envelope (official docs + ccxt)
+            if isinstance(data, list):
+                return data
             if data.get("code") != 0:
                 raise Exception(f"BingX error {data.get('code')}: {data.get('msg')}")
             return data.get("data")
@@ -185,6 +190,114 @@ def get_holdings(env: dict) -> list:
     out = [h for h in out if h["usdt_value"] is None or abs(h["usdt_value"]) >= 0.1]
     out.sort(key=lambda h: -(h["usdt_value"] or 0))
     return out
+
+
+def _flow_pages(env, path, start_ms, end_ms):
+    """All rows of a capital-history endpoint for one time window, offset-paged
+    (limit default AND max 1000). Raises rather than silently truncating."""
+    rows, offset = [], 0
+    while True:
+        page = _signed_get(path, env, {"startTime": start_ms, "endTime": end_ms,
+                                       "limit": 1000, "offset": offset}) or []
+        rows.extend(page)
+        if len(page) < 1000:
+            return rows
+        offset += 1000
+        if offset > 20000:
+            raise Exception(f"BingX flows: >20k records in one window | {path}")
+
+
+def _flow_ts(row):
+    """Deposits carry insertTime (ms); withdrawals carry applyTime
+    ("YYYY-MM-DD HH:MM:SS", read as UTC — same Binance-mirror shape ccxt
+    parses with parse8601). Fail-loud WITH context: a bare strptime("")
+    ValueError points at no particular record."""
+    if row.get("insertTime"):
+        return int(row["insertTime"]) // 1000
+    apply_time = str(row.get("applyTime") or "")
+    if apply_time.isdigit() and apply_time:
+        return int(apply_time) // 1000
+    try:
+        return calendar.timegm(time.strptime(apply_time[:19].replace("T", " "),
+                                             "%Y-%m-%d %H:%M:%S"))
+    except ValueError:
+        raise Exception(
+            f"BingX flows: record has no parsable timestamp "
+            f"(insertTime missing, applyTime={apply_time!r}): "
+            f"coin={row.get('coin')} id={row.get('id')} txId={row.get('txId')} "
+            f"amount={row.get('amount')}")
+
+
+def get_flows(env: dict, since: int) -> list:
+    """External (on-chain) deposit/withdraw records since `since` (epoch secs).
+
+    Returns [{'ts', 'direction' ('in'/'out'), 'currency', 'amount', 'txid'}, ...]
+    ascending by ts; amounts always positive. COMPLETED records only — the
+    endpoints mirror Binance's capital shape (verified against BingX's official
+    api-ai-skills reference + ccxt): deposits status 1 or 6 (the official
+    reference's "1=Not credited" wording conflicts with ccxt's executed
+    mapping AND its own status-6-only alternative; ccxt maps both 1 and 6 to
+    completed, and a live-shape sample shows status 1 with 12/12 confirms —
+    code wins), withdrawals status 6 (Completed; 4=review, 5=failed).
+    transferType is not in BingX's documented response, but is skipped as
+    internal when it ever appears non-zero (Binance-mirror semantics) — only
+    real external flows count for netting equity-snapshot PnL.
+
+    No documented window cap; 89-day windows are used anyway (mirror caution).
+    `txid` is the chain tx hash; withdrawals fall back to BingX's record id,
+    deposits (which have no record id field) to a deterministic synthetic key.
+    Withdrawal `amount` excludes the network fee (transactionFee separate).
+    """
+    since_ms = int(since) * 1000
+    now_ms = int(time.time() * 1000)
+    flows = []
+    window = 89 * 24 * 3600 * 1000
+    start = since_ms
+    synth = {}  # synthetic-key base -> count (dedup for hash-less deposits)
+    while start <= now_ms:
+        end = min(start + window, now_ms)
+        for d in _flow_pages(env, "/openApi/api/v3/capital/deposit/hisrec", start, end):
+            if int(d.get("status") or -1) not in (1, 6) \
+                    or int(d.get("transferType") or 0) != 0:
+                continue
+            amt = float(d.get("amount") or 0)
+            if amt <= 0:
+                continue
+            txid = d.get("txId")
+            if not txid:
+                # deterministic synthetic key — network/address widen it, and a
+                # per-pull sequence suffix keeps two same-coin/amount/ms rows
+                # (exchange-side split credits) from colliding into one dedup key
+                base = "bingx-dep-" + "-".join(
+                    str(d.get(k) or "") for k in
+                    ("coin", "insertTime", "amount", "network", "address"))
+                n = synth[base] = synth.get(base, 0) + 1
+                txid = base if n == 1 else f"{base}-{n}"
+            flows.append({
+                "ts": _flow_ts(d),
+                "direction": "in",
+                "currency": d.get("coin") or "",
+                "amount": amt,
+                "txid": txid,
+            })
+        for w in _flow_pages(env, "/openApi/api/v3/capital/withdraw/history", start, end):
+            if int(w.get("status") or -1) != 6 \
+                    or int(w.get("transferType") or 0) != 0:
+                continue
+            amt = float(w.get("amount") or 0)
+            if amt <= 0:
+                continue
+            flows.append({
+                "ts": _flow_ts(w),
+                "direction": "out",
+                "currency": w.get("coin") or "",
+                "amount": amt,
+                "txid": w.get("txId") or str(w.get("id") or ""),
+            })
+        start = end + 1
+    flows = [f for f in flows if f["ts"] >= int(since)]
+    flows.sort(key=lambda f: f["ts"])
+    return flows
 
 
 def get_positions(env: dict) -> list:

@@ -149,6 +149,80 @@ def get_holdings(env: dict) -> list:
     return out
 
 
+def _flow_pages(env, path, start, end):
+    """All rows of a wallet-history endpoint for one time window, offset-paged
+    (limit max 500 per the official SDK). Raises rather than truncating."""
+    rows, offset = [], 0
+    while True:
+        page = _request(env, "GET", path,
+                        query=f"from={start}&to={end}&limit=500&offset={offset}") or []
+        rows.extend(page)
+        if len(page) < 500:
+            return rows
+        offset += 500
+        if offset > 10000:
+            raise Exception(f"Gate.io flows: >10k records in one window | {path}")
+
+
+def _flow_currency(r):
+    """Deposit records may carry a legacy multichain currency id ('USDT_TRX');
+    strip the suffix only when it matches the record's chain — anything else
+    is kept verbatim (an odd label beats a wrong merge)."""
+    cur = r.get("currency") or ""
+    if "_" in cur:
+        base, suffix = cur.rsplit("_", 1)
+        if suffix.upper() == (r.get("chain") or "").upper():
+            return base
+    return cur
+
+
+def get_flows(env: dict, since: int) -> list:
+    """External (on-chain) deposit/withdraw records since `since` (epoch secs).
+
+    Returns [{'ts', 'direction' ('in'/'out'), 'currency', 'amount', 'txid'}, ...]
+    ascending by ts; amounts always positive. COMPLETED records only — status
+    DONE (which also excludes BCODE = GateCode, an off-chain value transfer);
+    'b'-prefixed record ids (GateCode) are skipped defensively too. These
+    wallet endpoints list on-chain records only — same-exchange internal
+    transfers (/wallet/transfers, sub-account, push/UID transfers) live on
+    separate endpoints and never appear here, so only real external flows
+    count for netting equity-snapshot PnL.
+
+    from/to are epoch SECONDS, window capped at 30 days (official SDK:
+    "Record query time range cannot exceed 30 days"; default is last 7 days,
+    so both bounds are always passed) — the pull slides 29-day windows from
+    `since` to now. `txid` is the chain tx hash, falling back to Gate's own
+    record id. Withdrawal `amount` INCLUDES the fee (ccxt subtracts `fee` to
+    get the net-received figure), i.e. it is already the full balance debit.
+    """
+    now = int(time.time())
+    flows = []
+    window = 29 * 24 * 3600
+    for path, direction in (("/wallet/deposits", "in"),
+                            ("/wallet/withdrawals", "out")):
+        start = int(since)
+        while start <= now:
+            end = min(start + window, now)
+            for r in _flow_pages(env, path, start, end):
+                rid = str(r.get("id") or "")
+                if (r.get("status") or "") != "DONE" or rid.startswith("b"):
+                    continue
+                amt = float(r.get("amount") or 0)
+                ts = int(float(r.get("timestamp") or 0))
+                if amt <= 0 or ts < int(since):
+                    continue
+                flows.append({
+                    "ts": ts,
+                    "direction": direction,
+                    "currency": _flow_currency(r),
+                    "amount": amt,
+                    "txid": r.get("txid") or rid,
+                })
+            start = end + 1
+    flows.sort(key=lambda f: f["ts"])
+    return flows
+
+
 _mult_cache = {}  # contract -> float quanto_multiplier (per-process)
 
 

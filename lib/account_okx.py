@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 from datetime import datetime, timezone
+from urllib.parse import urlencode
 
 import requests
 
@@ -148,6 +149,73 @@ def get_holdings(env: dict) -> list:
     out = [h for h in out if h["usdt_value"] is None or abs(h["usdt_value"]) >= 0.1]
     out.sort(key=lambda h: -(h["usdt_value"] or 0))
     return out
+
+
+def _flow_rows(env, path, id_key, since_ms):
+    """All completed on-chain rows of an asset-history endpoint since since_ms.
+
+    Server-side filters: type=4 (on-chain only — 3 would be internal transfer,
+    both endpoints document the same request param) and state=2 (deposit
+    successful / withdrawal success). Cursor pagination: `before` pins the
+    lower ts bound (records NEWER than it — ccxt's executed reading; the doc
+    example's from/to comment has them backwards), `after` walks older pages.
+    Pages are 100 rows max; `after` is set to oldest_ts+1 so equal-ts rows on
+    a page boundary are re-fetched instead of dropped, deduped via id."""
+    seen, rows, after = set(), [], None
+    for _ in range(60):
+        params = {"type": "4", "state": "2",
+                  "before": str(max(since_ms - 1, 0)), "limit": "100"}
+        if after is not None:
+            params["after"] = str(after)
+        page = _request(env, "GET", f"{path}?{urlencode(params)}") or []
+        new = 0
+        for r in page:
+            rid = r.get(id_key) or ""
+            if rid in seen:
+                continue
+            seen.add(rid)
+            new += 1
+            rows.append(r)
+        if len(page) < 100:
+            return rows
+        if new == 0:
+            raise Exception(f"OKX flows: pagination stuck | {path}")
+        after = min(int(r.get("ts") or 0) for r in page) + 1
+    raise Exception(f"OKX flows: >6k records, pagination did not finish | {path}")
+
+
+def get_flows(env: dict, since: int) -> list:
+    """External (on-chain) deposit/withdraw records since `since` (epoch secs).
+
+    Returns [{'ts', 'direction' ('in'/'out'), 'currency', 'amount', 'txid'}, ...]
+    ascending by ts; amounts always positive. COMPLETED records only (state=2
+    on both endpoints). Internal transfers (user-to-user / sub-account, dest=3)
+    are excluded server-side via type=4 — only real external flows count for
+    netting equity-snapshot PnL. No documented query-window cap on these
+    endpoints; pagination is cursor-based (see _flow_rows). `txid` is the chain
+    tx hash, falling back to OKX's depId/wdId. Withdrawal `amount` excludes the
+    withdrawal fee (fee/feeCcy are separate fields), so fee-sized residue lands
+    in PnL as a cost.
+    """
+    since_ms = int(since) * 1000
+    flows = []
+    for path, id_key, direction in (
+            ("/api/v5/asset/deposit-history", "depId", "in"),
+            ("/api/v5/asset/withdrawal-history", "wdId", "out")):
+        for r in _flow_rows(env, path, id_key, since_ms):
+            ts = int(r.get("ts") or 0)
+            amt = float(r.get("amt") or 0)
+            if ts < since_ms or amt <= 0:
+                continue
+            flows.append({
+                "ts": ts // 1000,
+                "direction": direction,
+                "currency": r.get("ccy") or "",
+                "amount": amt,
+                "txid": r.get("txId") or str(r.get(id_key) or ""),
+            })
+    flows.sort(key=lambda f: f["ts"])
+    return flows
 
 
 _ctval_cache = {}  # instId -> float ctVal (per-process)

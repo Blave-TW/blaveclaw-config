@@ -13,6 +13,7 @@ included): a wallet the user can see in the list is a wallet whose money never
 looks lost.
 """
 
+import calendar
 import hashlib
 import hmac
 import time
@@ -180,6 +181,81 @@ def get_holdings(env: dict) -> list:
     out = [h for h in out if h["usdt_value"] is None or abs(h["usdt_value"]) >= 0.1]
     out.sort(key=lambda h: -(h["usdt_value"] or 0))
     return out
+
+
+def _flow_pages(env, path, start_ms, end_ms):
+    """All rows of a capital-history endpoint for one time window, offset-paged
+    (limit is 1000, default AND max). Raises rather than silently truncating."""
+    rows, offset = [], 0
+    while True:
+        page = _signed("GET", SPOT_URL, path, env,
+                       {"startTime": start_ms, "endTime": end_ms,
+                        "limit": 1000, "offset": offset}) or []
+        rows.extend(page)
+        if len(page) < 1000:
+            return rows
+        offset += 1000
+        if offset > 20000:
+            raise Exception(f"Binance flows: >20k records in one window | {path}")
+
+
+def get_flows(env: dict, since: int) -> list:
+    """External (on-chain) deposit/withdraw records since `since` (epoch secs).
+
+    Returns [{'ts', 'direction' ('in'/'out'), 'currency', 'amount', 'txid'}, ...]
+    ascending by ts; amounts always positive. COMPLETED records only — deposits
+    status 1 (success) or 6 (credited, not yet withdrawable: already in equity),
+    withdrawals status 6 (completed). Internal (off-chain, user-to-user /
+    sub-account) transfers are excluded via transferType != 0 — inside the
+    whole-account equity they net out or belong to PnL adjustment done
+    platform-side, only real external flows count.
+
+    Both endpoints cap the query window at 90 days (verified: official docs +
+    ccxt), so the pull slides 89-day windows from `since` to now. `txid` is the
+    chain tx hash; falls back to Binance's own record id when the hash is
+    missing. Withdrawal `ts` is applyTime (UTC — when the balance left the
+    account); withdrawal `amount` excludes the network fee (Binance reports it
+    separately), so fee-sized residue lands in PnL as a cost.
+    """
+    since_ms = int(since) * 1000
+    now_ms = int(time.time() * 1000)
+    flows = []
+    window = 89 * 24 * 3600 * 1000
+    start = since_ms
+    while start <= now_ms:
+        end = min(start + window, now_ms)
+        for d in _flow_pages(env, "/sapi/v1/capital/deposit/hisrec", start, end):
+            if d.get("status") not in (1, 6) or int(d.get("transferType") or 0) != 0:
+                continue
+            amt = float(d.get("amount") or 0)
+            if amt <= 0:
+                continue
+            flows.append({
+                "ts": int(d.get("insertTime") or 0) // 1000,
+                "direction": "in",
+                "currency": d.get("coin") or "",
+                "amount": amt,
+                "txid": d.get("txId") or str(d.get("id") or ""),
+            })
+        for w in _flow_pages(env, "/sapi/v1/capital/withdraw/history", start, end):
+            if w.get("status") != 6 or int(w.get("transferType") or 0) != 0:
+                continue
+            amt = float(w.get("amount") or 0)
+            if amt <= 0:
+                continue
+            # applyTime is "YYYY-MM-DD HH:MM:SS" in UTC (ccxt parses it as UTC)
+            ts = calendar.timegm(time.strptime(w["applyTime"], "%Y-%m-%d %H:%M:%S"))
+            flows.append({
+                "ts": ts,
+                "direction": "out",
+                "currency": w.get("coin") or "",
+                "amount": amt,
+                "txid": w.get("txId") or str(w.get("id") or ""),
+            })
+        start = end + 1
+    flows = [f for f in flows if f["ts"] >= int(since)]
+    flows.sort(key=lambda f: f["ts"])
+    return flows
 
 
 def get_positions(env: dict) -> list:
