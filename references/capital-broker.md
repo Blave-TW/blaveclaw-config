@@ -281,6 +281,24 @@ market codes seen live: `OS` = overseas securities (複委託); ignore rows that
 
 ---
 
+## Step 6b — Read Securities Inventory (positions)
+
+`GetRealBalanceReport(bstrLogInID, bstrAccount)` — account = branch(4) + account(7), e.g. from
+the `TS` OnAccount row. Returns 0 and delivers rows via `OnRealBalanceReport(bstrData)` (pump
+required); a row starting with `##` marks end-of-report — wait for it, zero data rows before the
+marker legitimately means an empty portfolio (verified 2026-08-10 after the market close — works
+outside trading hours; login itself also verified on a Sunday).
+Comma-separated fields, in order: 股票代號, 庫存種類 (`T` 集保 / `C` 融資 / `L` 融券), 資額度(原始),
+資額度(可用), 券額度(原始), 券額度(可用), 昨日庫存股數, 今日委買, 今日委賣, 今日買進成交,
+今日賣出成交, 今日資券可回補/集保庫存可賣出, 可資沖股數, 可券沖股數, 即時庫存, (ignore), 即時個股維持率,
+LOGIN_ID, ACCOUNT_NO. Manual warns 可資沖/可券沖 were swapped in v2.13.42–2.13.54 — pin the
+component version before trusting those two. Do NOT use `GetBalanceQuery` — no longer provided
+after v2.13.54, `GetRealBalanceReport` is its replacement. Futures open interest is a different call
+(`GetOpenInterest`, account = IB+帳號, via `OnOpenInterest`) — untested, verify on first futures
+onboarding.
+
+---
+
 ## Step 7a — Place Futures Orders
 
 ```python
