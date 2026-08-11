@@ -107,19 +107,69 @@ def _normalise_index(df):
     return df
 
 
-def _stale_empty_marker(path, ttl_hours):
-    """True if `path` is an empty-month marker parquet older than `ttl_hours`.
+def _month_end_utc(ym):
+    """Naive-UTC datetime of the first instant AFTER month `ym` ('YYYY-MM')."""
+    nxt = _next_month(ym)
+    return datetime(int(nxt[:4]), int(nxt[5:7]), 1)
 
-    Only called when a TTL is set. mtime is checked first (cheap stat) so
-    files younger than the TTL never touch the parquet at all; past the age
-    gate only the footer metadata is read (row count) — data pages are never
-    loaded. An unreadable file counts as stale → re-fetch.
+
+def _written_before_month_end(path, ym):
+    """True if `path` was last written before month `ym` was over (UTC).
+
+    A past-month file written while that month was still the current month may
+    be missing its tail (the delta-update path stops running once the month
+    rolls over), so it needs one completing re-fetch. After that re-fetch the
+    file's mtime is later than the month end and this never triggers again.
+    An unstatable file counts as incomplete → re-fetch.
+    """
+    try:
+        return datetime.utcfromtimestamp(path.stat().st_mtime) < _month_end_utc(ym)
+    except Exception:
+        return True
+
+
+def _stale_incomplete_month(path, ttl_hours, ym, edge_days=15):
+    """True if `path` is an empty or implausibly-partial past month older than
+    `ttl_hours` — used by sources whose history is backfilled progressively
+    server-side, where a month fetched mid-backfill caches a permanent hole.
+
+    Only called when a TTL is set. mtime is checked first (cheap stat) so files
+    younger than the TTL are never opened. Past the age gate only the index is
+    read; the month counts as stale when it has 0 rows, or its first bar starts
+    more than `edge_days` after the month begins, or its last bar ends more than
+    `edge_days` before the month ends (15 days clears the longest TAIFEX Lunar
+    New Year closure, ~11 calendar days). A month that passes gets its mtime
+    refreshed so it is re-examined at most once per TTL window. An unreadable
+    file counts as stale → re-fetch.
+
+    Known blind spots (heuristic limits, accepted): a hole of <= `edge_days` at
+    either month edge, and any hole strictly inside the month, pass the check and
+    are never re-fetched. Also note the flip side: a month that can never be
+    complete (source history starts mid-month, delisting, pre-history empty
+    months inside the requested range) re-fetches once per TTL window forever —
+    clamp the requested start to the source's known history start where possible.
     """
     try:
         if time.time() - path.stat().st_mtime <= ttl_hours * 3600:
             return False
-        import pyarrow.parquet as pq
-        return pq.ParquetFile(path).metadata.num_rows == 0
+        idx = pd.read_parquet(path, columns=[]).index   # index only, no data pages
+        if len(idx) == 0:
+            return True
+        month_start = datetime(int(ym[:4]), int(ym[5:7]), 1)
+        month_end   = _month_end_utc(ym)
+        idx = pd.to_datetime(idx)
+        if getattr(idx, 'tz', None) is not None:
+            idx = idx.tz_convert('UTC').tz_localize(None)
+        margin = timedelta(days=edge_days)
+        if idx.min() > pd.Timestamp(month_start) + margin:
+            return True
+        if idx.max() < pd.Timestamp(month_end) - margin:
+            return True
+        try:
+            os.utime(path)   # passed — skip the index read until the TTL expires again
+        except OSError:
+            pass             # can't refresh mtime — worst case we re-check next call
+        return False
     except Exception:
         return True
 
@@ -143,16 +193,21 @@ def _extend_cache_monthly(prefix, params, fetch_raw_fn, start, end,
                           empty_marker_ttl_hours=None):
     """Monthly-partitioned cache.
 
-    Past months (before current month) are stored immutably — fetched once, never re-fetched.
+    Past months (before current month) are stored immutably — fetched once, never re-fetched,
+    with one exception: a past-month file last written BEFORE that month ended
+    (i.e. cached while it was still the current month, so its tail may be
+    missing) gets one completing re-fetch, merged with what is already cached.
     Current month is delta-updated: load cached, fetch from last bar to now, merge.
 
     empty_marker_ttl_hours (opt-in): by default (None) an empty past month is
     marked once and never re-fetched — correct for sources whose history is
     truly immutable. Sources that backfill history progressively server-side
-    (e.g. twstock minute lines) pass a TTL: an empty-month marker whose mtime
-    is older than the TTL is treated as a cache miss and re-fetched. If the
-    re-fetch is still empty the marker is rewritten (mtime refreshed), so the
-    source is hit at most once per TTL window per empty span.
+    (e.g. twstock minute lines, Taiwan futures) pass a TTL: a past month that
+    is empty or implausibly partial (first/last bar far from the month edges —
+    the backfill-frontier month) and whose mtime is older than the TTL is
+    treated as a cache miss and re-fetched, merged with the existing rows. If
+    the re-fetch adds nothing the file is rewritten (mtime refreshed), so the
+    source is hit at most once per TTL window per incomplete span.
 
     Directory: cache/{prefix}_{params}/
     Files:     YYYY-MM.parquet  (one per month)
@@ -169,19 +224,23 @@ def _extend_cache_monthly(prefix, params, fetch_raw_fn, start, end,
     past_months   = [ym for ym in all_months if ym < current_ym]
     present_months = [ym for ym in all_months if ym >= current_ym]   # current (+ any future)
 
-    # ── Backfill missing PAST months in contiguous spans ──────────────────────
-    # Past months are immutable. Fetch each contiguous run of missing months with a
-    # SINGLE ranged call — raw_fn chunks it concurrently internally — instead of one
-    # slow sequential call per month, then split the result into per-month parquets.
-    # Empty months still get a marker file so they are never re-fetched —
-    # unless empty_marker_ttl_hours is set, in which case an expired empty
-    # marker is treated as missing and re-fetched (see docstring).
+    # ── Backfill missing/incomplete PAST months in contiguous spans ───────────
+    # Past months are immutable once complete. Fetch each contiguous run of missing
+    # months with a SINGLE ranged call — raw_fn chunks it concurrently internally —
+    # instead of one slow sequential call per month, then split the result into
+    # per-month parquets. A month re-fetched here is MERGED with any existing rows,
+    # never blindly overwritten, so a thin/partial re-fetch cannot shrink the cache.
+    # Empty months still get a marker file so they are never re-fetched — unless
+    # empty_marker_ttl_hours is set, in which case an expired empty or implausibly-
+    # partial month is treated as missing and re-fetched (see docstring).
     def _needs_fetch(ym):
         path = cache_dir / f'{ym}.parquet'
         if not path.exists():
             return True
+        if _written_before_month_end(path, ym):
+            return True   # cached mid-month, tail may be missing — complete it once
         return (empty_marker_ttl_hours is not None
-                and _stale_empty_marker(path, empty_marker_ttl_hours))
+                and _stale_incomplete_month(path, empty_marker_ttl_hours, ym))
     missing = [ym for ym in past_months if _needs_fetch(ym)]
     for span in _contiguous_spans(missing):
         span_start = f'{span[0]}-01'
@@ -194,9 +253,17 @@ def _extend_cache_monthly(prefix, params, fetch_raw_fn, start, end,
         else:
             by_month = {}
         for ym in span:
-            grp = by_month.get(ym)
-            _atomic_to_parquet(grp if grp is not None else pd.DataFrame(),
-                               cache_dir / f'{ym}.parquet')
+            grp  = by_month.get(ym)
+            path = cache_dir / f'{ym}.parquet'
+            if path.exists():
+                try:
+                    existing = _normalise_index(pd.read_parquet(path))
+                except Exception:
+                    existing = pd.DataFrame()
+                if not existing.empty:
+                    grp = existing if grp is None else pd.concat([existing, grp])
+                    grp = grp[~grp.index.duplicated(keep='last')].sort_index()
+            _atomic_to_parquet(grp if grp is not None else pd.DataFrame(), path)
 
     frames = []
     for ym in past_months:
@@ -1469,29 +1536,50 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
             out[_id] = df[~df.index.duplicated(keep='last')].sort_index()
         return out, failed_ids
 
-    # Pre-fetch the current-month delta for every to_extend id in one batched pass
-    # instead of per-id inside _extend_one below. _extend_cache_monthly always asks
-    # for (last_cached_ts, tomorrow) which falls inside the current month, so a single
-    # current-month-start..tomorrow batch fetch covers it — the extra days before each
-    # id's own last_ts are harmless, _extend_cache_monthly dedupes by index (keep='last').
-    current_month_batch = {}
+    # Pre-fetch the delta for every to_extend id in one batched pass instead of
+    # per-id inside _extend_one below. _extend_cache_monthly asks for
+    # (last_cached_ts, tomorrow) which falls inside the current month, so a
+    # current-month-start..tomorrow batch fetch covers the common case. After a
+    # month rollover it ALSO asks each id to complete the previous month (its file
+    # was last written mid-month — see _written_before_month_end); when any id
+    # needs that, widen the batch window to the previous month's start so those
+    # spans are served from the same batched pass — otherwise every warm id would
+    # fall back to one single-id HTTP call each (the twstock_momentum-timeout
+    # storm, once per month across the whole warm cache). Extra days before each
+    # id's own last_ts are harmless, _extend_cache_monthly dedupes by index.
+    prefetch_batch, prefetch_failed, prefetch_start = {}, set(), None
     if to_extend:
         now = datetime.utcnow()
         current_ym = now.strftime('%Y-%m')
+        prev_ym = (now.replace(day=1) - timedelta(days=1)).strftime('%Y-%m')
         tomorrow = (now + timedelta(days=1)).strftime('%Y-%m-%d')
-        current_month_batch, _ = _fetch_batch_range(to_extend, f'{current_ym}-01', tomorrow)
+
+        def _prev_month_needs_completion(_id):
+            path = _monthly_cache_dir(prefix, {'id': _id}) / f'{prev_ym}.parquet'
+            return not path.exists() or _written_before_month_end(path, prev_ym)
+
+        widen = (prev_ym >= start[:7]
+                 and any(_prev_month_needs_completion(_id) for _id in to_extend))
+        prefetch_start = f'{prev_ym}-01' if widen else f'{current_ym}-01'
+        prefetch_batch, prefetch_failed = _fetch_batch_range(to_extend, prefetch_start, tomorrow)
 
     def _make_fetch_fn(_id):
         def _fetch(s, e):
-            # Present-month delta (the common case): serve from the pre-fetched batch
-            # instead of an individual single-id call.
-            if s[:7] == datetime.utcnow().strftime('%Y-%m'):
-                df = current_month_batch.get(_id)
+            # Any span inside the pre-fetched window (current-month delta, and the
+            # previous-month completion after a rollover): serve from the batch.
+            if prefetch_start is not None and s >= prefetch_start:
+                if _id in prefetch_failed:
+                    # Absence is unknown, not 'no data' — serving an empty frame here
+                    # would let the previous-month completion path rewrite the month
+                    # file (mtime past month end = complete) and freeze the hole.
+                    # Raising demotes this id to the phase-2 full-range batch refetch.
+                    raise RuntimeError(f'batch prefetch failed for {_id}')
+                df = prefetch_batch.get(_id)
                 if df is None:
                     return pd.DataFrame()
-                return df[df.index >= s]
-            # Missing past months (rare — a partially-cached id) fall back to the
-            # single-id fetch; not worth batching for an edge case.
+                return df[(df.index >= s) & (df.index < e)]
+            # Deeper past-month holes (rare — a partially-cached id) fall back to
+            # the single-id fetch; not worth batching for an edge case.
             return raw_fn(_id, s, e, headers)
         return _fetch
 
@@ -1869,6 +1957,7 @@ def fetch_twfutures_ohlcv(symbol, schema, start, end, headers):
         f'twfutures_{schema}', {'symbol': symbol},
         lambda s, e: _fetch_twfutures_raw_smart(symbol, schema, s, e, headers),
         start, end,
+        empty_marker_ttl_hours=24,   # history is backfilled progressively server-side
     )
     df = _sanity_check_ohlc(df, f'{symbol} {schema} twfutures')
     if schema == '1d' and not df.empty:
@@ -1972,6 +2061,7 @@ def fetch_twfutures_bid_ask_vol(start, end, headers):
         'twfutures_bav', {'symbol': 'TXF'},
         lambda s, e: _fetch_twfutures_bid_ask_vol_raw(s, e, headers),
         start, end,
+        empty_marker_ttl_hours=24,   # history is backfilled progressively server-side
     )
     if result.empty:
         return result
