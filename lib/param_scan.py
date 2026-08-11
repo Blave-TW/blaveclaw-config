@@ -80,7 +80,9 @@ def scan_grid(data, compute_signals_fn, row_vals, col_vals,
 
     Returns
     -------
-    grid : 2D np.ndarray of Sharpe ratios (NaN for skipped/invalid combos)
+    grid : 2D np.ndarray of Sharpe ratios (NaN for skipped/invalid combos and for
+           combos that never traded — a do-nothing cell's Sharpe 0.0 would otherwise
+           beat every losing cell and win the plateau in a bear period)
     """
     import warnings
     warnings.filterwarnings('ignore', category=FutureWarning)
@@ -111,7 +113,9 @@ def scan_grid(data, compute_signals_fn, row_vals, col_vals,
                 if _opt:  # honour exec_at_close, same shift as lib/runner.py
                     ea = np.asarray(_opt[0], dtype=bool)[warmup:]
                     exec_s[1:] = ea[:-1]
-                pf_ret, *_ = precise_pnl(cl, op, w_curr, w_prev, exec_s, fee)
+                pf_ret, _, delta_w, _ = precise_pnl(cl, op, w_curr, w_prev, exec_s, fee)
+                if not np.count_nonzero(np.nan_to_num(delta_w)):
+                    continue  # 0 trades → leave NaN; Sharpe 0.0 would beat losing cells
                 sharpe, *_ = compute_stats(pf_ret, pf['close'].index)
 
             # ── Type A: pd.Series or (pd.Series, exec_at_close) ──────────────
@@ -138,7 +142,9 @@ def scan_grid(data, compute_signals_fn, row_vals, col_vals,
                     exec_s[1:] = settle_s.values.astype(bool)[:-1]
                 else:
                     exec_s = np.zeros(n, dtype=bool)
-                pf_ret, *_ = precise_pnl(cl, op, w_curr, w_prev, exec_s, fee)
+                pf_ret, _, delta_w, _ = precise_pnl(cl, op, w_curr, w_prev, exec_s, fee)
+                if not np.count_nonzero(np.nan_to_num(delta_w)):
+                    continue  # 0 trades → leave NaN; Sharpe 0.0 would beat losing cells
                 sharpe, *_ = compute_stats(pf_ret, df_scan.index)
 
             if np.isfinite(sharpe):
@@ -187,6 +193,12 @@ def find_plateau(grid, row_vals=None, col_vals=None, window=1):
             if nb:
                 nbr_mean[i, j] = np.mean(nb)
 
+    if np.all(np.isnan(nbr_mean)):
+        raise ValueError(
+            "find_plateau: every grid cell is NaN — no parameter combo produced a single "
+            "trade (or all were invalid). Widen the scan ranges toward the indicator's "
+            "actual value range instead of picking from this grid."
+        )
     best_idx    = np.unravel_index(np.nanargmax(nbr_mean), nbr_mean.shape)
     best_row    = row_vals[best_idx[0]] if row_vals is not None else None
     best_col    = col_vals[best_idx[1]] if col_vals is not None else None

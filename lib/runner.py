@@ -112,6 +112,7 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         mdd        = -abs(mdd_raw) * 100  # drawdown is a loss from peak → always ≤ 0
         bench_ret  = (close_v[-1] / close_v[0] - 1) * 100
         total_fees = float(tc_daily.sum()) * 100
+        n_trades   = int(np.count_nonzero(np.nan_to_num(delta_w)))
 
         def _v(x):
             if x is None: return None
@@ -119,7 +120,10 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
             return round(float(x), 4)
 
         print(f"  Total Return: {total_ret:.2f}%  Sharpe: {sharpe:.2f}  MDD: {mdd:.2f}%")
-        print(f"  Fee Rate: {fee*100:.4f}%  Total Fees: {total_fees:.2f}%")
+        print(f"  Fee Rate: {fee*100:.4f}%  Total Fees: {total_fees:.2f}%  Trades: {n_trades}")
+        if n_trades == 0:
+            print("  ⚠️ WARNING: 0 trades — the entry condition never fired; "
+                  "all stats are meaningless. Check thresholds against the data's actual range.")
 
         equity   = np.cumprod(1 + np.nan_to_num(pf_ret))
         result_d = {
@@ -144,6 +148,7 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
              'Sortino Ratio':        _v(sortino),
              'Omega Ratio':          _v(omega),
              'Total Fees Paid [%]':  round(total_fees, 4),
+             'Trades':               n_trades,
              'daily_dates': d_dates, 'daily_returns': d_rets,
              },
             open(out_dir / 'stats.json', 'w'), indent=2
@@ -165,7 +170,9 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
                     f"回測完成：{strategy_name}\n"
                     f"Return {total_ret:.1f}%  "
                     f"Sharpe {sharpe:.2f}  "
-                    f"MDD {mdd:.1f}%"
+                    f"MDD {mdd:.1f}%  "
+                    f"Trades {n_trades}"
+                    + ("\n⚠️ 0 筆交易——進場條件從未觸發，數字無意義" if n_trades == 0 else "")
                 )
             return
 
@@ -229,11 +236,16 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         total_ret = pf_equity[-1] - 1
         sharpe, _, _, mdd, ann_ret = compute_stats(pf_ret, close_df.index)
 
+        n_trades = int(np.count_nonzero(np.nan_to_num(delta_w)))
+
         print(f"  Total Return:  {total_ret:.1%}")
         print(f"  Ann. Return:   {ann_ret:.1%}")
         print(f"  Sharpe Ratio:  {sharpe:.2f}")
         print(f"  Max Drawdown:  {mdd:.1%}")
-        print(f"  Fee Rate:      {fee*100:.4f}%  Total Fees: {tc_daily.sum()*100:.2f}%")
+        print(f"  Fee Rate:      {fee*100:.4f}%  Total Fees: {tc_daily.sum()*100:.2f}%  Trades: {n_trades}")
+        if n_trades == 0:
+            print("  ⚠️ WARNING: 0 trades — the weight vector never changed; "
+                  "all stats are meaningless. Check thresholds against the data's actual range.")
 
         from lib.analysis import random_bh_benchmark
         bench_stats, bench_pct = random_bh_benchmark(close_df, total_ret * 100, sharpe)
@@ -256,6 +268,7 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
              'Sharpe Ratio':        _v(sharpe),
              'Max Drawdown [%]':    _v(mdd       * 100),
              'Total Fees Paid [%]': round(float(tc_daily.sum()) * 100, 4),
+             'Trades':              n_trades,
              **bench_stats,
              'daily_dates': d_dates, 'daily_returns': d_rets,
              },
@@ -277,7 +290,8 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
             send_telegram_fn(
                 f"回測完成：{strategy_name}\n"
                 f"總報酬 {total_ret:.1%}  年化 {ann_ret:.1%}\n"
-                f"Sharpe {sharpe:.2f}  MDD {mdd:.1%}"
+                f"Sharpe {sharpe:.2f}  MDD {mdd:.1%}  Trades {n_trades}"
+                + ("\n⚠️ 0 筆交易——權重從未變動，數字無意義" if n_trades == 0 else "")
             )
 
     else:

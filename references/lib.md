@@ -102,6 +102,7 @@ Taiwan stock data (universe, batch functions, fundamental factors, lookahead-bia
 `lib/param_scan.py`:
 - `from lib.param_scan import percentile_thresholds` — use p5/p95 as bounds, linspace n_parts values → returns (entry_vals, exit_vals); prints distribution stats
 - `from lib.param_scan import scan_grid` — run 2D param scan, returns Sharpe grid. Supports all strategy types:
+  - Cells whose params never produce a trade are left NaN (excluded) — a do-nothing cell's Sharpe 0.0 would otherwise win the plateau in a losing period. If `find_plateau` raises "every grid cell is NaN", no combo traded: widen the scan ranges toward the indicator's actual value range.
   - `row_param`/`col_param`: kwarg names forwarded to `compute_signals_fn` (default `'entry_th'`/`'exit_th'`)
   - `warmup`: leading bars to skip from PnL (rolling window warm-up); `compute_signals_fn` receives the FULL df for accurate rolling, PnL computed on `df.iloc[warmup:]`
   - `valid_fn`: `(row_val, col_val) → bool` to skip invalid combos (default: `row > col`; for SMA use `lambda f, sl: f < sl`)
