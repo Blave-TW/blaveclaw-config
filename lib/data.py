@@ -3,6 +3,7 @@ import time
 import threading
 import requests
 import pandas as pd
+import pyarrow.parquet as pq
 from datetime import datetime, timedelta
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -265,11 +266,39 @@ def _extend_cache_monthly(prefix, params, fetch_raw_fn, start, end,
                     grp = grp[~grp.index.duplicated(keep='last')].sort_index()
             _atomic_to_parquet(grp if grp is not None else pd.DataFrame(), path)
 
+    # One batched read for all past months instead of one read_parquet call per month
+    # file — with hundreds of ids x ~140 month files each, the per-file open/parse
+    # overhead is what makes warm multi-stock backtests slow (2026-08: 151s of a
+    # tw_low_pe run was this loop). Caveat: a multi-file read takes the FIRST file's
+    # schema — an empty-month marker (no columns) first in the list would silently
+    # blank the whole id, and a month with a divergent schema would silently lose
+    # columns. So filter markers out with a footer-only schema read (~50x cheaper
+    # than a full read) and only batch when every schema matches; otherwise fall
+    # back to the per-file loop, whose concat unions columns.
     frames = []
+    non_empty, names0, uniform = [], None, True
     for ym in past_months:
-        cached = pd.read_parquet(cache_dir / f'{ym}.parquet')
-        if not cached.empty:
-            frames.append(cached)
+        path = cache_dir / f'{ym}.parquet'
+        names = pq.read_schema(path).names
+        if not names:
+            continue                      # empty-month marker
+        if names0 is None:
+            names0 = names
+        elif names != names0:
+            uniform = False
+        non_empty.append(path)
+    if non_empty and uniform:
+        try:
+            cached = pd.read_parquet(non_empty)
+            if not cached.empty:
+                frames.append(cached)
+        except Exception:                 # e.g. same names, clashing dtypes
+            uniform = False
+    if non_empty and not uniform:
+        for path in non_empty:
+            cached = pd.read_parquet(path)
+            if not cached.empty:
+                frames.append(cached)
 
     # ── Current month (and any future month in range) — delta update ──────────
     for ym in present_months:
