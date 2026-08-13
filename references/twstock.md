@@ -267,6 +267,36 @@ latest = per.iloc[-1]        # dividend_yield / PER / PBR
 
 ---
 
+## Dividend Events (股利事件)
+
+Per-stock dividend event history — cash/stock amounts plus record/announce/ex/pay dates.
+Use `fetch_twstock_dividend(stock_id, start, end, headers)`; for many stocks use
+`fetch_twstock_dividend_batch(stock_ids, start, end, headers)` → `{stock_id: DataFrame}`.
+
+```python
+from lib.data import fetch_twstock_dividend
+
+div = fetch_twstock_dividend("2330", "2025-01-01", None, hdrs)
+# columns: record_date, period, announce_date, cash_ex_date, stock_ex_date,
+#          pay_date, cash, stock, stock_ratio   (RangeIndex — event rows, not a series)
+upcoming = div[div["cash_ex_date"] > pd.Timestamp.now().strftime("%Y-%m-%d")]
+```
+
+Notes:
+- `period` is an **opaque label** (`114年第3季`, `113`, `不適用`, …) — group/compare by
+  string, never parse it into a Western year.
+- Empty date fields are `''` (empty string), never NaN. An announced event whose ex date
+  is not decided yet has `cash_ex_date == ''` — range queries still surface it (the
+  filter falls back to `stock_ex_date`, then `record_date`).
+- Zero-value rows (`cash == 0 and stock == 0`) are announced **no-distribution** decisions
+  and are kept — do not treat them as missing data.
+- Unknown / delisted ids and stocks with no dividend history return an empty DataFrame;
+  batch omits them silently.
+- Full history per stock is cached with a 1-day TTL and sliced locally — repeat calls
+  with different ranges are free within the day.
+
+---
+
 ## 借券成交明細
 
 每天多筆，`transaction_type` 為 `競價` 或 `議借`，每筆費率/張數不同。
@@ -334,6 +364,10 @@ Notes:
 - Margin balances are whole-market; `margin_balance_value` is the only TWD column, the rest are lots.
 - TXO put/call ratio is a futures/options dataset — see `fetch_twfutures_pcr` in
   `references/twfutures.md`, not here.
+- TAIEX daily index dividend points (`fetch_twmarket_dividend_points` — realized +
+  forward estimates, the correction term for TXF basis math) is documented in
+  `references/twfutures.md` › Index Dividend Points, since its main consumer is
+  futures fair-basis logic.
 
 ---
 

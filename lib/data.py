@@ -1066,6 +1066,92 @@ def fetch_twstock_per(stock_id, start, end, headers):
     )
 
 
+_DIVIDEND_COLUMNS = ['record_date', 'period', 'announce_date', 'cash_ex_date',
+                     'stock_ex_date', 'pay_date', 'cash', 'stock', 'stock_ratio']
+
+
+def _dividend_slice(df, start, end):
+    """Range-filter on the API's three-tier effective date (cash_ex_date, else
+    stock_ex_date, else record_date) — same ladder the server applies, so a
+    locally-sliced full-history cache matches a server-side ranged query.
+    Announced-but-undated rows fall through to record_date and stay visible."""
+    if df.empty or (not start and not end):
+        return df
+    eff = df['cash_ex_date'].where(df['cash_ex_date'] != '', df['stock_ex_date'])
+    eff = eff.where(eff != '', df['record_date'])
+    mask = pd.Series(True, index=df.index)
+    if start:
+        mask &= eff >= start
+    if end:
+        mask &= eff <= end
+    return df[mask]
+
+
+def fetch_twstock_dividend(stock_id, start, end, headers):
+    """台股股利事件 (one row per announcement row; cash + stock dividends).
+    Columns: record_date, period, announce_date, cash_ex_date, stock_ex_date,
+    pay_date, cash, stock, stock_ratio. Empty dates are '' (never NaN); `period`
+    is an OPAQUE label ('114年第3季', '不適用', …) — never parse it as a year.
+    Zero-value rows (cash==0 and stock==0) are announced no-distribution
+    decisions and are kept. Returns an empty DataFrame for unknown ids / no
+    dividend history (the API's 404). Full history is cached per stock with a
+    1-day TTL (new announcements land daily) and sliced locally, so repeated
+    calls with different ranges cost one API hit per stock per day."""
+    path = _fundamental_cache_path('twstock_dividend', stock_id)
+    df = _load_fundamental_cache(path, max_age_days=1)
+    if df is None:
+        try:
+            r = _retry_get(f'{BASE}/studio/market/twstock/dividend/{stock_id}',
+                           headers=headers, timeout=30)
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                return pd.DataFrame(columns=_DIVIDEND_COLUMNS)
+            raise
+        df = pd.DataFrame(r.json().get('data', []))
+        if not df.empty:
+            _save_fundamental_cache(path, df)
+    return _dividend_slice(df, start, end).reset_index(drop=True)
+
+
+def fetch_twstock_dividend_batch(stock_ids, start, end, headers):
+    """Batch 台股股利事件. Returns dict {stock_id: DataFrame} (same columns as
+    fetch_twstock_dividend). Ids with no dividend history are silently absent
+    (the batch API's contract); ids in the API's `failed` list are reported and
+    absent — re-call for those. Cache-first per stock (1-day TTL, full history),
+    uncached ids fetched in chunks of 50; ranges sliced locally."""
+    results, uncached = {}, []
+    for sid in stock_ids:
+        path = _fundamental_cache_path('twstock_dividend', sid)
+        df = _load_fundamental_cache(path, max_age_days=1)
+        if df is not None:
+            results[sid] = _dividend_slice(df, start, end).reset_index(drop=True)
+        else:
+            uncached.append(sid)
+
+    for i in range(0, len(uncached), 50):
+        chunk = uncached[i:i + 50]
+        try:
+            r = _retry_get(f'{BASE}/studio/market/twstock/batch/dividend',
+                           headers=headers,
+                           params={'stock_ids': ','.join(chunk)}, timeout=120)
+            payload = r.json()
+            failed = payload.get('failed', [])
+            if failed:
+                print(f'  [batch] dividend server-side fetch failed for {failed} — '
+                      f'absent from results, re-call for those ids')
+            for sid, records in payload.get('data', {}).items():
+                if not records:
+                    continue
+                df = pd.DataFrame(records)
+                _save_fundamental_cache(
+                    _fundamental_cache_path('twstock_dividend', sid), df)
+                results[sid] = _dividend_slice(df, start, end).reset_index(drop=True)
+        except Exception as e:
+            print(f'  [batch] dividend chunk {i//50 + 1} error: {e}')
+
+    return results
+
+
 def _broker_day_cache_path(stock_id, date_str):
     """cache/twstock_broker_stock_<stock_id>/<date>.parquet"""
     d = _CACHE_DIR / f'twstock_broker_stock_{stock_id}'
@@ -1837,6 +1923,47 @@ def fetch_twmarket_margin(start, end, headers):
         lambda s, e: _fetch_twmarket_raw('margin', _TWMARKET_MARGIN_COLUMNS, s, e, headers),
         start, end,
     )
+
+
+def fetch_twmarket_dividend_points(start, end, headers):
+    """加權指數每日除息點數 (TAIEX daily index dividend points) — the correction
+    term for 正逆價差 fair-basis math. DatetimeIndex, columns: points (index
+    points), estimated (bool: False = realized, TR-index derived, from 2003;
+    True = forecast — announced dividends + last-year template, zero-filled on
+    event-less future weekdays, horizon today+120).
+
+    Deliberately NOT month-file cached (unlike the other twmarket series): the
+    estimated leg is recomputed server-side every day and the realized/estimated
+    boundary sweeps through the current month, so month files would freeze stale
+    forecasts as if they were history. Instead the FULL series (one API call)
+    sits in a single-file cache with a 1-hour TTL — realized history rides along
+    for free, forecasts are never older than an hour, and cost is capped at 24
+    calls/day. Slice locally; prints a warning when the API reports a degraded
+    (under-covered) estimate. Realized leg updates ~17:00 Taipei daily."""
+    path = _CACHE_DIR / 'twmarket_dividend_points.parquet'
+    df = _load_fundamental_cache(path, max_age_days=1 / 24)
+    if df is None:
+        r = _retry_get(f'{BASE}/studio/market/twmarket/dividend_points',
+                       headers=headers, timeout=60)
+        payload = r.json()
+        meta = payload.get('meta') or {}
+        if meta.get('degraded'):
+            print(f"  [dividend_points] WARNING degraded estimate — synthesis "
+                  f"coverage {meta.get('estimated_coverage')}; treat the "
+                  f"estimated leg as a lower bound")
+        data = payload.get('data', [])
+        if not data:
+            return pd.DataFrame(columns=['points', 'estimated'])
+        df = pd.DataFrame(data)
+        df['date'] = pd.to_datetime(df['date'])
+        df = df.set_index('date').sort_index()
+        _save_fundamental_cache(path, df)
+    out = df
+    if start:
+        out = out[out.index >= pd.Timestamp(start)]
+    if end:
+        out = out[out.index <= pd.Timestamp(end)]
+    return out
 
 
 # ── Taiwan futures data ───────────────────────────────────────────────────────

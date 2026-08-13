@@ -236,6 +236,38 @@ df = fetch_twfutures_pcr("2024-01-01", "2024-12-31", hdrs)
 
 ---
 
+## Index Dividend Points (指數每日除息點數)
+
+Daily dividend points removed from TAIEX by constituent ex-dividend events — realized
+history (from 2003) plus forward estimates to today+120. **The correction term for any
+TXF basis (正逆價差) logic: raw `futures - spot` reads as a deep discount through the
+ex-dividend season (June-Sept) and is NOT a bearish signal — subtract the remaining
+dividend points first.**
+
+```python
+from lib.data import fetch_twmarket_dividend_points
+
+dp = fetch_twmarket_dividend_points("2026-01-01", None, hdrs)
+# index: date (daily; future weekdays zero-filled)
+# columns: points (index points), estimated (False = realized, True = forecast)
+
+# fair basis at date t for settlement date T:
+remaining = dp[(dp.index > t) & (dp.index <= T) & dp["estimated"]]["points"].sum()
+fair_basis = futures_price - (spot_index - remaining)
+```
+
+**Notes:**
+- `estimated=False` rows are exact (derived from the total-return vs price index spread);
+  non-ex days are ~0. `estimated=True` rows combine announced dividends with a last-year
+  template for periods not yet announced.
+- **More than ~2 weeks before settlement the estimated sum is partly template-based**
+  (last year's dates/amounts shifted forward) — treat fair basis as a band, not a point.
+  The fetcher prints a warning when the API reports a degraded (under-covered) estimate.
+- The realized leg updates ~17:00 Taipei each trading day. The fetcher caches the full
+  series with a 1-hour TTL (deliberately not month-file cached — forecasts change daily).
+
+---
+
 ## Bid/Ask Volume (TaiwanFuturesBidAskVolume)
 
 TXF 1-minute bid/ask volume aggregated from tick data, including both day and night sessions (backfilled history; earliest date — see the blave-quant skill). Max 31 days per request — the lib auto-chunks.
