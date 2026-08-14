@@ -1938,8 +1938,15 @@ def fetch_twmarket_dividend_points(start, end, headers):
     forecasts as if they were history. Instead the FULL series (one API call)
     sits in a single-file cache with a 1-hour TTL — realized history rides along
     for free, forecasts are never older than an hour, and cost is capped at 24
-    calls/day. Slice locally; prints a warning when the API reports a degraded
-    (under-covered) estimate. Realized leg updates ~17:00 Taipei daily."""
+    calls/day. Slice locally. Realized leg updates ~17:00 Taipei daily.
+
+    The API's `meta` (estimated_coverage / degraded) rides along in the
+    returned frame's `df.attrs['meta']` — pandas attrs survive the parquet
+    cache round-trip, so cache hits carry the meta of the fetch that filled
+    the cache (same ≤1h freshness as the data itself). Callers whose math
+    depends on the estimated leg (e.g. mispricing D(t)) MUST check
+    `attrs['meta'].get('degraded')` and refuse to compute on a lower-bound
+    estimate; the print below is a courtesy for ad-hoc use, not the guard."""
     path = _CACHE_DIR / 'twmarket_dividend_points.parquet'
     df = _load_fundamental_cache(path, max_age_days=1 / 24)
     if df is None:
@@ -1953,16 +1960,20 @@ def fetch_twmarket_dividend_points(start, end, headers):
                   f"estimated leg as a lower bound")
         data = payload.get('data', [])
         if not data:
-            return pd.DataFrame(columns=['points', 'estimated'])
+            out = pd.DataFrame(columns=['points', 'estimated'])
+            out.attrs['meta'] = meta
+            return out
         df = pd.DataFrame(data)
         df['date'] = pd.to_datetime(df['date'])
         df = df.set_index('date').sort_index()
+        df.attrs['meta'] = meta
         _save_fundamental_cache(path, df)
     out = df
     if start:
         out = out[out.index >= pd.Timestamp(start)]
     if end:
         out = out[out.index <= pd.Timestamp(end)]
+    out.attrs = dict(df.attrs)   # slicing must not drop the meta
     return out
 
 
