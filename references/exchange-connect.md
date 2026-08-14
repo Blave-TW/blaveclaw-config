@@ -6,6 +6,16 @@ keys never pass through you), then a chat message asks you to finish the integra
 This file is that procedure. The goal: `lib/account_{id}.py` + `lib/order_{id}.py`
 exist and `manager/reconciler.py` is wired through them.
 
+**Taiwan brokers (`sinopac`/`president`/`capital`) are NOT covered by this file, even
+though their web handoff message matches the trigger above** — see AGENTS.md's Broker
+Onboarding section and go straight to that broker's own reference doc instead. This
+matters most for `capital`: its libs ship pre-built (not agent-written), so rule 2's
+"files already exist → skip to rule 5" fast path below matches on the first message,
+runs `get_equity()` before the user has done ANY of the certificate/RDP/agreement
+onboarding, and rule 5's crypto-flavored "auth / permission / IP whitelist" framing
+would misreport that as a bad key — Capital has no IP whitelist concept at all, and the
+actual fix is `capital-broker.md`'s guided RDP flow, not "check your key."
+
 `{id}` is the lowercase env-key prefix — the keys arrive as `{ID}_API_KEY` /
 `{ID}_SECRET_KEY` (and sometimes `{ID}_PASSPHRASE`). Read the exact names from `.env`;
 do not assume casing or invent names.

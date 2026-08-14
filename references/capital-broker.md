@@ -370,6 +370,14 @@ row 2026-08-13 — 幣別/存提款/昨日餘額/LOGIN_ID anchors all matched):
 維持率/風險指標 come back masked as `*********` when the account has no positions.
 Equity for sizing/display = **權益數 (index 6)**; currency from index 25 (`NTD` → report `TWD`).
 
+**Do this next, before anything else:** install the Account Snapshot Worker (Step 8's
+`blave-agent-capital` NSSM service, below) now — not after order testing, not after strategy
+wiring. Until that worker is running and has written a fresh `state/capital_account.json`, the
+platform's own `get_equity()` (`lib/account_capital.py`) has nothing to read and fails on every
+call — the user's web dashboard shows a hard "連線失敗" card for as long as this step is
+skipped, even though everything up through Step 6c already works. Don't tell the user "you're
+connected" until this step is done and confirmed.
+
 ---
 
 ## Step 7a — Place Futures Orders
@@ -583,10 +591,14 @@ silently stale:
 3. `SKCOMTester.exe` login OK → component/cert/agreement all good → Step 3
 4. Python login `code == 0` → Step 5
 5. `OnAccount` returns the expected account(s) (`TF` and/or `TS`) → Step 6
-6. One user-approved minimal live order per market being used (or intentional rejection)
+6. **Account Snapshot Worker (`blave-agent-capital` NSSM service) installed and running,
+   `state/capital_account.json` fresh** → Step 8's "Account Snapshot Worker" section. **This is
+   what makes the platform's web dashboard show "connected" instead of a failure card — do this
+   right after Step 6/6c, before order testing or strategy wiring, not as an afterthought.**
+7. One user-approved minimal live order per market being used (or intentional rejection)
    confirms the order path → Step 7a / 7b
-7. 用戶確認後，方可設定 reconciler 上線（參考 `references/deployment.md`）
-8. Libs are SHIPPED (verified live 2026-08-14, uid=1) — do not hand-write SKCOM calls:
+8. 用戶確認後，方可設定 reconciler 上線（參考 `references/deployment.md`）
+9. Libs are SHIPPED (verified live 2026-08-14, uid=1) — do not hand-write SKCOM calls:
    `lib/order_capital.py` (futures IOC market / whole-lot limit+market / intraday odd-lot limit;
    everything else raises NotImplementedError), `lib/capital_worker.py` (NSSM service
    `blave-agent-capital` → `state/capital_account.json`, install commands in Step 8) and
