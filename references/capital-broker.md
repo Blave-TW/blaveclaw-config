@@ -14,6 +14,27 @@ is Step 2 → Step 3 → Step 1 (檢核 + sign) → Steps 5–7.
 Component download page: https://www.capital.com.tw/web/#/download/ApiTrading/ApiTradinginfo
 (the component/verify-tool zips themselves are static, login-free URLs — see Steps 1/3)
 
+**Acknowledge before you go quiet.** Steps 2–3 involve silent background work (downloading the
+cert-issuance tool, downloading the component zip, installing the VC++ 2010 redistributable) that
+can run several minutes with nothing to show for it. Before starting ANY of that — as your very
+first reply to the connect handoff, before doing anything else — send a short message so the wait
+doesn't read as the agent being stuck: e.g. 「收到，我先幫你把群益的憑證工具和連線元件準備好，
+大概需要幾分鐘，準備好後會馬上跟你說。」 Then do the downloads/installs, then send the real Step 2
+instructions (RDP + cert wizard).
+
+**Checkpoint after each major step — never chain multiple steps into one turn.** A single turn
+has a hard ~50 tool-call ceiling (`agent_turn.py`'s `max_turns`); Step 3 (component install) alone
+can burn a large chunk of that (download, extract, choco install, several regsvr32/Test-Path
+checks), and Step 1 (SKCOMVerifyDJ login + 2 simulated orders + polling 「查詢是否已驗證」, which
+can itself need retries) adds more. Chaining Step 3 → Step 1 → Steps 5–6 into one attempt risks
+silently hitting that ceiling mid-work with nothing to show for it (measured 2026-08-14: exactly
+this happened, user got the generic 「處理到一半被中斷了」 SDK fallback after asking to proceed
+through registration + verification + signing in one go). Instead: finish ONE step, report what
+just happened and what's next, and stop — let that message end the turn. The user's next message
+(or your own follow-up, if nothing more is needed from them) starts a fresh turn with a fresh
+budget. Natural checkpoints: after Step 3 completes → after Step 1's 檢核 passes (before signing)
+→ after signing → after Step 6's account check → after Step 8's worker install.
+
 ---
 
 ## Supported Products
@@ -58,6 +79,12 @@ gate — why is unknown (possibly a pre-existing 檢核 on that ID); treat the g
    page (「API申請步驟」block, item 2 — below the three 下載元件 buttons); the zip is a static,
    login-free URL the agent can pre-stage:
    `https://www.capital.com.tw/Service2/download/api_zip/CapitalAPI_v5.0_SKCOMVerifyDJ.zip`
+   After extracting, **copy `SKCOMVerifyDJ.exe` to `$env:PUBLIC\Desktop`** (same pattern as
+   RAWinApp.exe in Step 2) — the zip's own folder structure buries it several levels deep
+   (`CapitalAPI_v5.0_SKCOMVerifyDJ\元件\x64\SKCOMVerifyDJ.exe`), which is a bad time for the user
+   to be hunting through Explorer during an RDP session (measured 2026-08-14: told the user to run
+   it from that nested path — annoying to find). Tell the user it's "on the desktop", not the full
+   nested path.
    Run `SKCOMVerifyDJ.exe`, log in with 身分證字號 + trading password, submit both
    **模擬國內證券下單** and **模擬國內期貨下單**, then — **required, not optional — click
    「查詢是否已驗證」**: the two simulated orders alone do NOT complete the verification;
@@ -119,9 +146,12 @@ shown in the Blave Agent web dashboard (「遠端桌面連線」link: IP, Admini
    「立即申請/展延」each time to reach the current download, and pull the .exe URL from there before
    running the download. If the agent has no browser automation on this machine, do this step
    inside the same RDP session with the user instead of pre-staging it silently.
-2. Tell the user (Telegram):
+2. Tell the user (Telegram) — **NEVER paste the IP / account / password into the chat message
+   itself, even though you can read them** (`C:\blave-agent\credentials\rdp_password.txt`, see
+   below): a plaintext credential in chat sits in session history/logs indefinitely, and the
+   user already has a proper place to see it. Point them at the machine page instead:
    > 請連進你的 Blave Agent 機器桌面，跑一次群益的憑證精靈（約兩分鐘）：
-   > 1. 到 Blave 網站的 Blave Agent 頁面，點「遠端桌面連線」看連線資訊（IP／帳號／密碼），用電腦內建的遠端桌面程式（Windows 按 Win+R 輸入 mstsc；Mac 裝 Windows App）連進去
+   > 1. 到 Blave 網站的 Blave Agent 機器頁，點「遠端桌面連線」看連線資訊（IP／帳號／密碼），裡面也有「怎麼連線」的操作教學連結
    > 2. 點開桌面上的 RAWinApp.exe（我已下載好）
    > 3. 輸入身分證字號＋交易密碼登入，手機會收到簡訊驗證碼，照精靈完成憑證安裝
    > 4. 完成後跟我說一聲
@@ -370,13 +400,17 @@ row 2026-08-13 — 幣別/存提款/昨日餘額/LOGIN_ID anchors all matched):
 維持率/風險指標 come back masked as `*********` when the account has no positions.
 Equity for sizing/display = **權益數 (index 6)**; currency from index 25 (`NTD` → report `TWD`).
 
-**Do this next, before anything else:** install the Account Snapshot Worker (Step 8's
-`blave-agent-capital` NSSM service, below) now — not after order testing, not after strategy
-wiring. Until that worker is running and has written a fresh `state/capital_account.json`, the
-platform's own `get_equity()` (`lib/account_capital.py`) has nothing to read and fails on every
-call — the user's web dashboard shows a hard "連線失敗" card for as long as this step is
-skipped, even though everything up through Step 6c already works. Don't tell the user "you're
-connected" until this step is done and confirmed.
+**Do this next, before anything else — and don't ask first, just do it:** install the Account
+Snapshot Worker (Step 8's `blave-agent-capital` NSSM service, below) now — not after order
+testing, not after strategy wiring. It's read-only infrastructure (a background balance/position
+poller, no orders, no exposure), same trust tier as everything else up through Step 6c — asking
+"要我接著裝嗎？" here just adds a needless round-trip (measured 2026-08-14: user's reaction was
+"他也不用問，直接裝好就好"). Install it, confirm the snapshot is fresh, THEN tell the user it's
+done — asking permission is for Step 7a/7b (placing an actual order), not this. Until the worker
+is running and has written a fresh `state/capital_account.json`, the platform's own `get_equity()`
+(`lib/account_capital.py`) has nothing to read and fails on every call — the user's web dashboard
+shows a hard "連線失敗" card for as long as this step is skipped, even though everything up
+through Step 6c already works.
 
 ---
 
