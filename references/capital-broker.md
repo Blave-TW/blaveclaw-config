@@ -6,10 +6,13 @@ one certificate covers both markets. The integration uses the official **Capital
 (`SKCOM.dll`, a Windows COM component) — **Windows-only**, so this broker requires a
 **Windows Blave Agent workspace**. There is no cross-platform package (unlike SinoPac/President).
 
-Steps 1–6 (agreement, certificate, component install, login, accounts) are **shared** by both
-markets. Order placement diverges — see Step 7a (Futures) / Step 7b (Securities).
+Steps 1–6 (verification test + agreement, certificate, component install, login, accounts) are
+**shared** by both markets. Order placement diverges — see Step 7a (Futures) / Step 7b (Securities).
+Note the execution order: the 檢核 in Step 1 needs the machine set up first, so the real sequence
+is Step 2 → Step 3 → Step 1 (檢核 + sign) → Steps 5–7.
 
-Component download (login required): https://www.capital.com.tw/web/#/download/ApiTrading/ApiTradinginfo
+Component download page: https://www.capital.com.tw/web/#/download/ApiTrading/ApiTradinginfo
+(the component/verify-tool zips themselves are static, login-free URLs — see Steps 1/3)
 
 ---
 
@@ -42,15 +45,48 @@ cannot run there — escalate to Blave ops for a Windows machine before continui
 
 ---
 
-## Step 1 — Sign the API Agreement (user side, any device)
+## Step 1 — Pass the API Verification Test, then Sign the API Agreement
 
+**Signing is gated behind an API verification test (檢核). Confirmed on the live 群益金融網 API
+download page (read 2026-08-13): its official「API申請步驟」is ① 憑證安裝&申請 → ② 下載
+API連線測試小程式,完成連線測試 → ③ 線上簽署 → ④ 開始使用. The gate is enforced in the API
+itself as error 321「測試未完成:請先至API下載專區 完成測試後再進行下一步」(v2.13.53 changelog,
+which introduced the SKCOMVerifyDJ tool). The 2026-08-09 onboarding (uid 12890) never hit this
+gate — why is unknown (possibly a pre-existing 檢核 on that ID); treat the gate as the rule.**
+
+0. Run the verification test first: the tool is labeled **「API連線測試小程式」** on the download
+   page (「API申請步驟」block, item 2 — below the three 下載元件 buttons); the zip is a static,
+   login-free URL the agent can pre-stage:
+   `https://www.capital.com.tw/Service2/download/api_zip/CapitalAPI_v5.0_SKCOMVerifyDJ.zip`
+   Run `SKCOMVerifyDJ.exe`, log in with 身分證字號 + trading password, submit both
+   **模擬國內證券下單** and **模擬國內期貨下單**, then — **required, not optional — click
+   「查詢是否已驗證」**: the two simulated orders alone do NOT complete the verification;
+   without this final query the signing portal still refuses the declaration (field-verified
+   2026-08-13). Signing unlocks **immediately** after the full 檢核 (no next-day wait —
+   same-day sign verified 2026-08-13).
+   The tool runs against the API environment, so do Steps 2–3 (certificate + component install
+   on the agent machine) **before** this test.
+   Verification status appears to be stored **per 身分證字號 account, not per machine**
+   (consistent with uid 12890 never hitting the gate on a fresh machine) — so a user who
+   relaunches their machine should NOT need to re-run the 檢核; what a new machine does need
+   is a fresh certificate (Step 2) + component install (Step 3). Not yet isolated
+   experimentally — if a relaunched machine ever hits error 321, re-run the 檢核 and update
+   this note.
+   **GAP — pin when observed:** whether the verify tool itself requires the certificate to be
+   installed (2026-08-13 run had the cert already issued, so this remains untested).
 1. User signs the declaration(s) for whichever market(s) they want, on the same 同意書簽署 portal:
    **證券API服務下單聲明書** (securities) and/or **期貨API服務下單聲明書** (futures) — two separate
    checkbox items on one page: https://tradeweb.capital.com.tw/TSWEB/agreeList.aspx (also available
-   in 群益行動贏家 / 掌中財神 apps). Works from any browser incl. macOS.
-2. **Futures activation is confirmed next-day** (「簽署完之後，要明天才會生效」) — plan the onboarding
-   across two days. **Securities activation delay is unconfirmed** — no source pins the same
-   next-day wait for the securities declaration; treat as "may also be next-day" until tested.
+   in 群益行動贏家 / 掌中財神 apps). Works from any browser incl. macOS. The securities download
+   page calls the combined document「應用程式介面(API)服務申請暨委託交易風險預告書」and lists
+   群益E櫃檯/同意書專區 and 新金融網/線上簽署專區 as signing portals — same signing step,
+   different entry points.
+2. **Activation is same-day for both markets** — field-verified 2026-08-13: `GetUserAccount`
+   returned both the TF and TS accounts within the hour after signing both declarations
+   (the earlier "futures activates next-day"「簽署完之後，要明天才會生效」claim did not
+   reproduce; it may date from before the 檢核-gated flow). Whether **order acceptance** also
+   unlocks same-day is unverified — if a same-day order bounces with 2018-family errors,
+   retry next day before diagnosing anything else.
 3. Without the relevant declaration signed: no trading accounts of that market from `GetUserAccount`
    (warning 2018/2019), no report connection, and — for futures specifically — even the commodity
    list fails (error 3031). Each market's declaration only unlocks that market's accounts; a user
@@ -135,14 +171,18 @@ BlaveClaw machines, or `.env` `admin_password` on the oldest ones. Never reset i
 
 ## Step 3 — Install the Capital API Component
 
-**Only the download itself needs the user (login-gated) — every step after that is agent-executed.
+**Every step is agent-executed (both zips are static, login-free URLs — see below).
 Do not ask the user to extract, install, or register anything themselves; do not leave a zip on
 the desktop for the user to double-click.**
 
-1. The zip requires the user's own capital.com.tw login, so it can't be pre-staged like
-   `RAWinApp.exe` — during the same RDP message where you ask them to run the cert wizard, also
-   ask them to download this zip and forward it to you (or download it themselves in the RDP
-   session's browser to `$env:PUBLIC\Desktop\`), then hand control back to the agent.
+1. The component zip is a **static, login-free URL** (verified 2026-08-13 — the earlier belief
+   that it was login-gated is wrong, at least currently), so the agent can pre-stage it:
+   `https://www.capital.com.tw/Service2/download/api_zip/CapitalAPI_<version>.zip`
+   (e.g. `CapitalAPI_2.13.59.zip`; check the download page for the current version number).
+   Install the **latest** version: v2.13.59 (2026-08-10) added error 9996
+   `SK_ERROR_UPDATE_API_REQUIRED`「此版本已無法登入」 — 群益 can force-expire old versions, so
+   pinning an old zip risks a fleet-wide login break. If the static URL pattern ever breaks,
+   fall back to asking the user to download from the page in the RDP session's browser.
 2. Once the zip is on the machine, agent extracts it via SSH/remote-exec — e.g.
    `Expand-Archive -Path <zip> -DestinationPath C:\skcom\x64\` — keeping `SKCOM.dll` together
    with its certificate/quote sub-components in one folder (they must be co-located for
@@ -169,7 +209,7 @@ the desktop for the user to double-click.**
 Python packages: `pip install comtypes pywin32`. Verified on a Blave Agent Windows workspace's
 Python 3.14 (2026-07-17, medium_win POC box): comtypes 1.4.16 + pywin32 312 install cleanly and
 COM CreateObject / Dispatch / message pump all work. (SKCOM.dll itself untested there — the zip
-is login-gated; confirm `GetModule` on first real onboarding.)
+was believed login-gated at the time; confirm `GetModule` on first real onboarding.)
 
 ---
 
@@ -181,12 +221,21 @@ is login-gated; confirm `GetModule` on first real onboarding.)
 ```python
 # Agent 執行：append keys to .env
 with open('.env', 'a') as f:
-    f.write(f"\ncapital_id={user_id}\n")          # 身分證字號 (login ID)
+    f.write(f"\ncapital_api_key={user_id}\n")     # 身分證字號 (login ID)
     f.write(f"capital_password={password}\n")     # trading password
 ```
 
 Runtime needs only these two — the certificate is read from the machine automatically.
 Confirm stored; never echo back.
+
+**Canonical env names (decided 2026-08-14): `capital_api_key`(身分證字號)+ `capital_password`.**
+Rationale: the runtime's `account_reader.py` / `portfolio_reporter.venues()` discover venues by
+the `{PREFIX}_API_KEY` env pattern — an id stored as `capital_id` is invisible to discovery and
+the venue never reaches the workspace page. The web `CX_VENUES` capital entry writes these same
+names. Legacy note: the very first test machine (uid=1) also carries `capital_id` — harmless
+duplicate; new onboardings write only the canonical pair. Reporter caveat: `pair` stays `false`
+for capital (no `*_SECRET_KEY`) — the web treats manual-venue credentials as paired; if the
+runtime's pair rule ever learns venue-specific secrets, drop the web workaround together.
 
 ---
 
@@ -208,7 +257,7 @@ class ReplyEvents:
 
 reply_handler = comtypes.client.GetEvents(reply, ReplyEvents())
 
-code = center.SKCenterLib_Login(env['capital_id'], env['capital_password'])
+code = center.SKCenterLib_Login(env['capital_api_key'], env['capital_password'])
 print(code, center.SKCenterLib_GetReturnCodeMessage(code))
 ```
 
@@ -261,7 +310,7 @@ class OrderEvents:
 order_handler = comtypes.client.GetEvents(order, OrderEvents())
 
 order.SKOrderLib_Initialize()
-order.ReadCertByID(env['capital_id'])   # dual-factor cert check — skipping it → order error 1038
+order.ReadCertByID(env['capital_api_key'])   # dual-factor cert check — skipping it → order error 1038
 order.GetUserAccount()                  # async, arrives via OnAccount (one event per account/market)
 
 deadline = time.time() + 10
@@ -294,8 +343,32 @@ Comma-separated fields, in order: 股票代號, 庫存種類 (`T` 集保 / `C` �
 LOGIN_ID, ACCOUNT_NO. Manual warns 可資沖/可券沖 were swapped in v2.13.42–2.13.54 — pin the
 component version before trusting those two. Do NOT use `GetBalanceQuery` — no longer provided
 after v2.13.54, `GetRealBalanceReport` is its replacement. Futures open interest is a different call
-(`GetOpenInterest`, account = IB+帳號, via `OnOpenInterest`) — untested, verify on first futures
-onboarding.
+(`GetOpenInterest(bstrLogInID, bstrAccount)`, account = the full `TF` OnAccount string e.g.
+`F0200001603963`, rows via `OnOpenInterest`) — verified 2026-08-13 on an empty account: call
+returns 0; an empty account delivers one `001,查無資料,<account>` row and the report — like the other reports — ends with a comma-padded `##` terminator row (observed live 2026-08-13; wait for it, don't stop at the first row). The message field is Big5/CP950
+in console redirects — inside Python the BSTR is proper unicode; the mojibake is console-encoding
+only. Non-empty row fields (official manual V2.13.59 §4-2-x, comma-separated): 市場別, 帳號, 商品,
+買賣別, 未平倉部位, 當沖未平倉部位, 平均成本(3 decimals), 一點價值, 單口手續費, 交易稅(萬分之X),
+LOGIN_ID — confirm against live data after the first real futures fill.
+
+## Step 6c — Futures Equity (`GetFutureRights`)
+
+`GetFutureRights(bstrLogInID, bstrAccount, 1)` (account = full TF string), rows via
+`OnFutureRights(bstrData)`; a `##`-prefixed row marks end-of-report. Multi-currency accounts
+return one row per currency, **first row = base currency**. Rate-limited — poll gently
+(error 1019 `SK_ERROR_QUERY_IN_PROCESSING` when called too often); ~60s cadence measured safe.
+Comma-separated fields (official manual V2.13.59 §4-2-i, 0-based; cross-checked against a live
+row 2026-08-13 — 幣別/存提款/昨日餘額/LOGIN_ID anchors all matched):
+0 帳戶餘額, 1 浮動損益, 2 已實現費用, 3 交易稅, 4 預扣權利金, 5 權利金收付, **6 權益數**,
+7 超額保證金, 8 存提款, 9 買方市值, 10 賣方市值, 11 期貨平倉損益, 12 盤中未實現,
+13 原始保證金, 14 維持保證金, 15 部位原始保證金, 16 部位維持保證金, 17 委託保證金,
+18 超額最佳保證金, 19 權利總值, 20 預扣費用, 21 原始保證金, 22 昨日餘額,
+23 選擇權組合單加不加收保證金, 24 維持率, **25 幣別** (`NTD`), 26 足額原始保證金,
+27 足額維持保證金, 28 足額可用, 29 抵繳金額, 30 有價可用, 31 可用餘額, 32 足額現金可用,
+33 有價價值, 34 風險指標, 35 選擇權到期差異, 36 選擇權到期差損, 37 期貨到期損益,
+38 加收保證金, 39 LOGIN_ID, 40 ACCOUNT_NO.
+維持率/風險指標 come back masked as `*********` when the account has no positions.
+Equity for sizing/display = **權益數 (index 6)**; currency from index 25 (`NTD` → report `TWD`).
 
 ---
 
@@ -313,13 +386,20 @@ pOrder.sNewClose = 2            # 0 = 新倉, 1 = 平倉, 2 = auto
 pOrder.sDayTrade = 0            # 1 = day trade
 pOrder.sReserved = 0            # 0 = intraday (T/T+1盤), 1 = T盤預約
 
-msg, ncode = order.SendFutureOrderCLR(env['capital_id'], False, pOrder)   # False = synchronous
+msg, ncode = order.SendFutureOrderCLR(env['capital_api_key'], False, pOrder)   # False = synchronous
 print(ncode, msg)   # ncode 0 → msg is the 13-digit order sequence number
 ```
 
 **Built-in throttle:** `SetMaxQty` / `SetMaxCount` cap per-second order flow; exceeding them locks
 that market's orders until `UnlockOrder`. 群益 also monitors API 異常下單 (looping orders) — keep
 order frequency sane by design.
+
+**Live round trip 2026-08-14 (TM0000 buy 1 → close):** order accepted with `ncode=0`, `msg` =
+13-digit order seq; fills within a second. `TM0000` resolves to the actual near-month contract
+(`TM2608`) in every report AND in `GetOpenInterest` positions — reconcilers must match on the
+resolved code, not the alias. TMF original margin observed 35,050 TWD at index ≈46,100 (margin
+scales with the index — don't hardcode). Same-day order acceptance confirmed (signed the
+declarations the prior evening).
 
 ---
 
@@ -338,29 +418,55 @@ pOrder.nQty = 1                   # 整股(sPeriod 0/1) = 張數(1000股); 零�
 pOrder.nTradeType = 0              # [逐筆交易] 0 = ROD, 1 = IOC, 2 = FOK
 pOrder.nSpecialTradeType = 2       # [逐筆交易] 1 = 市價 (bstrPrice=0), 2 = 限價 (bstrPrice required)
 
-msg, ncode = order.SendStockOrder(env['capital_id'], False, pOrder)   # note: NOT "...CLR" — futures-only suffix
+msg, ncode = order.SendStockOrder(env['capital_api_key'], False, pOrder)   # note: NOT "...CLR" — futures-only suffix
 print(ncode, msg)   # ncode 0 → msg is the 13-digit order sequence number
 ```
 
-**盤中零股 (`sPeriod=4`) uses a reduced struct** — only `sFlag=0`(現股), `sBuySell`, `bstrPrice`,
-`nQty`(1–999股); no `sPrime`/`nTradeType`/`nSpecialTradeType`. Same call, `SendStockOrder`; odd-lot
-orders during 13:40–14:30 (盤後零股 window) use `SendStockOddLotOrder` instead (same signature).
+**盤中零股 (`sPeriod=4`) is NOT a reduced struct** — live-tested 2026-08-14: omitting
+`nSpecialTradeType` rejects with `1067 "Special Trade type value should be 1 or 2"`. Send the
+full struct (`nTradeType=0` ROD + `nSpecialTradeType=2` 限價 + limit `bstrPrice`; odd lots are
+limit-only) with `nQty` = shares (1–999). Odd-lot reports come back under market type **`TC`**,
+not `TS` (live row: `...,TC,D,N,913Y,...,2002,...,19.0500,...`). Odd-lot orders during
+13:40–14:30 (盤後零股 window) use `SendStockOddLotOrder` instead (same signature).
 
 **No day-trade flag on the order itself** — unlike futures' `sDayTrade`, 現股當沖 eligibility is a
 per-stock attribute (check via quote, `SKSTOCKLONG.nDayTrade`), and day-trading is just placing an
 offsetting `sFlag=0` order same-day, not a struct field.
 
+**No pre-funding check on buys (live-tested 2026-08-14):** a fresh account with an empty
+settlement bank account had both a whole-lot and an odd-lot buy accepted and filled — settlement
+is T+2, and the broker does not pre-block. The agent MUST remind the user to fund the settlement
+account by T+2 or they default (違約交割). `GetRealBalanceReport` reflects the fill immediately
+(今日買進成交 + 即時庫存 columns — field map in Step 6b verified against these live fills).
+
 ---
 
 ## Order/Fill Reports (both markets)
 
-Same mechanism for futures and stocks: call `reply.SKReplyLib_ConnectByID(env['capital_id'])`
-(0 = success), then `OnNewData(bstrUserID, bstrData)` fires with comma-separated fields — key ones:
-index 1 = market type (`TF`/`TS`/...), index 2 = type (`N`委託 `D`成交 `C`取消 `P`改價 `S`動態退單),
-index 3 = error flag (`N` ok / `Y` fail / `T` timeout), index 11 = fill price, index 23 = fill time.
-Same indices for both markets (confirmed against the manual's shared-field section); securities
-orders additionally carry `BeforeQty`/`AfterQty` near the qty position. Field positions per
-manual + community parser — verify against live data on first fill and pin them here.
+Same mechanism for futures and stocks: call `reply.SKReplyLib_ConnectByID(env['capital_api_key'])`
+(0 = success), then `OnNewData(bstrUserID, bstrData)` fires with comma-separated fields.
+**Field indices pinned against live fills 2026-08-14** (TF futures round trip + TS whole-lot +
+TC odd-lot), 0-based:
+
+- 0 委託序號 KeyNo 13碼 — **empty on futures `D` rows** (present on stock `D` rows); the
+  reliable copy for ALL rows is index 45 (second-to-last field)
+- 1 market (`TF` futures / `TS` stock / `TC` 盤中零股), 2 type (`N`委託 `D`成交 `C`取消
+  `P`改價 `S`動態退單), 3 error flag (`N` ok)
+- 4 branch, 5 account, 6 order-kind code (futures `BNI10`/`SOI10` = buy-new/sell-offset IOC;
+  stock `B00R2`), 8 **symbol — the real contract** (`TM2608`, not the `TM0000` alias you sent;
+  stocks: ticker)
+- 11 price — `0.0000` on `N` rows, fill price on `D` rows (1314 limit 7.72 filled at 7.69:
+  price improvement is normal)
+- 20 qty (futures: lots; stocks: SHARES — 1000 for one 張), 21/22 BeforeQty/AfterQty
+  (stock `N` rows)
+- 23 date, 24 time (HH:MM:SS), 30 exchange seq (`1010/2110...`=委託, `1020/2120...`=成交),
+  32/33 futures: series+month (`FITM`,`202608`), 38 成交編號 (`D` rows only),
+  45 KeyNo, 46 time with milliseconds
+
+**Two consumer-side rules (both live-observed):** ① `SKReplyLib_ConnectByID` **replays every
+report from the whole session day** on each connect — a fresh process re-receives this morning's
+fills; ② stock (`TS`) reports arrived **duplicated** (same row delivered twice back-to-back).
+Any consumer MUST dedupe on (KeyNo idx45, type idx2, exchange seq idx30) before acting.
 
 ---
 
@@ -391,9 +497,50 @@ manual + community parser — verify against live data on first fill and pin the
 }
 ```
 
-`contract_value` (futures only): 200 (TXF) / 50 (MXF) / 10 (TMF). `lot_size` for stocks is 1000
+`contract_value` and the Capital order code (futures only) derive MECHANICALLY from the strategy's
+`SYMBOL` — which declares the traded contract; data auto-aliases to the TXF series
+(`references/lib.md`): `TXF` → `TX00` / 200, `MXF` → `MTX00` / 50, `TMF` → `TM0000` / 10.
+`lot_size` for stocks is 1000
 (整股/張) — for a strategy trading 零股 exclusively, use `lot_size: 1` and treat `nQty` as raw
-shares. Order library + reconciler wiring is one atomic task — see `references/manager.md`.
+shares. The order library ships as `lib/order_capital.py` (live-tested paths only — surface and
+units in `references/lib.md`; do NOT hand-write SKCOM order calls anymore); reconciler wiring is
+the hand-wired signed-diff pattern per `references/manager.md`, and the reconciler service needs
+the `.\Administrator` ObjectName exception there (602).
+
+### Account Snapshot Worker (`blave-agent-capital` service)
+
+Account/position reads are split in two because the platform account_reader runs as LocalSystem,
+which SKCOM's certificate check rejects (602): `lib/capital_worker.py` polls the venue over COM
+every 60 s (`GetFutureRights` is rate-limited — error 1019 — 60 s measured safe) and writes
+`state/capital_account.json`; `lib/account_capital.py` only reads that file (reports it stale
+after 300 s). Install the worker as an NSSM service under the Administrator identity — the same
+ObjectName exception as the reconciler (`references/manager.md`):
+
+```
+nssm install blave-agent-capital "<python.exe>" "C:\blave-agent\workspace\lib\capital_worker.py"
+nssm set blave-agent-capital AppDirectory C:\blave-agent\workspace
+nssm set blave-agent-capital ObjectName .\Administrator "<Administrator password>"
+nssm set blave-agent-capital AppStdout C:\blave-agent\workspace\state\capital_worker.log
+nssm set blave-agent-capital AppStderr C:\blave-agent\workspace\state\capital_worker.log
+nssm set blave-agent-capital Start SERVICE_AUTO_START
+nssm start blave-agent-capital
+```
+
+Resolve `<python.exe>` to the machine's actual interpreter (`where python`) and adjust the
+workspace path if `BLAVE_AGENT_WORKSPACE` differs; read the password from
+`C:\blave-agent\credentials\rdp_password.txt` — never reset it (Step 2). On any tick failure the
+worker writes an error snapshot, backs off 30 s, and exits so NSSM restarts it with a fresh COM
+session — a stale/error snapshot therefore means the service is down or the venue is failing,
+never a silently-wrong number.
+
+`lib/capital_worker.py` touches `state/heartbeat/capital_worker` at the top of each 60 s loop
+tick (`references/deployment.md`'s daemon heartbeat convention). Register it once in
+`state/deployments.json` so `manager/healthcheck.py` alerts on a dead worker instead of it going
+silently stale:
+```json
+{"capital_worker": {"type": "daemon", "expect_every_minutes": 5,
+                    "registered_at": "<UTC now, %Y-%m-%dT%H:%M:%S>"}}
+```
 
 ---
 
@@ -430,8 +577,8 @@ shares. Order library + reconciler wiring is one atomic task — see `references
 
 ## Verification Checklist for Agent
 
-1. Windows x64 workspace + user signed the relevant declaration(s) (期貨/證券, wait ≥1 day for
-   futures) → Step 1
+1. Windows x64 workspace + `SKCOMVerifyDJ.exe` 檢核 passed (both simulated orders) + user signed
+   the relevant declaration(s) (期貨/證券 — activation verified same-day, see Step 1) → Step 1
 2. Certificate issued on this machine via RDP (credentials from the web dashboard) → Step 2
 3. `SKCOMTester.exe` login OK → component/cert/agreement all good → Step 3
 4. Python login `code == 0` → Step 5
@@ -439,3 +586,9 @@ shares. Order library + reconciler wiring is one atomic task — see `references
 6. One user-approved minimal live order per market being used (or intentional rejection)
    confirms the order path → Step 7a / 7b
 7. 用戶確認後，方可設定 reconciler 上線（參考 `references/deployment.md`）
+8. Libs are SHIPPED (verified live 2026-08-14, uid=1) — do not hand-write SKCOM calls:
+   `lib/order_capital.py` (futures IOC market / whole-lot limit+market / intraday odd-lot limit;
+   everything else raises NotImplementedError), `lib/capital_worker.py` (NSSM service
+   `blave-agent-capital` → `state/capital_account.json`, install commands in Step 8) and
+   `lib/account_capital.py` (snapshot reader). Both the worker and any reconciler service need
+   the `.\Administrator` ObjectName exception (`references/manager.md`).

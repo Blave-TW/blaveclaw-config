@@ -317,6 +317,15 @@ def compute_diff(target, actual, threshold=10):
       signed_diff > 0 → need to buy
       signed_diff < 0 → need to sell/short
       asset_spec → passed through from portfolio_config for place_order to use
+
+    `threshold` is account-currency scale (crypto notional) and meaningless
+    for a symbol whose 'size' is a LOT COUNT (asset_specs[strategy]["type"] ==
+    "futures_contracts", e.g. capital/TW futures — see strategy_amounts):
+    diffs there are single/low-double-digit lots, so a currency threshold of
+    10 would silently swallow every order, including a close-on-removal
+    (target absent, asset_spec None — checked via `exchange` too). Those rows
+    skip `threshold` entirely; their own place_order_fn applies the real
+    minimum (e.g. reconciler.py's _capital_place_order round-half-up gate).
     """
     orders = []
     all_symbols = set(target) | set(actual)
@@ -331,7 +340,12 @@ def compute_diff(target, actual, threshold=10):
                     -a.get('size', 0) if a.get('side') == 'short' else 0)
 
         diff = t_signed - a_signed
-        if abs(diff) < threshold:
+        if diff == 0:
+            continue
+        asset_spec = t.get('asset_spec')
+        is_lot_based = ((asset_spec or {}).get('type') == 'futures_contracts'
+                         or t.get('exchange') == 'capital' or a.get('exchange') == 'capital')
+        if not is_lot_based and abs(diff) < threshold:
             continue
 
         orders.append({
@@ -448,6 +462,16 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
         symbol     = order['symbol']
         diff       = order['signed_diff']
         asset_spec = order.get('asset_spec')
+        # Same lot-based exemption as compute_diff() (account-currency
+        # threshold=10 is meaningless for a symbol sized in LOTS, e.g. capital/
+        # TW futures) — this is a SECOND, independent threshold gate a few
+        # lines below (per sub-order leg), missed when compute_diff() was
+        # patched: a 1-lot diff passed compute_diff() only to be silently
+        # `continue`d here, so place_order_fn was never even called (measured
+        # live 2026-08-14 — "Converged, nothing filled" with zero attempts).
+        is_lot_based = ((asset_spec or {}).get('type') == 'futures_contracts'
+                         or order.get('exchange') == 'capital')
+        leg_threshold = 0 if is_lot_based else threshold
 
         # Detect position flip: split into reduce-only close + directional open
         # to avoid simultaneous long+short on hedge-mode exchanges.
@@ -475,7 +499,7 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
         failed = False
         legs = []  # per-leg exchange-confirmed fills for orders.jsonl / the web 交易歷史
         for sub_diff, reduce_only, is_entry in sub_orders:
-            if abs(sub_diff) < threshold:
+            if abs(sub_diff) < leg_threshold:
                 continue
 
             # Kill switch, enforced here rather than only in lib/order_*.py: every
@@ -527,12 +551,20 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
                         leg[dst] = placed[src]
             legs.append(leg)
 
+            # is_lot_based rows (capital/TW futures) are sized in LOTS, not
+            # account-currency notional — the $-formatted default badly
+            # understates a real index-futures trade (would send "Bought TXF
+            # $1.00" for a 1-lot TXF entry). Same flag as compute_diff()'s
+            # threshold exemption above.
+            unit = '{amount:g} lots' if is_lot_based else '${amount:.2f}'
             if reduce_only:
                 key     = 'order_close_long'  if sub_diff < 0 else 'order_close_short'
-                default = '📉 Closed long {symbol} ${amount:.2f}' if sub_diff < 0 else '📈 Closed short {symbol} ${amount:.2f}'
+                default = (f'📉 Closed long {{symbol}} {unit}' if sub_diff < 0 else
+                           f'📈 Closed short {{symbol}} {unit}')
             else:
                 key     = 'order_buy' if sub_diff > 0 else 'order_sell'
-                default = '📈 Bought {symbol} ${amount:.2f}' if sub_diff > 0 else '📉 Sold {symbol} ${amount:.2f}'
+                default = (f'📈 Bought {{symbol}} {unit}' if sub_diff > 0 else
+                           f'📉 Sold {{symbol}} {unit}')
 
             log_dir = 'BUY' if sub_diff > 0 else 'SELL'
             logging.info(f"{log_dir}{'(reduce)' if reduce_only else ''} {symbol} {abs(sub_diff):.2f}")

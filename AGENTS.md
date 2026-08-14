@@ -175,6 +175,8 @@ Clearing (`clear_halt`) is ONLY done when the user explicitly asks to resume —
 
 **Taiwan futures (TXF / stock futures) strategies MUST apply `txf_settlement_mask` in compute_signals** — the data is an unadjusted continuous series; skipping it books fake roll gaps as PnL (see `references/lib.md`).
 
+**Taiwan index futures `SYMBOL` declares the contract actually traded** (`TXF` 大台 / `MXF` 小台 / `TMF` 微台) — the data layer auto-aliases MXF/TMF to the TXF series, and `FEE` is still per-instrument (see `references/lib.md`).
+
 Do NOT call `bt.plot()` — heavy interactive HTML, useful on neither surface.
 
 After every backtest, `run()` automatically writes `strategies/{name}/stats.json`, generates `strategies/{name}/pnl.png`, and delivers it on the active surface.

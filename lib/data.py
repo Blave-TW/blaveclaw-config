@@ -2107,7 +2107,7 @@ def _fetch_twfutures_raw_smart(symbol, schema, start, end, headers):
 def fetch_twfutures_ohlcv(symbol, schema, start, end, headers):
     """台灣期貨 OHLCV. Returns DataFrame with Open/High/Low/Close/Volume/Amount columns.
 
-    symbol: 'TXF'
+    symbol: 'TXF' ('MXF'/'TMF' accepted as aliases — see below)
     schema: '1d' | '1m' | '5m' | '15m' | '30m' | '60m'
     Volume is in contracts (口數).
 
@@ -2116,10 +2116,20 @@ def fetch_twfutures_ohlcv(symbol, schema, start, end, headers):
     near-month, only the naming differs. 'R2' (next-month continuous) is NOT this
     data and is deliberately not mapped — it still 400s server-side.
 
+    'MXF' / 'TMF' are EXECUTION-INSTRUMENT aliases for the TXF series: a
+    strategy's SYMBOL declares the contract it actually trades (大台/小台/微台),
+    but signals and backtests always run on TXF data — arbitrage pins all three
+    to the same price, TXF minute history is the deepest, and the server has no
+    TMF minute data at all. Both map to 'TXF' here (shared cache dir), so
+    SYMBOL='TMF' fetches TXF bars while the order layer trades TM0000.
+
     For 1d: index is Asia/Taipei tz so df.index[-1].date() returns the correct trading date.
     """
+    symbol = symbol.upper()
     if symbol.endswith('R1') and len(symbol) > 2:
         symbol = symbol[:-2]
+    if symbol in ('MXF', 'TMF'):
+        symbol = 'TXF'
     df = _extend_cache_monthly(
         f'twfutures_{schema}', {'symbol': symbol},
         lambda s, e: _fetch_twfutures_raw_smart(symbol, schema, s, e, headers),
@@ -2306,7 +2316,8 @@ def fetch_stock_futures_ohlcv_symbols(headers):
 
     Entries are suffix-less names ('TXF', 'CDF') — strip a Shioaji-style 'R1'
     suffix before the membership check (fetch_twfutures_ohlcv itself accepts
-    'CDFR1' and maps it, but 'CDFR1' will never appear in this list).
+    'CDFR1' and maps it, but 'CDFR1' will never appear in this list). 'MXF' /
+    'TMF' likewise never appear — fetch_twfutures_ohlcv aliases them to 'TXF'.
     """
     r = _retry_get(f'{BASE}/studio/market/twfutures/ohlcv/symbols', headers=headers, timeout=30)
     return r.json().get('data', [])

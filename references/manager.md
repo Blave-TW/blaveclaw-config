@@ -68,7 +68,7 @@ Polls every 5 seconds; only reconciles when a strategy's `state.json` mtime chan
 
 **Wiring exchange order libraries (required, not optional):** `get_positions()` and `place_order()` must call into a `lib/order_*.py` helper — never remain as `raise NotImplementedError`. When writing a new order library, immediately update `reconciler.py` to import and call it in the same session.
 
-**Auto-halt on exchange disconnect:** `reconciler.py` wraps `get_positions()` in `_get_positions_guarded()`, which counts consecutive failures (`DISCONNECT_HALT_AFTER = 3`) and calls `guard.trip_halt()` once that's hit — the reasoning is that a failed `get_positions()` means the exchange link itself is unreachable (bad/revoked key, IP unwhitelisted, outage), not a single order being rejected (which `reconcile()` already handles per-order without halting). This only ever halts, never auto-clears — same as every other halt, only the user resumes it. Applies uniformly to every exchange without needing a shared exception type, since it keys off `get_positions()` failing at all rather than inspecting the error.
+**Auto-halt on exchange disconnect:** `reconciler.py` wraps `get_positions()` in `_get_positions_guarded()`, which counts consecutive failures (`DISCONNECT_HALT_AFTER = 3`) and calls `guard.trip_halt()` once that's hit — the reasoning is that a failed `get_positions()` means the exchange link itself is unreachable (bad/revoked key, IP unwhitelisted, outage), not a single order being rejected (which `reconcile()` already handles per-order without halting). This only ever halts, never auto-clears — same as every other halt, only the user resumes it. Applies uniformly to every exchange without needing a shared exception type, since it keys off `get_positions()` failing at all rather than inspecting the error — **one deliberate exemption (2026-08-14):** `CapitalCacheLagError` (capital's Read-Your-Writes guard, see `_capital_check_snapshot_caught_up` — the worker snapshot hasn't caught up to this process's own last capital order yet, a bounded ≤60s self-resolving condition, not a disconnect) is excluded from the counter. Keep this list short — a second exemption is a sign the counter design needs rethinking, not another special case.
 
 **Qty precision (most common cause of rejected orders):** before placing any order, the order library must know the symbol's qty step, min qty, and min notional — fetch them from the exchange and cache at startup:
 
@@ -140,6 +140,71 @@ nssm start blaveclaw-reconciler
 ```
 (`%BLAVECLAW_HOME%` — resolve the actual env var on this machine before running these commands, don't type the literal placeholder; defaults to `C:\openclaw` if unset)
 To check status: `nssm status blaveclaw-reconciler`. To stop: `nssm stop blaveclaw-reconciler` (add `nssm set blaveclaw-reconciler Start SERVICE_DEMAND_START` if it should not restart on next boot).
+
+**Capital (群益) reconciler wiring is hand-wired in `manager/reconciler.py`, not auto-wired.**
+`lib.venue_wiring` deliberately excludes `"capital"` (`_NON_AUTO`) because its data shape differs
+from every crypto venue — LOTS not account-currency notional, `buy`/`sell` not `long`/`short`, and
+the order alias (`TM0000`) differs from the resolved contract code every position/report actually
+carries (`TM2608`). `get_positions()`/`place_order()` in `reconciler.py` each contain a capital-only
+branch (`_is_capital_routed()` / `exchange == 'capital'`) that:
+- reads `lib.account_capital.get_positions()` — already lots, `buy`/`sell` — and translates
+  `buy`→`long` / `sell`→`short`, size unchanged (**lots, not TWD notional** — see *`amounts`
+  semantics* below)
+- round-half-up's the target/actual lot diff to a whole lot (`math.floor(raw_lots + 0.5)`, not
+  Python's `round()` — that does banker's rounding, which rounds a `0.5` tie down; a diff below
+  0.5 lot rounds to 0 and places nothing. reconcile()'s account-currency `THRESHOLD` is
+  crypto-notional scale and meaningless at lot count, so `lib.portfolio.compute_diff` skips it
+  entirely for `futures_contracts` rows — this round-half-up is the only gate) and calls
+  `lib.order_capital.place_futures_market_order()` with the near-month alias
+  (`TX00`/`MTX00`/`TM0000`)
+- is scoped to `asset_specs[strategy]["type"] == "futures_contracts"` only — a capital strategy
+  configured as `"tw_stock"` (securities) raises loudly; that path is not wired yet
+
+Every other machine (crypto exchanges — the overwhelming majority of the fleet) falls straight
+through to the existing auto-wire (`auto_get_positions()` / `lib.execute.dispatch_order`),
+untouched — the capital branches only activate when `portfolio_config.json["exchanges"]` actually
+routes a strategy to `"capital"`.
+
+`contract_value` and the alias↔resolved-contract-prefix mapping (`TX00`→`TX`/200,
+`MTX00`→`MTX`/50, `TM0000`→`TM`/10) are a fixed table in `reconciler.py`
+(`_CAPITAL_FUTURES_SPEC`), not user config — only the `TM0000`→`TM2608` prefix is live-verified
+(2026-08-14); confirm `TX00`/`MTX00` on the first live TXF/MXF order and update the comment.
+`contract_value` in that table is no longer read by any code path (see *`amounts` semantics*
+below) — kept only as a documentation mirror of `capital-broker.md` Step 8's `asset_specs`.
+
+**`amounts` semantics fork on `asset_specs[strategy]["type"]` (2026-08-14).** `strategy_amounts()`
+returns `portfolio_config.json["amounts"]` verbatim (`lib/portfolio.py`); what that number MEANS
+depends on the strategy's asset spec:
+- `asset_specs[strategy]["type"] == "futures_contracts"` (currently only capital TW futures):
+  the number IS a lot count — integer, no price involved anywhere in the chain (state.json
+  `position` × `amounts[strategy]` = target lots directly; `_capital_get_positions()` reads actual
+  lots directly; `_capital_place_order()` diffs lots directly).
+- anything else (crypto, the default): the number is account-currency dollars, unchanged.
+
+This was a same-day refactor away from a lots→TWD-notional→lots round trip (aggregate at save
+time, convert back at order time) that priced BOTH conversions off `_txf_index_price()` — a ~1min
+TXF close fetched fresh each time. Because the state.json snapshot and the reconciler poll happen
+at different instants, the two price reads rarely matched, so the round trip introduced spurious
+rounding drift with no economic meaning: a strategy with a constant signal (e.g.
+`tmf_always_hold`, always emits `position=1`) should store exactly 1 lot forever, but the old path
+could round it to 0 or 2 lots depending purely on how much the index moved between save and
+execution. Storing/comparing lots directly removes the round trip and the drift with it —
+`_txf_index_price()` no longer exists in `reconciler.py`.
+
+**Consequence for `lib.portfolio.compute_diff`:** its `threshold` param (account-currency scale,
+default 10) would otherwise swallow every capital order, since lot diffs are single/low-double
+digits — `compute_diff` now skips `threshold` for any row where `asset_spec["type"] ==
+"futures_contracts"` OR either side's `exchange == "capital"` (the latter covers a close-on-removal
+row, which has no `asset_spec` because the strategy no longer appears in `target`).
+
+**Consequence for `web/`:** the workspace's "交易所部位" (`buildPositionsSection` in
+`agent/workspace.html`) renders target/actual/diff through `paintVenueMoney()` with a currency
+suffix and a hardcoded `Math.abs(d) >= 10` highlight threshold — both currency-scale conventions.
+For a capital-routed row this now displays a lot count formatted as money (e.g. "2 TWD" for 2
+lots) and the order-eligible highlight no longer lines up with the real 0.5-lot gate. The 下單設定
+amounts-input table (`pfClientTargets`, same file, lines ~3199-3339) was already updated same-day
+to treat capital amounts as lots — this is the live-positions table's matching update, not yet
+done; flagged for frontend-engineer.
 
 **Capital (群益) broker exception:** NSSM services default to running as `LocalSystem`. Capital's
 `SKCOM.dll` binds the certificate to the Windows identity that issued it (always `Administrator`
