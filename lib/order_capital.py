@@ -58,10 +58,27 @@ the first one (the hand-wired TW reconciler is single-threaded — fine).
 """
 
 import logging
+import os
 import threading
 import time
 
 from lib import guard
+
+# Touched after every accepted order/confirmed fill: lib/capital_worker.py's
+# sleep loop early-ticks on it so the account snapshot (and through the file
+# watcher, the user's dashboard) reflects the trade in seconds instead of at
+# the next 60s poll.
+_REFRESH_FLAG = os.path.join(
+    os.environ.get("BLAVE_AGENT_WORKSPACE", r"C:\blave-agent\workspace"),
+    "state", "capital_refresh")
+
+
+def _request_snapshot_refresh():
+    try:
+        with open(_REFRESH_FLAG, "w"):
+            pass
+    except OSError:
+        pass  # refresh is best-effort; the 60s poll still covers it
 
 # Near-month aliases — the only futures symbols live-tested; month codes like
 # TX03 auto-roll surprisingly (see capital-broker.md) and stay unsupported.
@@ -228,6 +245,7 @@ def _send(sess, send_fn, fields):
         raise CapitalError(f"order rejected code={ncode}: {err} (msg={msg!r})")
     seq_no = str(msg).strip()
     guard.audit("order_sent", seq_no=seq_no, **fields)
+    _request_snapshot_refresh()
     return seq_no
 
 
@@ -267,6 +285,7 @@ def _finish(sess, seq_no, symbol, timeout, fields):
         guard.audit("order_filled", seq_no=seq_no, fill_qty=result["fill_qty"],
                     avg_fill_price=result["avg_fill_price"],
                     resolved_symbol=result["symbol"], **fields)
+        _request_snapshot_refresh()  # fill may land after the send-time tick
     logging.info(
         f"capital {fields['action']} {symbol} {fields['qty']} {fields['unit']} → "
         f"{result['status']} filled={result['fill_qty']} avg={result['avg_fill_price']:.2f}")

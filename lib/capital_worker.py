@@ -19,7 +19,13 @@ from pathlib import Path
 WORKSPACE = os.environ.get("BLAVE_AGENT_WORKSPACE", r"C:\blave-agent\workspace")
 OUT_PATH = os.path.join(WORKSPACE, "state", "capital_account.json")
 HEARTBEAT_PATH = Path(WORKSPACE) / "state" / "heartbeat" / "capital_worker"
+# lib/order_capital.py touches this after every accepted order; the sleep loop
+# below early-ticks on it so a fill reaches the snapshot in seconds, not at the
+# next 60s poll (fill→dashboard was ~3.5min without it, measured 2026-08-17).
+REFRESH_FLAG = os.path.join(WORKSPACE, "state", "capital_refresh")
 POLL_S = 60
+REFRESH_CHECK_S = 2
+MIN_TICK_SPACING_S = 10  # GetFutureRights rate limit (1019) headroom
 EVENT_TIMEOUT_S = 15
 
 # COM is Windows-only; deferred to main() so the module still imports for
@@ -276,7 +282,22 @@ def main():
             _log(f"tick failed: {e}")
             time.sleep(30)  # broker outage must not become a 1.5s relogin storm
             sys.exit(1)  # NSSM restarts us with a fresh COM session
-        time.sleep(POLL_S)
+
+        # Sleep in small slices, early-ticking when an order just went out
+        # (REFRESH_FLAG touched by lib/order_capital) so fills hit the snapshot
+        # fast. MIN_TICK_SPACING_S keeps a floor under back-to-back orders —
+        # the flag stays put and is consumed on the next slice after the floor.
+        slept = 0
+        while slept < POLL_S:
+            time.sleep(REFRESH_CHECK_S)
+            slept += REFRESH_CHECK_S
+            if slept >= MIN_TICK_SPACING_S and os.path.exists(REFRESH_FLAG):
+                try:
+                    os.remove(REFRESH_FLAG)
+                except OSError:
+                    pass
+                _log("refresh flag -> early tick")  # ASCII only: log rides cp950 console redirects
+                break
 
 
 if __name__ == "__main__":

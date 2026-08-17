@@ -14,6 +14,13 @@
 $Workspace = Split-Path -Parent $PSScriptRoot
 Set-Location $Workspace
 
+# Pin the whole PS↔python pipe chain to UTF-8. Without this, Get-Msg's python
+# prints UTF-8 but PowerShell decodes it with the console/OEM codepage, so any
+# non-ASCII template char (✅/⚠️/中文) reaches Telegram as mojibake
+# (live-observed 2026-08-17, uid=1 first reconciler start).
+$OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8
+$env:PYTHONIOENCODING = 'utf-8'
+
 function Notify($Msg) {
     $py = @'
 import sys, os
