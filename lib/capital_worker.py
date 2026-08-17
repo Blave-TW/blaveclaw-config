@@ -22,10 +22,24 @@ HEARTBEAT_PATH = Path(WORKSPACE) / "state" / "heartbeat" / "capital_worker"
 # lib/order_capital.py touches this after every accepted order; the sleep loop
 # below early-ticks on it so a fill reaches the snapshot in seconds, not at the
 # next 60s poll (fill→dashboard was ~3.5min without it, measured 2026-08-17).
-REFRESH_FLAG = os.path.join(WORKSPACE, "state", "capital_refresh")
+# Derived from __file__ like account_capital.py's _SNAPSHOT (NOT the
+# BLAVE_AGENT_WORKSPACE env var above) — producer (order_capital.py) and
+# consumer (this file) are both lib/<name>.py in the same workspace, so this
+# guarantees they agree on the path even if the two NSSM services
+# (blaveclaw-reconciler / blave-agent-capital) ever end up with different
+# environments (audit P2-2: env-or-default would silently write/read
+# different files instead of erroring).
+REFRESH_FLAG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "state", "capital_refresh")
 POLL_S = 60
 REFRESH_CHECK_S = 2
-MIN_TICK_SPACING_S = 10  # GetFutureRights rate limit (1019) headroom
+# GetFutureRights/GetOpenInterest/GetRealBalanceReport are rate-limited (1019
+# SK_ERROR_QUERY_IN_PROCESSING); manual/broker measured 60s safe, not this
+# floor (audit P1 — no burst test at 10s). A hit is handled by
+# QueryInProgress below (skip the tick, keep the last good snapshot) rather
+# than assumed impossible, so the floor being untested is no longer a
+# correctness risk — only extra broker-side query traffic.
+MIN_TICK_SPACING_S = 10
 EVENT_TIMEOUT_S = 15
 
 # COM is Windows-only; deferred to main() so the module still imports for
@@ -74,6 +88,13 @@ def _write_snapshot(payload):
     with open(tmp, "w") as f:
         json.dump(payload, f)
     os.replace(tmp, OUT_PATH)
+
+
+class QueryInProgress(RuntimeError):
+    """SKCOM 1019 SK_ERROR_QUERY_IN_PROCESSING — transient rate-limit, not a
+    real failure. Raised instead of a plain RuntimeError so the main loop can
+    skip this tick (keep the last good snapshot on disk) instead of writing
+    an error snapshot over it and tearing down the COM session."""
 
 
 class Events:
@@ -126,13 +147,19 @@ def _pump_until(cond, timeout=EVENT_TIMEOUT_S):
     return cond()
 
 
+def _check_query_code(code, call_name):
+    if code == 1019:
+        raise QueryInProgress(f"{call_name} code=1019 (rate-limited, transient)")
+    if code != 0:
+        raise RuntimeError(f"{call_name} code={code}")
+
+
 def query_rights(order, login_id, tf_acct):
     """First OnFutureRights row = base currency. Field table: capital-broker.md
     Step 6c (manual V2.13.59 §4-2-i). 權益數 = idx 6, 幣別 = idx 25."""
     Events.rights_rows, Events.rights_done = [], False
     code = order.GetFutureRights(login_id, tf_acct, 1)
-    if code != 0:
-        raise RuntimeError(f"GetFutureRights code={code}")
+    _check_query_code(code, "GetFutureRights")
     if not _pump_until(lambda: Events.rights_done):
         raise RuntimeError("GetFutureRights: no ## terminator within timeout")
     if not Events.rights_rows:
@@ -153,8 +180,7 @@ def query_open_interest(order, login_id, tf_acct):
     2026-08-13 — comma-padded)."""
     Events.oi_rows, Events.oi_done = [], False
     code = order.GetOpenInterest(login_id, tf_acct)
-    if code != 0:
-        raise RuntimeError(f"GetOpenInterest code={code}")
+    _check_query_code(code, "GetOpenInterest")
     if not _pump_until(lambda: Events.oi_done):
         raise RuntimeError("GetOpenInterest: no ## terminator within timeout")
     positions = []
@@ -183,8 +209,7 @@ def query_balance(order, login_id, ts_acct):
     即時庫存 idx 14."""
     Events.balance_rows, Events.balance_done = [], False
     code = order.GetRealBalanceReport(login_id, ts_acct)
-    if code != 0:
-        raise RuntimeError(f"GetRealBalanceReport code={code}")
+    _check_query_code(code, "GetRealBalanceReport")
     if not _pump_until(lambda: Events.balance_done):
         raise RuntimeError("GetRealBalanceReport: no ## terminator within timeout")
     # Aggregate per ticker — one row per 庫存種類 (集保/融資/融券) otherwise
@@ -277,6 +302,13 @@ def main():
             _write_snapshot(snap)
             _log(f"snapshot ok equity={snap.get('equity')} {snap.get('currency')} "
                  f"pos={len(snap['positions'])} hold={len(snap['holdings'])}")
+        except QueryInProgress as e:
+            # Transient rate-limit — the early-tick path (audit P1) can bunch
+            # queries closer than the 60s cadence the manual measured safe.
+            # Skip this tick WITHOUT touching the snapshot: the last good one
+            # (written by a prior tick) stays on disk and stays correct, and
+            # we don't tear down the COM session over a retry-worthy blip.
+            _log(f"tick skipped (rate-limited): {e}")
         except Exception as e:
             _write_snapshot({"ok": False, "error": f"{type(e).__name__}: {e}"})
             _log(f"tick failed: {e}")

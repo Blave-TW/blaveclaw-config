@@ -67,10 +67,11 @@ from lib import guard
 # Touched after every accepted order/confirmed fill: lib/capital_worker.py's
 # sleep loop early-ticks on it so the account snapshot (and through the file
 # watcher, the user's dashboard) reflects the trade in seconds instead of at
-# the next 60s poll.
-_REFRESH_FLAG = os.path.join(
-    os.environ.get("BLAVE_AGENT_WORKSPACE", r"C:\blave-agent\workspace"),
-    "state", "capital_refresh")
+# the next 60s poll. Derived from __file__ (this module IS lib/order_capital.py
+# in the same workspace as capital_worker.py), not the BLAVE_AGENT_WORKSPACE
+# env var — see capital_worker.py's REFRESH_FLAG comment (audit P2-2).
+_REFRESH_FLAG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             "state", "capital_refresh")
 
 
 def _request_snapshot_refresh():

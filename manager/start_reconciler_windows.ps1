@@ -18,7 +18,17 @@ Set-Location $Workspace
 # prints UTF-8 but PowerShell decodes it with the console/OEM codepage, so any
 # non-ASCII template char (✅/⚠️/中文) reaches Telegram as mojibake
 # (live-observed 2026-08-17, uid=1 first reconciler start).
-$OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8
+#
+# $OutputEncoding controls how PS decodes a NATIVE COMMAND's stdout (the `python
+# - $Msg` pipe below) — that's the one causing the mojibake, and it's a plain
+# .NET object property, safe under NSSM's no-console service context.
+# [Console]::OutputEncoding is a DIFFERENT thing (how PS's own host WRITES to a
+# console) and its setter needs a real console handle — it throws
+# "The handle is invalid" under NSSM (audit P2-1, no console to attach to).
+# Wrapped so that throw can't abort the rest of this script (and with it the
+# watchdog loop that's supposed to keep reconciler.py alive).
+$OutputEncoding = New-Object Text.UTF8Encoding $false
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 $env:PYTHONIOENCODING = 'utf-8'
 
 function Notify($Msg) {
