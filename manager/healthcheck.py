@@ -18,10 +18,13 @@ Cron (add ONCE — see references/deployment.md):
   */30 * * * * cd $BLAVECLAW_HOME/workspace && python3 manager/healthcheck.py
   ($BLAVECLAW_HOME defaults to /root/.openclaw if unset)
 
-Self-healing: any `run_strategy.sh <name>` entry found in crontab is
-auto-registered, so strategies deployed before this healthcheck existed are
-covered without anyone re-registering them. Heartbeat files without a registry
-entry are never alerted (a one-off manual run is not a deployment).
+Self-healing: any `run_strategy.sh <name>` OR `wait_for_bar.py <name>` entry
+found in crontab is auto-registered, so strategies deployed before this
+healthcheck existed are covered without anyone re-registering them. The
+wait_for_bar.py case reads the strategy's own INTERVAL (its cron line always
+runs every minute, so the line itself can't say how often the strategy is
+meant to actually fire). Heartbeat files without a registry entry are never
+alerted (a one-off manual run is not a deployment).
 """
 import json
 import os
@@ -95,16 +98,47 @@ def _expect_minutes_from_cron(line):
     return 1440
 
 
+# Unit spellings must match manager/wait_for_bar.py's _INTERVAL_RE/_UNIT_TO_KW
+# exactly — both bare-'m' ('60m') and 'min' ('5min') are in real use across
+# strategies/ (e.g. strategies/txf_composite_60m uses "60m"). If one script's
+# table changes, change both or they'll silently disagree on cadence.
+_INTERVAL_RE = re.compile(r'^INTERVAL\s*=\s*["\'](\d+)(min|m|h|d|w)["\']', re.M)
+_UNIT_TO_MINUTES = {"min": 1, "m": 1, "h": 60, "d": 1440, "w": 10080}
+
+
+def _expect_minutes_from_strategy(name):
+    """Read INTERVAL straight out of strategy.py's source (no import — this
+    runs across every registered strategy on each healthcheck tick and must
+    not execute arbitrary strategy code). Falls back to 1440 (guess long) if
+    INTERVAL is missing or doesn't parse — a late alert beats a false one."""
+    try:
+        text = open(f"strategies/{name}/strategy.py").read()
+    except OSError:
+        return 1440
+    m = _INTERVAL_RE.search(text)
+    if not m:
+        return 1440
+    n, unit = int(m.group(1)), m.group(2)
+    return max(n * _UNIT_TO_MINUTES[unit], 1)
+
+
 def _cron_strategy_entries(crontab_text):
-    """{name: expect_every_minutes} for every run_strategy.sh entry in crontab."""
+    """{name: expect_every_minutes} for every run_strategy.sh / wait_for_bar.py entry
+    in crontab. wait_for_bar.py itself always runs every minute (that's how it polls
+    for the bar), so its cron line can't tell us the strategy's real cadence — the
+    strategy's own INTERVAL does, via _expect_minutes_from_strategy below."""
     entries = {}
     for line in crontab_text.splitlines():
         line = line.strip()
-        if line.startswith("#") or "run_strategy.sh" not in line:
+        if line.startswith("#"):
             continue
         m = re.search(r"run_strategy\.sh\s+(\S+)", line)
         if m:
             entries[m.group(1)] = _expect_minutes_from_cron(line)
+            continue
+        m = re.search(r"wait_for_bar\.py\s+(\S+)", line)
+        if m:
+            entries[m.group(1)] = _expect_minutes_from_strategy(m.group(1))
     return entries
 
 

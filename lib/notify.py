@@ -22,9 +22,27 @@ import requests
 # BLAVECLAW_HOME, not OPENCLAW_HOME — the openclaw product itself reads
 # OPENCLAW_HOME as a home-directory override (state dir becomes
 # $OPENCLAW_HOME/.openclaw), so reusing that name breaks the gateway.
-BLAVECLAW_HOME = os.environ.get("BLAVECLAW_HOME") or (
-    r"C:\openclaw" if platform.system() == "Windows" else "/root/.openclaw"
-)
+#
+# The unset-fallback differs by RUNTIME, not just OS: old BlaveClaw machines
+# keep openclaw.json under /root/.openclaw; the newer Blave Agent runtime
+# (runtime='blave-agent') keeps the equivalent files under /opt/blave-agent
+# instead — verified live on uid=1 (openclaw-1, runtime=blave-agent): neither
+# /root/.openclaw nor a BLAVECLAW_HOME env var exist there at all, so the old
+# unconditional "/root/.openclaw" fallback silently degraded every send_text()
+# to a no-op log line, with no error. Prefer /opt/blave-agent when its config
+# file is actually there — not just the directory, since a half-provisioned
+# machine with the dir but no openclaw.json yet would otherwise trade one
+# silent-degradation path for another, just with a different missing-file
+# error underneath; fall back to the old default otherwise.
+def _default_blaveclaw_home():
+    if platform.system() == "Windows":
+        return r"C:\openclaw"
+    if os.path.isfile("/opt/blave-agent/openclaw.json"):
+        return "/opt/blave-agent"
+    return "/root/.openclaw"
+
+
+BLAVECLAW_HOME = os.environ.get("BLAVECLAW_HOME") or _default_blaveclaw_home()
 _CONFIG_PATH = os.path.join(BLAVECLAW_HOME, "openclaw.json")
 _ALLOW_FROM_PATH = os.path.join(BLAVECLAW_HOME, "credentials", "telegram-default-allowFrom.json")
 

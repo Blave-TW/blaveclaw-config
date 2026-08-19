@@ -5,10 +5,10 @@ CRITICAL: You MUST NEVER deploy a live strategy or set up a cron job without exp
 
 ## No LLM in the Execution Loop
 
-Strategy execution MUST be scheduled as a system cron job (Linux) or Scheduled Task (Windows) that runs Python directly through `manager/run_strategy.sh` — NEVER as an OpenClaw agent cron that wakes the agent to "run the strategy and report the result".
+Strategy execution MUST be scheduled as a system cron job (Linux) or Scheduled Task (Windows) that runs Python directly through `manager/wait_for_bar.py` (Type A/C) or `manager/run_strategy.sh`/direct `strategy.py` (Type B — see its own section below) — NEVER as an OpenClaw agent cron that wakes the agent to "run the strategy and report the result".
 
 - Every agent wake-up burns the user's LLM credit (a full session trajectory per tick). A `*/5` agent cron costs orders of magnitude more than the identical system cron, for zero added value — the strategy script is deterministic Python and needs no reasoning to run.
-- Failure notification is already handled deterministically: `run_strategy.sh` catches crashes and sends the Telegram alert via `manager/alert_failure.py`. An agent cron adds no reliability.
+- Failure notification is already handled deterministically: `run_strategy.sh` (Type B) and `wait_for_bar.py` (Type A/C) both catch crashes and send the Telegram alert via `manager/alert_failure.py`. An agent cron adds no reliability.
 - Agent crons are reserved for work that genuinely needs reasoning: daily/weekly report narration, anomaly triage, reconcile summaries. Frequency: at most a few per day, never per tick.
 - If the same strategy has both a system cron AND an agent cron that runs it, that is a bug — remove the agent cron (keep the system one) after telling the user why.
 - If the user explicitly asks you to run the strategy on every tick via agent cron, explain the credit cost first and offer the system-cron path; only proceed if they still insist.
@@ -61,7 +61,7 @@ run — never `strategies/<name>.py` at the top level (healthcheck flags it).
 
 ## Deployment Healthcheck
 
-`manager/healthcheck.py` alerts the user when something that should be running has gone quiet — a lost cron entry, a dead daemon, or a deployment that was registered but never scheduled. It complements `alert_failure.py` (which only fires when a run happened and crashed). Heartbeats are written automatically: `run_strategy.sh` touches `state/heartbeat/<name>` on every successful run, and repo daemons (reconciler) touch their own each loop.
+`manager/healthcheck.py` alerts the user when something that should be running has gone quiet — a lost cron entry, a dead daemon, or a deployment that was registered but never scheduled. It complements `alert_failure.py` (which only fires when a run happened and crashed). Heartbeats are written automatically: `run_strategy.sh` (Type B) and `wait_for_bar.py`'s own launcher (Type A/C — same contract, reimplemented in Python so it works without bash on Windows) both touch `state/heartbeat/<name>` on every successful run, and repo daemons (reconciler) touch their own each loop.
 
 At deployment time:
 
@@ -78,43 +78,53 @@ schtasks /create /tn "blaveclaw-healthcheck" /tr "cmd /c cd /d %BLAVECLAW_HOME%\
 {"<strategy_name>": {"type": "cron", "expect_every_minutes": 60,
                      "registered_at": "<UTC now, %Y-%m-%dT%H:%M:%S>"}}
 ```
-Strategies scheduled through `run_strategy.sh` are also auto-registered by the healthcheck from crontab, so registration is a safety net, not a hard dependency — but daemons (e.g. reconciler, `{"type": "daemon", "expect_every_minutes": 5}`) MUST be registered manually or the healthcheck cannot see them.
+Strategies scheduled through `wait_for_bar.py` (or the older direct `run_strategy.sh`) are also auto-registered by the healthcheck from crontab, so registration is a safety net, not a hard dependency — but daemons (e.g. reconciler, `{"type": "daemon", "expect_every_minutes": 5}`) MUST be registered manually or the healthcheck cannot see them.
 
 Alert behavior: at most one alert per deployment per 6 hours; a one-line recovery message when the heartbeat returns. Weekday-only schedules (day-of-week restricted cron) use a conservative 3-day threshold so weekends never false-alarm.
 
 ## Cron Job Format (Linux)
 **The `cd` is mandatory in every cron entry.** Cron runs from `/root` by default. All scripts in this repo use relative paths (`manager/`, `strategies/`, `lib/`, `cache/`). Without `cd`, every relative path resolves from `/root` → `FileNotFoundError` → the script crashes silently before sending any Telegram notification.
 
-**Resolve `$BLAVECLAW_HOME` before writing any cron entry** — workspace root is `$BLAVECLAW_HOME/workspace`, not a fixed path. This is the same env var `lib/notify.py`/`auth_service.py` already use: if `BLAVECLAW_HOME` is set in your shell environment, use it; if not, it defaults to `/root/.openclaw`. Every cron entry below writes `$BLAVECLAW_HOME` literally into the line — set it once at the top of the crontab so all entries (present and future) expand it the same way:
+**Resolve `$BLAVECLAW_HOME` before writing any cron entry** — workspace root is `$BLAVECLAW_HOME/workspace`, not a fixed path, and the correct value depends on which RUNTIME this machine is (same distinction `AGENTS.md` already has you determine once per session for OS): old BlaveClaw machines default to `/root/.openclaw`; the newer Blave Agent runtime (layout signal: `/opt/blave-agent/openclaw.json` exists — check the file, not just the directory, or a half-provisioned machine reads as this runtime and fails a different way) defaults to `/opt/blave-agent` instead — `lib/notify.py` resolves this same way, so a cron entry that gets it wrong doesn't error, it just silently drops every Telegram alert (measured live on a Blave Agent machine 2026-08-19: `send_text()` degraded to a no-op log line with `/root/.openclaw`, no error surfaced anywhere). If `BLAVECLAW_HOME` is already set in your shell environment, trust that over guessing from the layout. Every cron entry below writes `$BLAVECLAW_HOME` literally into the line — set it once at the top of the crontab so all entries (present and future) expand it the same way:
 ```
-BLAVECLAW_HOME=/root/.openclaw
+BLAVECLAW_HOME=/opt/blave-agent    # or /root/.openclaw — whichever this machine's layout resolved to, see above
 */30 * * * * cd $BLAVECLAW_HOME/workspace && python3 manager/healthcheck.py
-5 * * * * cd $BLAVECLAW_HOME/workspace && bash manager/run_strategy.sh <name>
+* * * * * cd $BLAVECLAW_HOME/workspace && python3 manager/wait_for_bar.py <name>
 ```
-(check `crontab -l` first — if a `BLAVECLAW_HOME=` line already exists, don't add a second one; if this runtime's own `BLAVECLAW_HOME` differs from `/root/.openclaw`, use that value instead — never assume, resolve it from the actual environment on this machine.)
+(check `crontab -l` first — if a `BLAVECLAW_HOME=` line already exists, don't add a second one and don't assume it's wrong; only replace it if you've confirmed the existing value doesn't match this machine's actual layout.)
 
-**Always call `strategy.py` through `manager/run_strategy.sh`, never directly.** A crash inside `strategy.py` — including an import error at the top of the file, before `lib/runner.py` ever runs — otherwise has no path to notify the user: cron just swallows the non-zero exit. `run_strategy.sh` is the only layer that can catch a failure the Python side never got a chance to handle, and it sends the Telegram alert itself (via `manager/alert_failure.py`) rather than relying on the strategy's own code to do it.
+**Type A/C: always go through `manager/wait_for_bar.py`, never call `strategy.py` or `run_strategy.sh` straight off the cron.** A fixed "N minutes after the boundary" offset either wastes time on days the data lands fast or isn't enough on days it's slow (and users notice — "why does it always wait 5 minutes"). `wait_for_bar.py` polls every minute, checks whether the bar the strategy actually needs (via the strategy's own `fetch_data`) has landed yet, and only then runs it; once that bar is processed it exits immediately with no fetch and no log until the next bar boundary — see the docstring in `manager/wait_for_bar.py` for the exact freshness check (Type C waits for every symbol in the universe, not just the first to update). If the bar still hasn't landed after 15 minutes it sends one Telegram alert (not a repeat per minute) and keeps polling — this is a different signal from a crashed run and from the healthcheck (schedule went quiet entirely); a data source that's actually down can trip more than one of the three, and that overlap is expected, not a bug.
 
-Strategy execution cron:
+**`wait_for_bar.py` does NOT shell out to `manager/run_strategy.sh`** — that script is bash-only, and Capital(群益)/Taiwan-broker strategies run on Windows, which has no bash. Instead `wait_for_bar.py` launches `strategy.py` directly with `sys.executable` (whatever interpreter cron is already using) and reimplements the same crash-safety contract in pure Python: capture output, log + Telegram-alert via `manager/alert_failure.alert()` on a non-zero exit or a hung run (killed after a timeout), touch the heartbeat on success. This is why it's safe to schedule identically on Linux and Windows — see both cron forms below.
+
+Strategy execution cron (Type A/C):
 ```
-5 * * * * cd $BLAVECLAW_HOME/workspace && bash manager/run_strategy.sh <name>
+* * * * * cd $BLAVECLAW_HOME/workspace && python3 manager/wait_for_bar.py <name>
 ```
 
-Never write `python3 strategies/<name>/strategy.py` directly in a cron entry — always go through `manager/run_strategy.sh <name>`, and the `cd &&` prefix is still not optional.
+Never write `python3 strategies/<name>/strategy.py` or `bash manager/run_strategy.sh <name>` directly in a cron entry for a Type A/C strategy — always go through `manager/wait_for_bar.py <name>`, and the `cd &&` prefix is still not optional.
 
 ## Scheduled Task Format (Windows)
 Same entry, via `schtasks`. The `cd /d` is mandatory for the same reason as Linux's `cd &&` — all scripts use relative paths. Resolve `%BLAVECLAW_HOME%` the same way as Linux (defaults to `C:\openclaw` if unset) rather than assuming a fixed path.
 
-Strategy execution task (hourly, mirrors `5 * * * *`):
+Strategy execution task, Type A/C (every minute — `wait_for_bar.py` itself decides when the real run fires; note this calls `wait_for_bar.py`, not `strategy.py` directly — the old direct-`strategy.py` form had no crash protection on Windows at all, since `run_strategy.sh` never ran there either):
 ```
-schtasks /create /tn "blaveclaw-strategy-<name>" /tr "cmd /c cd /d %BLAVECLAW_HOME%\workspace && python strategies\<name>\strategy.py" /sc hourly /mo 1 /st 00:05 /ru SYSTEM /f
+schtasks /create /tn "blaveclaw-strategy-<name>" /tr "cmd /c cd /d %BLAVECLAW_HOME%\workspace && python manager\wait_for_bar.py <name>" /sc minute /mo 1 /ru SYSTEM /f
 ```
 
 ## Type B (Everything else) — mandatory flow:
+Type B strategies (screener, grid, arbitrage, one-off execution, alert bot) have no `INTERVAL`/`fetch_data` contract to poll a bar against, so they do NOT go through `wait_for_bar.py` — they keep a plain fixed-cadence schedule, same as before this mechanism existed.
 1. Skip backtest entirely
 2. Ask the user to confirm before deploying: "Do you want to deploy this live? Reply YES to confirm."
 3. After YES, ask **Spot or futures/perpetual?** and **Align positions?** (same as Type A step 3) before writing any code.
-4. Only after all confirmations: set up the schedule (cron or Scheduled Task per above), and add the healthcheck schedule if not already present
+4. Only after all confirmations: agree a run cadence with the user (there's no bar to wait for, so this is just "how often"), set up the schedule, and add the healthcheck schedule if not already present:
+```
+<M> * * * * cd $BLAVECLAW_HOME/workspace && bash manager/run_strategy.sh <name>
+```
+```
+schtasks /create /tn "blaveclaw-strategy-<name>" /tr "cmd /c cd /d %BLAVECLAW_HOME%\workspace && python strategies\<name>\strategy.py" /sc minute /mo <N> /ru SYSTEM /f
+```
+(Linux still goes through `run_strategy.sh` for the same crash-safety reason as always; Windows Type B has no equivalent wrapper yet — same pre-existing gap this whole mechanism didn't set out to fix — so a Type B crash on Windows is silent. Flag this to the user if they're deploying Type B live on Windows.)
 
 ## Live vs Backtest
 Live trading uses the SAME script as backtest — only `MODE` changes. Keep `START` the same long date range as backtest so the website report shows full history. Always keep `END = None` for live — setting it to a specific date will cap data fetch at that date and break live operation.

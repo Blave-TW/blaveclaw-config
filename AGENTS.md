@@ -48,7 +48,7 @@ Blave API credentials are in .env file in the workspace.
 
 CRITICAL: Read `references/deployment.md` before deploying any strategy live or setting up cron jobs.
 
-**No LLM in the execution loop.** Scheduled strategy runs go on the system cron / Scheduled Task via `manager/run_strategy.sh` — NEVER an agent cron that wakes you up to "run the strategy and report". Every agent wake-up burns the user's credit; a per-tick agent cron costs orders of magnitude more than the identical system cron for zero added value. Agent crons are only for work that needs reasoning (daily report narration, anomaly triage) — at most a few per day. Details in `references/deployment.md`.
+**No LLM in the execution loop.** Scheduled strategy runs go on the system cron / Scheduled Task via `manager/wait_for_bar.py` (Type A/C — polls for the bar the strategy needs, then runs it directly, no bash involved) or `manager/run_strategy.sh` (Type B) — NEVER an agent cron that wakes you up to "run the strategy and report". Every agent wake-up burns the user's credit; a per-tick agent cron costs orders of magnitude more than the identical system cron for zero added value. Agent crons are only for work that needs reasoning (daily report narration, anomaly triage) — at most a few per day. Details in `references/deployment.md`.
 
 ## Examples
 
@@ -131,7 +131,7 @@ Always call `lib.chart_style.apply()` before plotting — never matplotlib defau
 - **NEVER write `except Exception: pass`** — always `except Exception as e: print(f"Error: {e}")`
 - NEVER chain commands with `&&`, `||`, or `;` — run ONE command at a time
 - Use `python3 file.py [args]` or `node file.js` directly
-- To run a strategy: `python3 strategies/my_strategy/strategy.py` with `workdir=$BLAVECLAW_HOME/workspace` — `$BLAVECLAW_HOME` defaults to `/root/.openclaw` (Linux) / `C:\openclaw` (Windows) when unset, same resolution as `lib/notify.py`; some runtimes set it to a different path
+- To run a strategy: `python3 strategies/my_strategy/strategy.py` with `workdir=$BLAVECLAW_HOME/workspace` — `$BLAVECLAW_HOME` defaults to `/root/.openclaw` (old BlaveClaw runtime) / `/opt/blave-agent` (newer Blave Agent runtime — detect by whether `/opt/blave-agent/openclaw.json` exists, not just the directory) on Linux, `C:\openclaw` on Windows, when unset; same resolution as `lib/notify.py`. Getting this wrong doesn't error — `lib/notify.py` just silently stops sending Telegram alerts — so when in doubt, check the actual environment rather than assume
 
 ## Cross-Day Task Memory
 
