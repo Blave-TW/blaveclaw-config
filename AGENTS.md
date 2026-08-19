@@ -111,6 +111,7 @@ When the user pastes an exchange API key/secret into chat: write it to `.env` im
 Import from `lib/` — never write these functions inline. Full function signatures: `references/lib.md`.
 
 Key rules:
+- **"MCPT" always means Monte Carlo Permutation Test, never an asset ticker.** Call `lib.validation.mcpt`/`plot_mcpt` (signature in `references/lib.md`) — never hand-roll a substitute (e.g. a bootstrap/resample of realized returns): that answers a different question and produces no p-value, which is the whole point of MCPT.
 - All data fetching: `lib/data.py`; execution logic: `lib/execute.py`; param scan: `lib/param_scan.py`; notifications: `lib/notify.py`
 - **Pairing check — only when the run actually notifies via Telegram:** if a strategy sends Telegram messages, check pairing first (see `references/strategy-code.md`) and stop if unpaired. A web-workspace user may never connect Telegram — never block a backtest or a data question on pairing.
 - New reusable logic goes in `lib/` first (e.g. `lib/order_binance.py`), then import in strategy
