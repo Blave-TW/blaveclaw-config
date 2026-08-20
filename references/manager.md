@@ -132,6 +132,18 @@ the user's own money:**
 4. No reconciler restart needed — it re-reads the config every poll, same as
    every other `portfolio_config.json` field.
 
+**Workspace update ⇒ reconciler restart (REQUIRED, audit #3):** the reconciler
+imports `lib/portfolio.py` once at process start — updating the workspace
+files does NOT reload a running daemon. The runtime's `can_wait_start`
+capability probes the file on DISK, so after a workspace update the web can
+offer 「等新訊號才進場」 while the in-memory reconciler still runs the old
+code with no gate support: the gate gets written, HALT clears, and the old
+loop catches up at market against the user's explicit choice. Whenever
+`lib/` or `manager/` files are updated on a machine, restart the reconciler
+in the same session (`tmux kill-session -t reconciler` + the start wrapper,
+or `restart_reconciler` from the web) before telling the user anything is
+enabled.
+
 **Fail-loud guard:** with `self_ledger` on and no baseline in
 `manager/ledger_seed.json` (seed_ledger.py never run, or the file corrupt),
 `reconcile()` REFUSES to trade — it raises, which surfaces through the

@@ -17,7 +17,7 @@ def _append_reconciler_log(order):
         logging.error(f"orders.jsonl append failed: {e}")
 
 
-def _write_reconcile_snapshot(target, actual, orders):
+def _write_reconcile_snapshot(target, actual, orders, ledger=None):
     """Record what this reconcile actually saw, for anything that needs to show
     live positions without querying the exchange itself.
 
@@ -26,18 +26,26 @@ def _write_reconcile_snapshot(target, actual, orders):
     round-trip. So this is the only place `actual` is ever observed, and without
     persisting it the workspace could only ever show half the picture.
 
+    `ledger` (self_ledger.ledger_positions() output, or None when the feature is
+    off) is recorded alongside `actual` so a future workspace view can show
+    "bot's own book" vs "exchange's real position" side by side instead of only
+    ever seeing whichever one reconcile() happened to diff against.
+
     Best-effort: a failure here must never stop a reconcile that already placed
     orders.
     """
     try:
         os.makedirs('manager', exist_ok=True)
+        doc = {
+            'ts':     datetime.utcnow().isoformat(),
+            'target': target,
+            'actual': actual,
+            'orders': orders,
+        }
+        if ledger is not None:
+            doc['ledger'] = ledger
         with open('manager/last_reconcile.json', 'w') as f:
-            json.dump({
-                'ts':     datetime.utcnow().isoformat(),
-                'target': target,
-                'actual': actual,
-                'orders': orders,
-            }, f, indent=2)
+            json.dump(doc, f, indent=2)
     except Exception as e:
         logging.warning(f'failed to write manager/last_reconcile.json: {e}')
 
@@ -59,6 +67,223 @@ def _record_order_error(symbol, exchange, error):
             json.dump(rows[-5:], f, indent=2)
     except Exception as e:
         logging.warning(f'failed to record order error: {e}')
+
+
+# ── self-ledger (bot's own tracked position, decoupled from the exchange's
+#    raw account read — see portfolio_config.json["self_ledger"]) ──────────
+# Root problem: get_positions_fn() reads the ACCOUNT's real position, which on
+# a single-account setup includes whatever the user opened by hand — reconcile()
+# then reads that manual position as "already have it" and trades against it
+# (adds to it, or closes it down to target). self_ledger fixes this not by
+# reading the account differently, but by not reading it AT ALL for diffing:
+# the bot instead tracks what IT has bought/sold from its own order log
+# (manager/orders.jsonl, already written by _append_reconciler_log below) and
+# diffs target against that running total. A position opened outside this
+# process is invisible to the ledger by construction, so it can never be
+# absorbed. Trade-off (see references/manager.md § self_ledger): the ledger can
+# drift from the real account (missed fills, manual trades on the same symbol)
+# — this only fixes "bot ignores what it doesn't own", not "bot always knows
+# the true account state"; margin/liquidation checks still need the real
+# get_positions_fn() read, never the ledger.
+_LEDGER_SEED_PATH = 'manager/ledger_seed.json'
+_ORDERS_LOG_PATH  = 'manager/orders.jsonl'
+
+
+def _load_ledger_seed():
+    """{'seeded_at': iso_str, 'symbols': {symbol: {'size': signed_float,
+    'ts': iso_str}}} — 'seeded_at' is the whole-account cutoff from
+    seed_ledger(): orders.jsonl entries at/before it are excluded for EVERY
+    symbol, including symbols with no per-symbol row (a flat account seeds an
+    empty symbols map, but its history must still be cut off — measured live
+    2026-08-20: without this, a flat-account seed summed the box's prior
+    test-trade history into a phantom position). A per-symbol 'ts'
+    (zero_ledger_symbols) overrides the global cutoff for that symbol.
+    Corrupt/missing file reads as no seed at all: every entry in orders.jsonl
+    counts, from the start of the file."""
+    empty = {'seeded_at': '', 'symbols': {}}
+    try:
+        with open(_LEDGER_SEED_PATH) as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            return empty
+        return {
+            'seeded_at': str(raw.get('seeded_at') or ''),
+            'symbols': {k: {'size': float(v.get('size', 0) or 0),
+                            'ts': str(v.get('ts') or '')}
+                        for k, v in (raw.get('symbols') or {}).items()},
+        }
+    except (OSError, ValueError, AttributeError):
+        return empty
+
+
+def _save_ledger_seed(seed):
+    # tmp+replace (same convention as lib/guard.py, manager/reconciler.py's
+    # last-order marker): flatten() writes this file while the reconciler's
+    # 5s poll may be mid-read — a half-written file parses as "no seed at
+    # all", which ledger_positions() degrades into summing the entire
+    # orders.jsonl from the top (a much larger phantom ledger), and that
+    # mis-read would land exactly during a panic close-all.
+    os.makedirs('manager', exist_ok=True)
+    tmp = _LEDGER_SEED_PATH + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(seed, f, indent=2)
+    os.replace(tmp, _LEDGER_SEED_PATH)
+
+
+def seed_ledger(get_positions_fn, absorb=False):
+    """One-time baseline for the self-ledger. Two modes — picking the wrong
+    one on an account that HOLDS positions trades real money, so the default
+    is the one that never touches what the user already owns:
+
+    Default (absorb=False, "fresh start"): everything currently on the
+    account belongs to the USER — the bot starts from a zero book and only
+    ever manages what it buys from now on. THE mode for the feature's target
+    user (has manual positions, wants the bot to leave them alone). Caveat
+    the caller must surface: if the BOT also holds live positions at seed
+    time, they become the user's — the bot will re-buy its full target on
+    top (doubled exposure). Flatten the bot's own positions first.
+
+    absorb=True: the account's current position is 100% BOT-owned as of now.
+    Only correct on an account with NO manual positions mixed in (e.g.
+    migrating a bot-only machine without closing anything) — on a mixed
+    account this adopts the user's manual positions into the bot's book, and
+    the bot will later trade them away. get_positions_fn is only called in
+    this mode.
+
+    Either mode REPLACES THE WHOLE FILE and forgets every fill recorded
+    before now — a deliberate, explicit action, never called automatically by
+    reconcile(). To reset only SOME symbols (e.g. after a flatten), use
+    zero_ledger_symbols() instead.
+
+    Returns the seeded {symbol: signed_size} ({} for fresh start) for the
+    caller to show the user.
+    """
+    now = datetime.utcnow().isoformat()
+    symbols = {}
+    if absorb:
+        for symbol, pos in (get_positions_fn() or {}).items():
+            size = float(pos.get('size', 0) or 0)
+            side = pos.get('side')
+            signed = size if side == 'long' else (-size if side == 'short' else 0.0)
+            symbols[symbol] = {'size': signed, 'ts': now}
+    # 'seeded_at' cuts off history for EVERY symbol, incl. ones with no row —
+    # pre-seed orders.jsonl history must never leak into the ledger
+    _save_ledger_seed({'seeded_at': now, 'symbols': symbols})
+    return {k: v['size'] for k, v in symbols.items()}
+
+
+def zero_ledger_symbols(symbols):
+    """Reset the self-ledger baseline to flat, timestamped now, for exactly
+    these symbols — every OTHER symbol's seed and accumulated history is left
+    untouched. Use after closing a real position OUTSIDE the normal target-vs-
+    ledger diff (flatten/close-all: manager/flatten.py) — those closes get
+    logged to manager/orders.jsonl too, and without this they would be summed
+    into ledger_positions() as if they were an ordinary bot trade, driving the
+    ledger to a phantom position it never actually held (see
+    references/manager.md § self_ledger — the flatten interaction). No-op
+    (creates a zeroed entry) for a symbol with no prior seed. Safe to call even
+    when self_ledger is currently off — the seed file just sits unused until
+    it's turned on, and by then this IS the correct baseline.
+    """
+    if not symbols:
+        return
+    seed = _load_ledger_seed()
+    now = datetime.utcnow().isoformat()
+    for symbol in symbols:
+        seed['symbols'][symbol] = {'size': 0.0, 'ts': now}
+    _save_ledger_seed(seed)
+
+
+def ledger_positions():
+    """The bot's OWN tracked position per symbol: each symbol's seed_ledger()/
+    zero_ledger_symbols() baseline plus every fill logged for it since (manager/
+    orders.jsonl `legs[].signed_diff`, summed) — never the exchange's raw
+    account position.
+
+    A symbol with no seed at all (self_ledger turned on but seed_ledger() never
+    run) sums EVERY orders.jsonl entry for it from the start of the file —
+    on a flat account that is harmlessly correct, but on an account that
+    already holds a live bot position it is WRONG unless every fill really is
+    in that file (seed_ledger() MUST run first on an account with an existing
+    position, or reconcile() re-buys the whole target on top of what already
+    exists — see references/manager.md § self_ledger).
+
+    Returns the same shape get_positions_fn() returns:
+    {symbol: {'side': 'long'|'short'|None, 'size': float}}.
+    """
+    seed = _load_ledger_seed()
+    totals = {symbol: row['size'] for symbol, row in seed['symbols'].items()}
+
+    try:
+        with open(_ORDERS_LOG_PATH) as f:
+            lines = f.readlines()
+    except OSError:
+        lines = []
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        symbol = entry.get('symbol')
+        if not symbol:
+            continue
+        # entries at/before this symbol's cutoff are already inside its
+        # baseline. Per-symbol ts (zero_ledger_symbols) wins over the global
+        # seeded_at, so zeroing one symbol never discards another symbol's
+        # history — and seeded_at covers symbols flat at seed time, whose
+        # pre-seed history must be excluded too (measured live 2026-08-20).
+        cutoff = seed['symbols'].get(symbol, {}).get('ts') or seed['seeded_at']
+        if cutoff and str(entry.get('ts') or '') <= cutoff:
+            continue
+        for leg in entry.get('legs') or []:
+            try:
+                totals[symbol] = totals.get(symbol, 0.0) + float(leg.get('signed_diff') or 0)
+            except (TypeError, ValueError):
+                continue
+
+    return {
+        symbol: {'side': 'long' if size > 0 else ('short' if size < 0 else None),
+                 'size': abs(size)}
+        for symbol, size in totals.items()
+        if abs(size) > 1e-9
+    }
+
+
+# ── signal gate (啟動,等新訊號才進場 — resume_wait) ─────────────────────────
+# state/signal_gate.json = {strategy: position_value_recorded_at_resume}.
+# Written by the runtime's resume_wait command right before it clears HALT.
+# While a funded strategy's CURRENT state.json position equals its recorded
+# value, that strategy has "no new signal yet": its symbol is excluded from
+# reconciling entirely — no catch-up entry, and no close-on-removal against
+# whatever the ledger/book already holds. The moment the position value
+# differs, the gate lifts PERMANENTLY (removed from the file) and the strategy
+# trades normally from then on. MultiCharts-style: the start button never
+# places orders; only a signal change does.
+_SIGNAL_GATE_PATH = 'state/signal_gate.json'
+
+
+def _load_signal_gate():
+    try:
+        with open(_SIGNAL_GATE_PATH) as f:
+            raw = json.load(f)
+        return {str(k): float(v) for k, v in (raw or {}).items()}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}
+
+
+def _save_signal_gate(gate):
+    try:
+        os.makedirs(os.path.dirname(_SIGNAL_GATE_PATH), exist_ok=True)
+        tmp = _SIGNAL_GATE_PATH + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(gate, f, indent=2)
+        os.replace(tmp, _SIGNAL_GATE_PATH)
+    except OSError as e:
+        logging.warning(f'signal_gate persist failed: {e}')
 
 
 # ── market dimension (spot vs swap) ─────────────────────────────────────────
@@ -251,6 +476,8 @@ def aggregate_portfolio():
     asset_specs   = config.get('asset_specs', {})
     states        = load_all_states()
     totals        = {}
+    gate          = _load_signal_gate()
+    lifted        = set()
 
     for name, state in states.items():
         symbol     = state.get('symbol')
@@ -266,6 +493,27 @@ def aggregate_portfolio():
         if not symbol or not exchange or amount == 0:
             continue
 
+        # signal gate (resume_wait): the strategy's signal hasn't changed
+        # since the user started with 「等新訊號才進場」 — mark it; the moment
+        # the value differs the gate lifts PERMANENTLY. Checked only for
+        # funded strategies (the ones that could trade at all).
+        gated = False
+        if name in gate:
+            # "new signal" = the DIRECTION changed (enter, exit, or flip —
+            # sign including zero), not any value change: a vol-scaled
+            # strategy re-computing 0.5→0.52 same-direction is a sizing
+            # adjustment, not a new trading decision, and must not lift the
+            # wait (audit #6, Wei 2026-08-20). For ±1/0 strategies this is
+            # identical to exact-value comparison.
+            def _sign(x):
+                return 1 if x > 0 else (-1 if x < 0 else 0)
+            if _sign(position) != _sign(gate[name]):
+                logging.info(f"[portfolio] signal gate lifted for {name} "
+                             f"({gate[name]:g}→{position:g}) — trading normally")
+                lifted.add(name)
+            else:
+                gated = True
+
         contribution = amount * position
 
         # spot and swap are different inventories — same symbol, different key,
@@ -277,8 +525,12 @@ def aggregate_portfolio():
         if key not in totals:
             totals[key] = {'signed': 0.0, 'exchange': exchange,
                            'asset_spec': asset_spec, 'market': market,
-                           'contributors': []}
+                           'contributors': [], 'gated': False}
         totals[key]['signed'] += contribution
+        # ANY gated funded contributor gates the whole symbol — with mixed
+        # gating, trading the un-gated part would immediately "correct" the
+        # gated strategy's absent contribution, defeating the wait
+        totals[key]['gated'] = totals[key]['gated'] or gated
         totals[key]['contributors'].append({
             'strategy':          name,
             'position':          position,
@@ -304,7 +556,22 @@ def aggregate_portfolio():
             'asset_spec':   data['asset_spec'],
             'market':       data['market'],
             'contributors': data['contributors'],
+            'gated':        data['gated'],
         }
+    if lifted:
+        # merge-on-save (audit #7): re-load the file and remove ONLY the lifted
+        # names — dumping our stale in-memory copy would clobber a gate that
+        # resume_wait rewrote mid-round (lost update: the fresh gate entry
+        # vanishes and that strategy catches up next round against the user's
+        # explicit choice).
+        fresh = _load_signal_gate()
+        changed = False
+        for name in lifted:
+            if name in fresh:
+                del fresh[name]
+                changed = True
+        if changed:
+            _save_signal_gate(fresh)
     return result
 
 
@@ -401,6 +668,15 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
     def _msg(key, default, **kw):
         return msgs.get(key, default).format(**kw)
 
+    # TOCTOU guard (audit #4): a round that STARTED under HALT must never open
+    # exposure, even if the user clears the halt mid-round — this round's gate/
+    # target were computed from pre-resume state (e.g. resume_wait writes the
+    # signal gate and THEN clears HALT; a round already past its gate read
+    # would otherwise place the exact catch-up orders the user opted out of).
+    # Clearing HALT changes the reconciler's watched __halt__ mtime, so a
+    # clean round follows within one poll tick — the cost is one round's delay.
+    halted_at_start = guard.halted()
+
     target = aggregate_portfolio()
     actual = get_positions_fn()
     # Defense in depth: target keys are canonical (dashless uppercase) since
@@ -413,11 +689,53 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
         sym, market = split_key(str(k))
         return market_key(sym.replace('-', '').upper(), market)
     actual = {_canon_key(k): v for k, v in (actual or {}).items()}
-    orders = compute_diff(target, actual, threshold)
+
+    # self_ledger (portfolio_config.json): diff — and every flip/reduce-only
+    # decision in the loop below — against the bot's OWN tracked position
+    # (lib.portfolio.ledger_positions), not the raw exchange read, so a
+    # position the user opened by hand is never read as "already have it" and
+    # never split into a reduce-only close leg against it. `actual` (the real
+    # exchange read) still feeds the snapshot below for drift comparison / a
+    # future workspace view — it is only skipped as the DIFFING input here.
+    # See references/manager.md § self_ledger.
+    ledger = None
+    if config.get('self_ledger'):
+        # Fail loud without a seed (audit P1-6, mandatory since users enable
+        # this themselves): an unseeded ledger silently sums the ENTIRE
+        # orders.jsonl history — on any machine with prior trading that is a
+        # plausible-looking but wrong book, and the bot would trade to
+        # "correct" it. Raising here surfaces as the reconciler's normal
+        # error path (Telegram + retreat to heartbeat), no orders placed.
+        if not _load_ledger_seed()['seeded_at']:
+            raise RuntimeError(
+                "self_ledger is on but manager/ledger_seed.json has no baseline — "
+                "run `python3 manager/seed_ledger.py` first (see "
+                "references/manager.md § self_ledger); refusing to trade on an "
+                "unseeded ledger")
+        ledger = {_canon_key(k): v for k, v in (ledger_positions() or {}).items()}
+    diff_actual = ledger if ledger is not None else actual
+
+    # signal gate (resume_wait): a gated symbol is excluded from BOTH sides of
+    # the diff — no catch-up entry (absent target would be wrong: it exists,
+    # it's gated), and no close-on-removal against whatever the book already
+    # holds. The gate lifts inside aggregate_portfolio() the moment the
+    # strategy's signal changes; from that round on the symbol diffs normally.
+    gated_symbols = {k for k, v in target.items() if v.get('gated')}
+    full_target = target  # snapshot keeps gated rows (flagged 'gated': True)
+    if gated_symbols:
+        logging.info(f"[reconcile] signal-gated (waiting for a new signal): "
+                     f"{sorted(gated_symbols)}")
+        target = {k: v for k, v in target.items() if k not in gated_symbols}
+        diff_actual = {k: v for k, v in diff_actual.items() if k not in gated_symbols}
+
+    orders = compute_diff(target, diff_actual, threshold)
 
     # Written before placing, so it records the state that WAS acted on. A
     # reconcile that crashes mid-loop still leaves the observation behind.
-    _write_reconcile_snapshot(target, actual, orders)
+    # full_target, not the filtered dict (audit #8): a gated strategy's target
+    # must stay visible to the workspace view — carrying 'gated': True — not
+    # vanish while it waits for its signal.
+    _write_reconcile_snapshot(full_target, actual, orders, ledger=ledger)
 
     # Checked once via signature inspection (not a runtime try/except TypeError) so a
     # TypeError raised *after* place_order_fn already submitted the order — e.g. while
@@ -474,8 +792,12 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
         leg_threshold = 0 if is_lot_based else threshold
 
         # Detect position flip: split into reduce-only close + directional open
-        # to avoid simultaneous long+short on hedge-mode exchanges.
-        a        = actual.get(symbol, {})
+        # to avoid simultaneous long+short on hedge-mode exchanges. Must use
+        # diff_actual (ledger, when self_ledger is on) — not actual — or a
+        # manual position visible only in the real exchange read would get
+        # classified as a flip and generate a reduce-only close leg against it,
+        # exactly the touch self_ledger exists to prevent.
+        a        = diff_actual.get(symbol, {})
         a_signed = (a.get('size', 0)  if a.get('side') == 'long'  else
                     -a.get('size', 0) if a.get('side') == 'short' else 0)
         t_signed = a_signed + diff
@@ -507,7 +829,7 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
             # place_order_fn of an exchange that has no official lib/order_* module.
             # Deliberately silent on Telegram — the user tripped the halt, and a
             # denial every poll is the noise they were trying to stop.
-            if is_entry and guard.halted():
+            if is_entry and (halted_at_start or guard.halted()):
                 guard.audit('order_denied_halt', symbol=symbol, signed_diff=sub_diff,
                             exchange=order.get('exchange'), source='reconcile')
                 logging.warning(
@@ -549,6 +871,42 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
                                  ('exchange', 'exchange')):
                     if placed.get(src) is not None:
                         leg[dst] = placed[src]
+                # self_ledger accounting (2026-08-20 audit P0-2): sub_diff is
+                # the PRE-rounding request — capital rounds to a whole lot,
+                # crypto floors to a qty step — so it can differ from what
+                # actually filled. ledger_positions() sums this field directly,
+                # so a signed_diff that doesn't match the real fill drifts the
+                # ledger by the rounding gap every round, forever (the next
+                # round diffs against the already-wrong ledger, so it never
+                # self-corrects). Prefer the exchange-confirmed fill — same
+                # convention lib.execute._finish() already uses for the async
+                # TWAP/chase/custom path; sub_diff stays the fallback only
+                # when executed_qty is unavailable (older/hand-wired
+                # place_order_fn implementations).
+                # Defensive: the order is ALREADY filled at this point — a bad
+                # type from a hand-written place_order_fn must degrade to the
+                # sub_diff fallback, never raise and drop the whole leg from
+                # orders.jsonl (a filled trade the ledger never hears about).
+                try:
+                    executed_qty = leg.get('executed_qty')
+                    if executed_qty is not None:
+                        sign = 1.0 if sub_diff >= 0 else -1.0
+                        if is_lot_based:
+                            # capital/futures_contracts: executed_qty IS lots,
+                            # already the unit compute_diff() worked in
+                            filled_signed = sign * abs(float(executed_qty))
+                        elif leg.get('fill_price'):
+                            # crypto: executed_qty is BASE-currency qty — convert to
+                            # account-currency notional to match sub_diff's unit
+                            filled_signed = sign * abs(float(executed_qty)) * float(leg['fill_price'])
+                        else:
+                            filled_signed = None
+                        if filled_signed is not None:
+                            leg['signed_diff'] = round(filled_signed, 2)
+                except (TypeError, ValueError) as e:
+                    logging.warning(f"[reconcile] {symbol}: fill-based signed_diff "
+                                    f"unavailable ({e}) — recording the requested "
+                                    f"amount instead")
             legs.append(leg)
 
             # is_lot_based rows (capital/TW futures) are sized in LOTS, not

@@ -178,7 +178,17 @@ def _reduce_qty(env, vid, order, sym, direction, qty):
     below the reconcile threshold forever (measured: closing 0.04 ct became
     0.03 ct, $6.4 residual). Ceiling is only safe WITH the cap, so when the
     position can't be read the qty is returned un-ceiled (floor path — dust
-    possible, oversell impossible)."""
+    possible, oversell impossible).
+
+    self_ledger EXCEPTION (measured live 2026-08-20 on uid 29026): with
+    portfolio_config["self_ledger"] on, the account position is NOT all the
+    bot's — the cap includes the user's own manual holding in the same symbol
+    and direction, so ceiling eats one lot step out of the MANUAL position
+    (closing the bot's 0.017 ETH ceiled to 0.018, selling $2.25 of the user's
+    coins — the exact touch self_ledger exists to prevent). Reduce legs FLOOR
+    in that mode: the bot may keep a sub-lot dust residual in its own ledger
+    (below the reconcile threshold, never re-ordered), but it can never sell
+    what it doesn't own."""
     try:
         acct = importlib.import_module(f"lib.account_{vid}")
         positions = acct.get_positions(env)
@@ -191,6 +201,9 @@ def _reduce_qty(env, vid, order, sym, direction, qty):
                     held += p["size"]
         lot = _lot_base(order, env, sym)
         if held and lot > 0:
+            from lib.portfolio import load_portfolio_config
+            if load_portfolio_config().get("self_ledger"):
+                return min(math.floor(qty / lot + 1e-9) * lot, held)
             return min(math.ceil(qty / lot - 1e-9) * lot, held)
     except Exception as e:
         logging.warning(f"[venue_wiring] reduce ceil/cap skipped ({e}) — floor path")
