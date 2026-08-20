@@ -99,6 +99,118 @@ Run via `start_reconciler.sh` (Linux) / `start_reconciler_windows.ps1` (Windows)
 
 ---
 
+## self_ledger — diffing against the bot's own book instead of the exchange
+
+**Problem this solves:** on a single-account setup, `get_positions()` reads the
+account's REAL position — which on the same account as the user's own manual
+trading includes whatever they opened by hand. `reconcile()` then reads that
+manual position as "already have it" and trades against it (scales it up or
+sells it down toward target). `self_ledger` fixes this not by reading the
+account differently, but by not reading it AT ALL for diffing — the bot tracks
+what IT has bought/sold from its own order log (`manager/orders.jsonl`) and
+diffs target against that running total instead. A position opened outside
+this process never enters the ledger, so it can never be touched.
+
+**Turning it on for an account — read every step; the wrong seed mode trades
+the user's own money:**
+1. **Flatten the BOT's own positions first** (set the strategies' amounts to
+   0 from the web 下單設定 and let the reconciler close them, or confirm the
+   bot is already flat). The user's own manual positions stay — that is the
+   point. Why required: the fresh-start seed below treats everything on the
+   account as the USER's; a live bot position at seed time becomes the
+   user's, and the bot then re-buys its full target ON TOP of it — doubled
+   exposure.
+2. `python3 manager/seed_ledger.py` — ONE TIME, default (fresh-start) mode:
+   the bot's book starts at ZERO and everything currently on the account is
+   the user's. This is the correct mode for the feature's target user (holds
+   manual positions, wants the bot to leave them alone).
+   `--absorb` (adopt the account's current positions as bot-owned) is ONLY
+   for migrating a bot-only account with no manual positions mixed in — on a
+   mixed account it adopts the user's manual positions into the bot's book
+   and the bot will later trade them away. **When unsure, never --absorb.**
+3. Set `portfolio_config.json["self_ledger"] = true`.
+4. No reconciler restart needed — it re-reads the config every poll, same as
+   every other `portfolio_config.json` field.
+
+**Fail-loud guard:** with `self_ledger` on and no baseline in
+`manager/ledger_seed.json` (seed_ledger.py never run, or the file corrupt),
+`reconcile()` REFUSES to trade — it raises, which surfaces through the
+reconciler's normal error path (Telegram + retreat to heartbeat), and no
+orders are placed. It does NOT fall back to summing the whole orders.jsonl
+history (a plausible-looking but wrong book on any machine with prior
+trading). If the user reports this error, run step 2.
+
+**What changes, exactly** (`lib/portfolio.py`): `reconcile()` still calls the
+real `get_positions_fn()` (kept for the `manager/last_reconcile.json` snapshot,
+and `manager/reconciler.py`'s own disconnect/auto-halt wrapper around it is
+untouched) — but when `self_ledger` is on, `compute_diff()` and every
+downstream flip/reduce-only decision in the per-order loop are computed
+against `lib.portfolio.ledger_positions()` instead. `ledger_positions()` sums
+`ledger_seed.json`'s baseline plus every `manager/orders.jsonl` entry logged
+after the seed's timestamp — nothing else. `manager/reconciler.py` itself
+needs NO changes; the branch lives entirely in `lib/portfolio.py` and is
+config-gated per account.
+
+**What this does NOT solve:** the ledger can drift from the real account
+(a missed fill, or continued manual trading on the same symbol after the
+seed) — `self_ledger` only guarantees the bot never treats someone else's
+position as its own, not that the ledger and the real account always agree.
+There is currently no drift alert; `manager/last_reconcile.json["ledger"]` vs
+`["actual"]` is written every round for a future workspace view to compare,
+but nothing reads it yet. Margin/liquidation risk checks (not yet built into
+`reconcile()`) must always read the real `get_positions()`/`get_equity()` —
+never the ledger, which only knows what the bot itself did.
+
+**Capital (群益) / lot-based rows:** `ledger_positions()` is unit-agnostic —
+it sums whatever `signed_diff` values `manager/orders.jsonl` legs carry, which
+for a capital-routed strategy are already LOTS (see *`amounts` semantics*
+below), so `self_ledger` composes with the hand-wired capital path with no
+extra work. Not yet live-tested on a capital account — verify on the first
+real capital `self_ledger` deployment.
+
+**Fixed (2026-08-20, audit P0-2):** `reconcile()` used to log the leg's
+PRE-rounding `sub_diff`, not what actually filled — on capital this drifted
+the ledger by up to half a lot every round, permanently (crypto had the same
+gap in principle, but its rounding is far below `threshold` so it was not a
+practical issue there). It now prefers the exchange-confirmed `executed_qty`
+when `place_order_fn` returns one — lots directly for `futures_contracts`/
+capital rows, `executed_qty × fill_price` (base currency → account currency)
+otherwise — falling back to `sub_diff` only when `executed_qty` is absent.
+Matches the FIX protocol convention (CumQty, not OrderQty, is the field
+position-keeping is built on) and what `lib.execute._finish()` already did
+for the async TWAP/chase/custom path — the synchronous path was the outlier.
+Also matches `web/`'s own preference (`agent/workspace.html`'s 交易歷史
+rendering already prefers `Σ legs' executed_qty×fill_price` over `signed_diff`
+when available) — this fix makes the field it falls back to more accurate,
+it does not change what the frontend computes.
+
+**The flatten (全部平倉) interaction — read this before wiring self_ledger to
+anything live.** `manager/flatten.py` closes every REAL open position on every
+venue, including a manually-opened one self_ledger was never told about — that
+is correct (a panic button must close everything, not just what the bot
+thinks it owns). But `flatten()` logs those closes to `manager/orders.jsonl`
+the same as any other order (`_append_reconciler_log`), and without more,
+`ledger_positions()` would sum them in as if they were an ordinary bot trade —
+driving the ledger to a large phantom position (e.g. closing a 2000 manual
+long the bot never held reads back as the bot now being 2000 short). The next
+`self_ledger` reconcile round would then try to "correct" that phantom
+position — right after the user asked to close everything.
+
+`flatten()` fixes this itself: it tracks every symbol it actually closed
+(including sub-minimum dust left behind — still "as flat as it gets") and
+calls `lib.portfolio.zero_ledger_symbols(closed_symbols)` once at the end,
+resetting exactly those symbols' ledger baseline to flat, timestamped now.
+Every other symbol's seed and accumulated history is untouched — this is a
+per-symbol operation (`manager/ledger_seed.json` stores a `{'size', 'ts'}` row
+per symbol, not one global timestamp), unlike the whole-account
+`seed_ledger()`. The call is unconditional (runs even when `self_ledger` is
+currently off) — harmless, and correct the moment the account switches it on
+later. Same fix pattern as MultiCharts' "Strategy Positions Tab Mismatch"
+handling (its own strategy-position-vs-broker-position architecture has the
+identical gap after a manual "Flatten Everything") — MultiCharts leaves the
+resync as a manual step the trader must remember to run; this is one call
+built into `flatten()` itself instead.
+
 ## Additional Rules
 
 **Before running `manager/manager.py` for weight optimisation:** temporarily set `END = None` in every strategy file so the optimiser uses the latest data. After the run, restore each strategy's fixed past date (roughly one week ago) for normal cache-backed backtests.
@@ -124,22 +236,40 @@ reduces go through `close_position_partial`, not `close_position` (full close, n
 
 **Always start the reconciler via the watchdog wrapper**, not `reconciler.py` directly and never with `nohup &`. `nohup &` background processes are killed when the shell session ends.
 
-**Linux — tmux session:**
+**Linux — check for the systemd unit FIRST, tmux only as fallback:**
+```
+systemctl is-active blave-agent-reconciler.service
+```
+- If the command reports `active` (or the unit file exists at all — check with
+  `systemctl cat blave-agent-reconciler.service`), the reconciler is supervised by
+  systemd. Control it ONLY through systemd:
+  start/restart: `sudo -n systemctl restart blave-agent-reconciler.service`
+  stop: `sudo -n systemctl stop blave-agent-reconciler.service`
+  **Never** start a tmux session while the unit is active, and **never** assume
+  `tmux kill-session` stopped trading on such a machine — the systemd daemon keeps
+  placing orders, and a tmux daemon started alongside it doubles every order.
+- Only when the unit file does not exist (older machines) use the tmux session:
 ```
 tmux new-session -d -s reconciler 'cd $BLAVECLAW_HOME/workspace && bash manager/start_reconciler.sh'
 ```
 (resolve `$BLAVECLAW_HOME` first — same env var as `references/deployment.md`'s cron entries; defaults to `/root/.openclaw` if unset)
 To check status: `tmux attach -t reconciler`. To stop: `tmux kill-session -t reconciler`.
+Note: the systemd unit deliberately has no `[Install]` section — the reconciler must
+NOT auto-start on reboot; the user re-enables trading explicitly after a reboot.
 
-**Windows — NSSM service** (also survives instance reboot, unlike the Linux tmux session — a deliberate improvement, not a gap):
+**Windows — NSSM service:**
 ```
 nssm install blaveclaw-reconciler powershell.exe "-ExecutionPolicy Bypass -File %BLAVECLAW_HOME%\workspace\manager\start_reconciler_windows.ps1"
 nssm set blaveclaw-reconciler AppDirectory %BLAVECLAW_HOME%\workspace
-nssm set blaveclaw-reconciler Start SERVICE_AUTO_START
+nssm set blaveclaw-reconciler Start SERVICE_DEMAND_START
 nssm start blaveclaw-reconciler
 ```
 (`%BLAVECLAW_HOME%` — resolve the actual env var on this machine before running these commands, don't type the literal placeholder; defaults to `C:\openclaw` if unset)
-To check status: `nssm status blaveclaw-reconciler`. To stop: `nssm stop blaveclaw-reconciler` (add `nssm set blaveclaw-reconciler Start SERVICE_DEMAND_START` if it should not restart on next boot).
+To check status: `nssm status blaveclaw-reconciler`. To stop: `nssm stop blaveclaw-reconciler`.
+Note: `SERVICE_DEMAND_START` is required, never `SERVICE_AUTO_START` — same policy as the
+Linux unit above: the reconciler must NOT auto-start on reboot; the user re-enables trading
+explicitly. Crash recovery while the service is running is NSSM's AppExit restart, which is
+independent of the start type.
 
 **Capital (群益) reconciler wiring is hand-wired in `manager/reconciler.py`, not auto-wired.**
 `lib.venue_wiring` deliberately excludes `"capital"` (`_NON_AUTO`) because its data shape differs
