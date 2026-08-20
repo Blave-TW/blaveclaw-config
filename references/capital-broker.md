@@ -291,6 +291,13 @@ code = center.SKCenterLib_Login(env['capital_api_key'], env['capital_password'])
 print(code, center.SKCenterLib_GetReturnCodeMessage(code))
 ```
 
+**For read-only account verification, run `lib/capital_worker.py` once directly instead of
+writing your own login script** — it already gets login order, event handlers, and the query flow
+right. If you do hand-write one, keep every `comtypes.client.GetEvents(...)` return value in a
+live variable (as above): discard it and the COM event sink is garbage-collected, the registration
+silently disappears, and login returns 2017 even though your code "registered" the handler
+(measured 2026-08-20, uid 29026 — burned ~9 min re-deriving this against a working lib).
+
 **成功**：`code == 0`（`2003` = 已登入，也算成功）。
 **失敗常見代碼**：300 密碼錯誤 / 307 密碼被鎖定 / 600 憑證錯誤（未安裝或有過期舊憑證，刪除過期的那張）/
 602 憑證驗證失敗（見下）/ 604 憑證過期或已註銷 / 2017 未先註冊 OnReplyMessage。
