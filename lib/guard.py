@@ -39,6 +39,16 @@ from datetime import datetime, timezone
 HALT_PATH = "state/HALT"
 AUDIT_PATH = "state/audit.jsonl"
 
+# In-memory halt flag (2026-08-20 audit): trip_halt's own file write can fail
+# under exactly the condition that most needs a halt — a full disk (measured
+# on the fleet) fails the orders.jsonl append AND the HALT write in the same
+# breath, and without this flag the reconcile loop keeps re-buying the fill
+# its ledger never recorded, every round, unbounded. The flag halts THIS
+# process even when the file can't land; the file remains authoritative for
+# every other process and across restarts. Never cleared except by
+# clear_halt — same one-way semantics as the file.
+_halt_flag = False
+
 
 class Halted(Exception):
     """Raised instead of sending an entry order while state/HALT exists."""
@@ -49,7 +59,7 @@ def _now():
 
 
 def halted():
-    return os.path.exists(HALT_PATH)
+    return _halt_flag or os.path.exists(HALT_PATH)
 
 
 def halt_info():
@@ -65,8 +75,12 @@ def halt_info():
 
 
 def trip_halt(reason, source):
-    """Set the kill switch (atomic write). source: who tripped it —
-    'user' / 'healthcheck' / a strategy name."""
+    """Set the kill switch. source: who tripped it — 'user' / 'healthcheck' /
+    a strategy name. The in-memory flag is set FIRST so this process is
+    halted even if the file write below fails (full disk); the write failure
+    still propagates so callers know the halt did not persist machine-wide."""
+    global _halt_flag
+    _halt_flag = True
     os.makedirs(os.path.dirname(HALT_PATH), exist_ok=True)
     tmp = HALT_PATH + ".tmp"
     with open(tmp, "w") as f:
@@ -77,7 +91,9 @@ def trip_halt(reason, source):
 
 def clear_halt(source):
     """Remove the kill switch. Only on explicit user instruction."""
-    if halted():
+    global _halt_flag
+    _halt_flag = False
+    if os.path.exists(HALT_PATH):
         os.remove(HALT_PATH)
     audit("halt_cleared", source=source)
 

@@ -315,6 +315,127 @@ _REDUCE_ESCAPE_S = 600       # overdue + stopped this long, a REDUCE leg may
 _inflight = {}               # symbol key -> run dict (thread/stop/sign/...)
 _inflight_lock = threading.Lock()
 
+# ── durable in-flight markers (audit P1 #1/#3/#4) ───────────────────────────
+# The in-memory registry above dies with the process; these marker files are
+# how OTHER processes (seed_ledger.py, manager/flatten.py) and the NEXT
+# reconciler process know an async execution is / was running:
+#   - written by _launch(), removed by _reap_own() — a marker with no living
+#     process behind it means the execution DIED mid-flight (watchdog restart,
+#     crash): fills that landed at the exchange after the last _finish() were
+#     never logged to orders.jsonl, so a self_ledger book is now understated.
+#   - reap_dead_inflight() (reconciler startup) turns that silent gap into a
+#     HALT + loud message instead of a silent duplicate catch-up buy.
+#   - list_inflight() lets seed_ledger refuse to seed over a running execution
+#     and lets flatten wait for executions to drain after tripping HALT.
+_INFLIGHT_DIR = "state/execution/inflight"
+
+
+def _marker_path(key):
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(key))
+    return os.path.join(_INFLIGHT_DIR, safe + ".json")
+
+
+def _write_inflight_marker(key, style, signed_diff):
+    try:
+        os.makedirs(_INFLIGHT_DIR, exist_ok=True)
+        tmp = _marker_path(key) + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"key": str(key), "style": style,
+                       "signed_diff": round(float(signed_diff), 2),
+                       "started_ts": datetime.now(timezone.utc).isoformat()}, f)
+        os.replace(tmp, _marker_path(key))
+    except OSError as e:
+        logging.warning(f"[execute] inflight marker write failed for {key}: {e}")
+
+
+def _remove_inflight_marker(key):
+    try:
+        os.remove(_marker_path(key))
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        logging.warning(f"[execute] inflight marker remove failed for {key}: {e}")
+
+
+def list_inflight():
+    """[{key, style, signed_diff, started_ts}] — every marker currently on
+    disk. In the reconciler process these correspond to live threads; from any
+    OTHER process they mean "an execution is (or was) running elsewhere"."""
+    out = []
+    try:
+        names = os.listdir(_INFLIGHT_DIR)
+    except OSError:
+        return out
+    for name in sorted(names):
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(_INFLIGHT_DIR, name)) as f:
+                out.append(json.load(f))
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def reap_dead_inflight():
+    """Reconciler STARTUP ONLY (before any dispatch): every marker on disk at
+    this point belongs to a previous process whose threads died with it — the
+    execution is definitively dead, and any fills it made after its last log
+    write never reached orders.jsonl.
+
+    self_ledger ON: that gap understates the bot's book and the next reconcile
+    would re-buy what already filled — trip HALT and tell the user to verify
+    the ledger before resuming (audit P1 #1: fail loud, never silently trade
+    on a book known to be missing fills).
+    self_ledger OFF: the next account read self-corrects (old behaviour) —
+    just log and clean up.
+
+    Returns the number of dead markers found."""
+    dead = list_inflight()
+    if not dead:
+        return 0
+    labels = ", ".join(f"{m.get('key')}({m.get('style')})" for m in dead)
+    try:
+        from lib.portfolio import load_portfolio_config
+        self_ledger = bool(load_portfolio_config().get("self_ledger"))
+    except Exception:
+        self_ledger = True  # can't read config — assume the risky mode
+    if self_ledger:
+        # ORDER MATTERS (audit #4): halt + notify FIRST, markers deleted LAST —
+        # deleting first would destroy the evidence if trip_halt raises (full
+        # disk), and the next restart could never retry. A failed halt write
+        # exits the process instead of trading on a book known to be missing
+        # fills (the in-memory flag halts this process either way; exiting
+        # also keeps the markers for the next boot to retry).
+        from lib import guard
+        try:
+            if not guard.halted():
+                guard.trip_halt(
+                    f"async execution died mid-flight ({labels}) — ledger may be "
+                    f"missing fills; verify positions before resuming", "execute")
+        except Exception as e:
+            msg = (f"🚨 前次執行中斷({labels})且 HALT 寫入失敗({e})——"
+                   f"停止下單機,請人工處理(磁碟可能已滿)。")
+            logging.error(f"[execute] {msg}")
+            try:
+                _get_notify()(msg)
+            except Exception:
+                pass
+            raise SystemExit(1)
+        msg = (f"🚨 前次執行中斷:{labels} 的成交可能沒有記進帳本。已自動暫停下單"
+               f"——請先核對「交易所實際部位」與帳本一致後再啟動。")
+        logging.error(f"[execute] {msg}")
+        try:
+            _get_notify()(msg)
+        except Exception:
+            pass
+    else:
+        logging.warning(f"[execute] stale in-flight markers cleaned ({labels}) — "
+                        f"account-read mode self-corrects")
+    for m in dead:
+        _remove_inflight_marker(m.get("key", ""))
+    return len(dead)
+
 _notify_fn = None
 
 
@@ -571,6 +692,7 @@ def _reap_own(key):
         run = _inflight.get(key)
         if run and run["thread"] is threading.current_thread():
             _inflight.pop(key, None)
+            _remove_inflight_marker(key)
 
 
 def _launch(key, style, target, args, signed_diff, reduce_only, deadline_s):
@@ -585,6 +707,7 @@ def _launch(key, style, target, args, signed_diff, reduce_only, deadline_s):
         }
         # started inside the lock: registered-but-not-alive must never be
         # observable, or a concurrent dispatch would reap it as finished
+        _write_inflight_marker(key, style, signed_diff)
         t.start()
     logging.info(f"[execute] {key}: {style} dispatched (${abs(signed_diff):,.2f})")
     return False
@@ -701,6 +824,23 @@ def _twap_thread(symbol, signed_diff, asset_spec, reduce_only, exchange,
         from lib.portfolio import _record_order_error
         _record_order_error(symbol, venue_seen["id"], e)
         notify(f"⚠️ TWAP execution error {symbol}: {e}")
+        # A crash between run_twap's fills and _finish leaves those fills out
+        # of orders.jsonl — unlike chase, the filled total lives inside
+        # run_twap's frame and can't be recovered here, so under self_ledger
+        # the only honest move is HALT + ask the user to verify (2026-08-20
+        # audit #2). `filled` stays 0 so the finally below never kicks a
+        # re-diff against the understated book.
+        try:
+            from lib.portfolio import load_portfolio_config
+            from lib import guard
+            if load_portfolio_config().get("self_ledger") and not guard.halted():
+                guard.trip_halt(
+                    f"TWAP crashed mid-run for {symbol} — its fills may be missing "
+                    f"from the ledger; verify positions before resuming", "execute")
+                notify(f"🚨 {symbol} TWAP 執行中斷,成交可能沒有記進帳本。已自動"
+                       f"暫停下單——請先核對「交易所實際部位」再啟動。")
+        except Exception as e2:
+            logging.error(f"[execute] {key} crash-path halt failed: {e2}")
     finally:
         _reap_own(key)
         # kick only when a re-reconcile can achieve something: fills moved the
@@ -736,6 +876,7 @@ def _chase_thread(symbol, signed_diff, asset_spec, reduce_only, exchange,
     fills = []          # {'fill_price', 'fill_qty'(USD)}
     notify = _get_notify()
     aborted = False
+    crashed = False
     reason = None
 
     active_oid = None       # resting order, if the thread dies mid-flight
@@ -875,9 +1016,8 @@ def _chase_thread(symbol, signed_diff, asset_spec, reduce_only, exchange,
                    f"${filled:,.2f}/${total:,.2f} {symbol} | VWAP={vwap}{tail}")
         else:
             logging.info(f"[execute] {key} chase ended with no fills ({reason})")
-        _finish(symbol, signed_diff, asset_spec, reduce_only, tools.get("venue"),
-                contributors, "chase", filled, vwap, aborted)
     except Exception as e:
+        crashed = True
         logging.error(f"[execute] {key} chase crashed: {e}")
         if active_oid is not None:
             # dying with a resting order: one best-effort retire now beats
@@ -901,6 +1041,20 @@ def _chase_thread(symbol, signed_diff, asset_spec, reduce_only, exchange,
         _record_order_error(symbol, tools.get("venue"), e)
         notify(f"⚠️ Chase execution error {symbol}: {e}")
     finally:
+        # Accounting record in the FINALLY, like _custom_thread (2026-08-20
+        # audit #2): a crash after real fills used to skip _finish entirely —
+        # under self_ledger those fills never reached the book, and the
+        # completion kick then re-bought them immediately. The record comes
+        # before _reap_own so the marker only disappears once the book has
+        # the fills.
+        try:
+            filled = sum(f["fill_qty"] for f in fills)
+            vwap = (round(sum(f["fill_price"] * f["fill_qty"] for f in fills) / filled, 8)
+                    if filled > 0 else None)
+            _finish(symbol, signed_diff, asset_spec, reduce_only, tools.get("venue"),
+                    contributors, "chase", filled, vwap, aborted or crashed)
+        except Exception as e2:
+            logging.error(f"[execute] {key} chase completion record failed: {e2}")
         _reap_own(key)
         # cancel_uncertain: do NOT kick — an immediate re-dispatch would post a
         # new order while the ambiguous one may still rest (the exact double-

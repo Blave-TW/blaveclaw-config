@@ -33,13 +33,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lib.portfolio import seed_ledger
 
-# Loaded by file path (not `import manager.reconciler`) so this script works
-# whether or not manager/ is an importable package — same technique lib/execute.py
-# uses to load a custom executor module.
-_spec = importlib.util.spec_from_file_location(
-    "reconciler", str(Path(__file__).parent / "reconciler.py"))
-_reconciler = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_reconciler)
+
+def _load_reconciler():
+    """Loaded by file path (not `import manager.reconciler`) so this script
+    works whether or not manager/ is an importable package — same technique
+    lib/execute.py uses to load a custom executor module. Lazy: loaded only
+    AFTER the in-flight refusal check below, so a refused run never pays (or
+    trips over) the reconciler module's imports and import-time side effects."""
+    _spec = importlib.util.spec_from_file_location(
+        "reconciler", str(Path(__file__).parent / "reconciler.py"))
+    _reconciler = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_reconciler)
+    return _reconciler
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description=__doc__,
@@ -48,6 +53,20 @@ if __name__ == '__main__':
                     help="adopt the account's CURRENT positions as bot-owned "
                          "(bot-only accounts ONLY — see module docstring)")
     args = ap.parse_args()
+
+    # Seeding while a TWAP/chase/custom execution is in flight double-counts
+    # its fills (the snapshot absorbs partial fills that _finish() later logs
+    # again after the seed's cutoff — audit P1 #3). Refuse instead of racing.
+    from lib.execute import list_inflight
+    inflight = list_inflight()
+    if inflight:
+        labels = ', '.join(f"{m.get('key')}({m.get('style')})" for m in inflight)
+        print(f"REFUSED: async execution(s) in flight: {labels}\n"
+              f"Wait for them to finish (or stop the reconciler and let them "
+              f"drain), then run this again.")
+        sys.exit(1)
+
+    _reconciler = _load_reconciler()
 
     if args.absorb:
         print("Reading current account position (absorb mode)...")

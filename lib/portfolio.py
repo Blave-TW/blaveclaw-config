@@ -5,9 +5,16 @@ from lib import guard
 
 
 def _append_reconciler_log(order):
-    # Best-effort like the other two writers: a full disk (measured on the
-    # fleet) must not abort the reconcile loop mid-round — the order already
-    # happened, losing the log line is the lesser failure.
+    # Best-effort in account-read mode: a full disk (measured on the fleet)
+    # must not abort the reconcile loop mid-round — the order already
+    # happened, and there losing the log line is the lesser failure (the next
+    # account read self-corrects the position).
+    #
+    # self_ledger mode is different (audit P1 #2): this file IS the position
+    # book — a dropped line means a real fill the bot will never know about,
+    # and the next reconcile re-buys it. Trip HALT so nothing compounds the
+    # gap (closes still pass; only the user resumes) — same fail-loud posture
+    # as every other ledger-integrity failure.
     try:
         os.makedirs('manager', exist_ok=True)
         entry = {'ts': datetime.utcnow().isoformat(), **order}
@@ -15,6 +22,31 @@ def _append_reconciler_log(order):
             f.write(json.dumps(entry) + '\n')
     except OSError as e:
         logging.error(f"orders.jsonl append failed: {e}")
+        try:
+            if load_portfolio_config().get('self_ledger') and not guard.halted():
+                # trip_halt sets its in-memory flag FIRST (lib/guard) — even
+                # when its own file write also fails (same full disk), this
+                # process stops opening exposure on a book missing a fill
+                try:
+                    guard.trip_halt(
+                        f"orders.jsonl write failed ({e}) — the ledger just missed "
+                        f"a real fill; verify positions before resuming", "portfolio")
+                finally:
+                    _notify_best_effort(
+                        "🚨 成交紀錄寫入失敗,帳本可能漏了一筆成交——已自動暫停"
+                        "下單,請先核對「交易所實際部位」再啟動。")
+        except Exception as e2:
+            logging.error(f"orders.jsonl fail-loud halt itself failed: {e2}")
+
+
+def _notify_best_effort(msg):
+    """Telegram if paired, else log — never raises (network needs no disk,
+    so this can still reach the user when every file write is failing)."""
+    try:
+        from lib.notify import make_sender
+        make_sender()(msg)
+    except Exception:
+        logging.error(f"[notify-unavailable] {msg}")
 
 
 def _write_reconcile_snapshot(target, actual, orders, ledger=None):
@@ -217,8 +249,14 @@ def ledger_positions():
     try:
         with open(_ORDERS_LOG_PATH) as f:
             lines = f.readlines()
+    except FileNotFoundError:
+        lines = []  # brand-new machine: no fills yet, legitimately empty
     except OSError:
-        lines = []
+        # an EXISTING-but-unreadable book must not silently collapse to the
+        # seed baseline — reconcile would re-buy the entire target on top of
+        # real positions (2026-08-20 audit #3). Raise; reconcile's error path
+        # surfaces it (Telegram + retreat), no orders placed.
+        raise
 
     for line in lines:
         line = line.strip()

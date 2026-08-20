@@ -43,6 +43,7 @@ import logging
 import os
 import re
 import sys
+import time
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -147,10 +148,33 @@ def _flatten_spot(vid, order, env):
     return closed, errors, closed_symbols
 
 
+def _wait_for_inflight(timeout_s=30.0, poll_s=1.0):
+    """After HALT is tripped, give in-flight TWAP/chase/custom executions a
+    moment to drain before closing over them (audit P1 #4): flatten and a
+    still-running execution firing orders on the same symbol can over-close.
+    HALT already stops entry executions at their next slice; reduce ones may
+    legitimately outlive the wait — after the timeout we proceed anyway (a
+    panic close must not block forever) but say so loudly, per symbol."""
+    from lib.execute import list_inflight
+    deadline = time.time() + timeout_s
+    remaining = list_inflight()
+    while remaining and time.time() < deadline:
+        time.sleep(poll_s)
+        remaining = list_inflight()
+    for m in remaining:
+        logging.error(f"close-all: execution still in flight for "
+                      f"{m.get('key')} ({m.get('style')}) — closing over it; "
+                      f"its later slices may re-move this symbol")
+        _record_order_error(str(m.get('key') or '?'), '*',
+                            f"close-all overlapped in-flight {m.get('style')}")
+    return remaining
+
+
 def flatten():
     env = _read_env()
     if not guard.halted():
         guard.trip_halt("close all positions", "flatten")
+    _wait_for_inflight()
     closed = errors = 0
     # self_ledger scope (see module docstring): ON → close only the bot's own
     # SWAP book; the user's manual positions are untouched even here. Spot

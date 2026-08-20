@@ -419,6 +419,17 @@ if __name__ == '__main__':
     except Exception as _e:
         logging.warning(f"[reconciler] orphan sweep skipped: {_e}")
 
+    # A previous process that died mid-TWAP/chase/custom may have filled at the
+    # exchange without logging — under self_ledger that understates the book
+    # and the next round would re-buy it. reap_dead_inflight() trips HALT and
+    # notifies instead of trading on a book known to be missing fills
+    # (audit P1 #1). Best-effort like the sweep above.
+    try:
+        from lib.execute import reap_dead_inflight
+        reap_dead_inflight()
+    except Exception as _e:
+        logging.warning(f"[reconciler] dead-inflight reap skipped: {_e}")
+
     last_mtimes = {}
     last_reconcile_at = 0.0
     force_next = False  # 下單後強制再對帳一輪:把成交後的實際部位寫進快照,

@@ -164,14 +164,39 @@ needs NO changes; the branch lives entirely in `lib/portfolio.py` and is
 config-gated per account.
 
 **What this does NOT solve:** the ledger can drift from the real account
-(a missed fill, or continued manual trading on the same symbol after the
-seed) — `self_ledger` only guarantees the bot never treats someone else's
-position as its own, not that the ledger and the real account always agree.
-There is currently no drift alert; `manager/last_reconcile.json["ledger"]` vs
-`["actual"]` is written every round for a future workspace view to compare,
-but nothing reads it yet. Margin/liquidation risk checks (not yet built into
-`reconcile()`) must always read the real `get_positions()`/`get_equity()` —
-never the ledger, which only knows what the bot itself did.
+(continued manual trading on the same symbol after the seed) — `self_ledger`
+only guarantees the bot never treats someone else's position as its own, not
+that the ledger and the real account always agree. There is currently no
+drift alert; `manager/last_reconcile.json["ledger"]` vs `["actual"]` is
+written every round for a future workspace view to compare, but nothing reads
+it yet. Margin/liquidation risk checks (not yet built into `reconcile()`)
+must always read the real `get_positions()`/`get_equity()` — never the
+ledger, which only knows what the bot itself did.
+
+**Ledger-integrity hardening (2026-08-20, audit P1 batch):** the known ways a
+fill could silently go missing from the book now fail loud instead:
+- async executions (TWAP/chase/custom) write a durable marker under
+  `state/execution/inflight/`; a marker found at reconciler STARTUP means a
+  previous process died mid-execution — under `self_ledger` that trips HALT
+  with a "verify positions before resuming" message (`lib.execute.
+  reap_dead_inflight`, wired in `manager/reconciler.py` startup) instead of
+  silently re-buying fills the log never received;
+- a failed `manager/orders.jsonl` append under `self_ledger` trips HALT (the
+  file IS the book there; in account-read mode it stays best-effort);
+- `manager/seed_ledger.py` REFUSES to seed while any execution is in flight
+  (seeding mid-execution double-counts its fills);
+- `manager/flatten.py` waits up to 30s after tripping HALT for in-flight
+  executions to drain before closing, and records a visible order error for
+  any that outlive the wait;
+- a chase execution that CRASHES now records its real fills from the finally
+  block (same pattern as custom executors); a TWAP that crashes mid-run can't
+  recover its fill total, so under `self_ledger` it trips HALT instead;
+- `lib/guard.trip_halt` sets an in-memory flag before its file write, so a
+  FULL DISK (the fleet's measured failure mode — it fails the orders.jsonl
+  append and the HALT write together) still halts the reconciler process even
+  when `state/HALT` can't land; `reap_dead_inflight` exits the process
+  outright when the halt can't persist, keeping its markers for the next boot
+  to retry (halt/notify first, marker cleanup last).
 
 **Capital (群益) / lot-based rows:** `ledger_positions()` is unit-agnostic —
 it sums whatever `signed_diff` values `manager/orders.jsonl` legs carry, which
