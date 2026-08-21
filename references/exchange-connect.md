@@ -29,7 +29,10 @@ do not assume casing or invent names.
    (`lib/account_bingx.py` + `lib/order_bingx.py`), Binance
    (`lib/account_binance.py` + `lib/order_binance.py`), OKX
    (`lib/account_okx.py` + `lib/order_okx.py`), Gate.io
-   (`lib/account_gateio.py` + `lib/order_gateio.py`) and SinoPac
+   (`lib/account_gateio.py` + `lib/order_gateio.py`), Paper trading
+   (`lib/account_paper.py` + `lib/order_paper.py` — simulated venue, no keys;
+   the web handoff for it needs only rule 5 plus one sentence on how fills
+   are priced, see `references/lib.md`) and SinoPac
    (`lib/order_sinopac.py`) are implemented — extend, never rewrite. For everything else, work from
    `lib/account_TEMPLATE.py` and the patterns in `lib/order_bingx.py`
    (see `references/lib.md`, `references/manager.md` § Account library).

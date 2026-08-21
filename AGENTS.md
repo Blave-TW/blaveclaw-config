@@ -203,6 +203,7 @@ Execution styles (市價/TWAP per strategy) are set from the web 下單設定 �
 - **SinoPac (永豐金):** `references/sinopac-broker.md`
 - **President Futures (統一期貨):** `references/president-broker.md`
 - **Capital Futures (群益期貨):** `references/capital-broker.md` (Windows workspace only)
+- **Paper trading (模擬交易, no keys):** ships pre-built — `lib/account_paper.py` + `lib/order_paper.py` (see `references/lib.md`); the web binds it like any venue (`PAPER_API_KEY`/`PAPER_SECRET_KEY` are fixed markers, not secrets) and fills are simulated at live Binance public prices. On its web handoff only run the read-only validation and tell the user how fills are priced; **never hand-write a paper lib** — if `lib/order_paper.py` is missing the workspace is behind, update per `references/updating.md` first; `order_paper.reset_account(env)` only on an explicit user request.
 
 **One machine, one trading venue (TW brokers included).** When writing a new venue's credentials into `.env`, delete the previously bound venue's credential lines — every ID that has BOTH `{ID}_API_KEY` and `{ID}_SECRET_KEY` (plus its `_PASSPHRASE`). Keep `blave_*`, singleton service keys (`OPENAI_API_KEY` etc. — no secret sibling = not an exchange), and non-credential lines like CA paths. Stale keys from a previous venue confuse venue detection and keep dead access alive.
 
