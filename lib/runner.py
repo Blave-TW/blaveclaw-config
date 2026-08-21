@@ -8,6 +8,122 @@ from lib.analysis import plot_pnl, plot_pnl_portfolio, precise_pnl, compute_stat
 
 _REPO_ROOT = Path(__file__).parent.parent
 
+# Per-event trade log cap for a single backtest — mirrors api/openclaw/agent_strategies.py's
+# TRADES_MAX_COUNT. Bounding it here too (source) rather than only on the api side means a
+# live-mode strategy that rewrites its full trades history every scheduler tick can't grow
+# past what the api will accept anyway, and it stops one dense strategy's (pre-truncation)
+# trades array from blowing the api's overall report body-size check for everyone else.
+TRADES_MAX_COUNT = 10000
+
+# Caps for the PLOT_SERIES → stats.json `panes` output — mirrored server-side in
+# api/openclaw/agent_strategies.py. Bounded at the source for the same reason as
+# TRADES_MAX_COUNT above: live mode rewrites stats.json every tick, so an unbounded
+# declaration would inflate every report, not just one backtest.
+PANES_MAX_SERIES = 4
+PANES_MAX_POINTS = 20000
+PANES_NAME_MAX   = 64
+PANES_PANE_MAX   = 32  # pane group id length cap
+
+# Cap for the stats.json `candles` output (Type A backtest OHLCV) — mirrored server-side
+# in api/openclaw/agent_strategies.py. Same per-series budget as PANES_MAX_POINTS: daily
+# bars = full history, 5min ≈ ten weeks — coordinated with the trades 10,000 tail window.
+CANDLES_MAX_COUNT = 20000
+
+
+def _build_panes(plot_series, df):
+    """PLOT_SERIES declaration → stats.json `panes` (workspace indicator overlay).
+
+    plot_series is a dict of display name → spec, where spec is one of:
+      "col"                              — column of the backtest df (sub-pane)
+      pd.Series                          — reindexed to the df (sub-pane)
+      ("col" | pd.Series, {"overlay": True})  — drawn on the price chart instead
+      ("col" | pd.Series, {"pane": "<group>"}) — series sharing a group id render in
+                                          one sub-pane (e.g. MACD + its signal line)
+
+    Timestamps use the same basis as trades[].ts (df.index[t].timestamp()) so the
+    frontend aligns both against one axis. Non-finite points are skipped rather
+    than zero-filled — a gap is honest, a fake 0 draws a misleading spike.
+    """
+    if not isinstance(plot_series, dict):
+        return []
+    panes = []
+    for name, spec in plot_series.items():
+        if len(panes) >= PANES_MAX_SERIES:
+            break
+        opts = {}
+        if isinstance(spec, tuple) and spec:
+            opts = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
+            spec = spec[0]
+        if isinstance(spec, str):
+            if spec not in df.columns:
+                continue
+            series = df[spec]
+        elif isinstance(spec, pd.Series):
+            series = spec.reindex(df.index)
+        else:
+            continue
+        points = []
+        for t, v in zip(df.index, series.to_numpy()):
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(fv):
+                continue
+            points.append([int(t.timestamp()), round(fv, 6)])
+        if not points:
+            continue
+        if len(points) > PANES_MAX_POINTS:
+            points = points[-PANES_MAX_POINTS:]  # tail — same convention as trades
+        entry = {
+            'name':    str(name)[:PANES_NAME_MAX],
+            'overlay': bool(opts.get('overlay', False)),
+            'points':  points,
+        }
+        pane = opts.get('pane')
+        if isinstance(pane, str) and pane.strip() and len(pane) <= PANES_PANE_MAX:
+            entry['pane'] = pane
+        panes.append(entry)
+    return panes
+
+
+def _build_candles(df):
+    """Backtest df → stats.json `candles`: [[ts, open, high, low, close, volume], ...].
+
+    The exact bars the backtest computed on (post-warmup, post-filter slice — the same
+    df trades/panes are built from), so the frontend chart draws what the stats actually
+    saw instead of re-fetching a kline endpoint that can diverge (adjusted stock prices,
+    stitched futures contracts, warmup slicing). Same ts basis as trades[].ts and
+    panes[].points. Bars with a non-finite/non-positive OHLC value are skipped — a gap
+    is honest, a fake bar isn't. Volume is null when the df has no Volume column;
+    a non-finite volume on an otherwise good bar also drops the bar.
+    """
+    cols = ('Open', 'High', 'Low', 'Close')
+    if not all(c in df.columns for c in cols):
+        return []
+    try:
+        o, h, l, c = (df[col].to_numpy(dtype=float) for col in cols)
+        vol = df['Volume'].to_numpy(dtype=float) if 'Volume' in df.columns else None
+    except (TypeError, ValueError):
+        return []  # non-numeric column — no candles rather than a crashed run
+    candles = []
+    for i, t in enumerate(df.index):
+        bar = (float(o[i]), float(h[i]), float(l[i]), float(c[i]))
+        if not all(math.isfinite(x) and x > 0 for x in bar):
+            continue
+        if vol is None:
+            v = None
+        else:
+            v = float(vol[i])
+            if not math.isfinite(v):
+                continue
+        candles.append([int(t.timestamp()),
+                        round(bar[0], 6), round(bar[1], 6), round(bar[2], 6), round(bar[3], 6),
+                        v])
+    if len(candles) > CANDLES_MAX_COUNT:
+        candles = candles[-CANDLES_MAX_COUNT:]  # tail — same convention as trades/panes
+    return candles
+
 
 def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
     """
@@ -35,6 +151,22 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
     strategy_name = config['STRATEGY_NAME']
     fee           = config.get('FEE', 0.0005)
     interval      = config.get('INTERVAL', '1h')
+
+    # TAIFEX settlement-mask enforcement — an unmasked backtest on the unadjusted
+    # continuous series books roll gaps as fake PnL, so refuse to produce stats at
+    # all rather than deliver silently-wrong numbers (AGENTS.md › Backtest Output;
+    # detection lives in lib/quality_check.py). Checked before the data fetch so a
+    # doomed run costs nothing. Live/cron runs are NOT blocked here: stopping an
+    # already-deployed strategy's signal feed is a fleet-ops decision, not this
+    # guard's call.
+    if mode == 'backtest' and config.get('__file__'):
+        from lib.quality_check import txf_settlement_findings
+        problems = txf_settlement_findings(config['__file__'])
+        if problems:
+            raise SystemExit(
+                '\n'.join(f"❌ Line {p['line']}: {p['msg']}" for p in problems)
+                + '\n❌ Backtest refused — apply txf_settlement_mask, then re-run.'
+            )
 
     env  = dotenv_values()
     hdrs = {'api-key': env.get('blave_api_key', ''), 'secret-key': env.get('blave_secret_key', '')}
@@ -119,6 +251,61 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
             if isinstance(x, float) and (math.isnan(x) or math.isinf(x)): return None
             return round(float(x), 4)
 
+        # Per-event trade log for the workspace overlay. One row per nonzero delta_w[t],
+        # each carrying `position` = the post-event position (w_curr[t]) — authoritative
+        # for the frontend's flat/flip/open classification. Cumsum-rebuilding from the
+        # 4dp-rounded deltas is NOT equivalent: the quantization residual (~1e-4 per
+        # event) dwarfs any zero-epsilon, so vol-scaled continuous-weight strategies
+        # never read as flat, and any event dropped below makes the rebuilt curve
+        # drift permanently. Price alignment MUST mirror precise_pnl's own exec_shifted
+        # logic (same t index, same close_v[t-1]/open_v[t] choice) or the overlay marks
+        # won't land on the bar precise_pnl actually priced the trade at.
+        #
+        # delta_w_clean (nan_to_num'd) is only used to locate nonzero indices — the values
+        # actually written per event come from the raw (un-cleaned) arrays and go through
+        # _v() below, so a genuine nan/inf delta/price is dropped instead of silently
+        # surviving as a large-but-finite number that math.isinf() can no longer catch.
+        delta_w_clean = np.nan_to_num(delta_w)
+        trades = []
+        # Pre-event position (w_prev[t], the same chain precise_pnl differenced) per
+        # retained event — kept parallel to `trades` so tail-truncation below can
+        # anchor the surviving events for frontends still on the legacy cumsum
+        # fallback (data produced before per-event `position` existed).
+        pre_positions = []
+        for t in np.flatnonzero(delta_w_clean):
+            dw_raw = float(delta_w[t])
+            dw     = _v(dw_raw)
+            if dw is None:
+                continue  # nan/inf delta — drop the event rather than write a bad value
+
+            price_raw = close_v[t - 1] if exec_shifted[t] else open_v[t]
+            price     = _v(price_raw)
+            if price is None or price <= 0:
+                continue  # nan/inf/non-positive price (e.g. futures overnight gap) — drop the event
+
+            position = _v(w_curr[t])
+            if position is None:
+                continue  # nan/inf post-event position — drop the event, same as delta/price above
+
+            trades.append({
+                # epoch seconds, not isoformat() — matches the live-mode candles payload
+                # below; isoformat() is tz-naive for crypto but tz-aware for TXF/twstock,
+                # which JS `new Date()` parses inconsistently (local time vs. UTC offset).
+                'ts':        int(df.index[t].timestamp()),
+                'price':     price,
+                'direction': 'buy' if dw_raw > 0 else 'sell',
+                'delta':     dw,
+                'position':  position,
+            })
+            pre_positions.append(float(w_prev[t]))
+        if len(trades) > TRADES_MAX_COUNT:
+            trades        = trades[-TRADES_MAX_COUNT:]  # tail — most recent trades matter first
+            pre_positions = pre_positions[-TRADES_MAX_COUNT:]
+        # Position before the first retained event: start + Σ(retained deltas) walks the
+        # same values w_curr held. Always written so the frontend needn't special-case
+        # truncation; null (nan/inf via _v) means "no anchor — fall back".
+        trades_start_position = _v(pre_positions[0]) if pre_positions else 0.0
+
         print(f"  Total Return: {total_ret:.2f}%  Sharpe: {sharpe:.2f}  MDD: {mdd:.2f}%")
         print(f"  Fee Rate: {fee*100:.4f}%  Total Fees: {total_fees:.2f}%  Trades: {n_trades}")
         if n_trades == 0:
@@ -137,22 +324,28 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         from lib.pnl import daily_returns_typeA
         d_dates, d_rets = daily_returns_typeA(pf_series)
 
-        json.dump(
-            {'strategy': strategy_name, 'symbol': config.get('SYMBOL'), 'interval': interval,
-             'start': config.get('START'), 'end': df.index[-1].strftime('%Y-%m-%d'),
-             'fee [%]': round(fee * 100, 4),
-             'Total Return [%]':     _v(total_ret),
-             'Benchmark Return [%]': _v(bench_ret),
-             'Max Drawdown [%]':     _v(mdd),
-             'Sharpe Ratio':         _v(sharpe),
-             'Sortino Ratio':        _v(sortino),
-             'Omega Ratio':          _v(omega),
-             'Total Fees Paid [%]':  round(total_fees, 4),
-             'Trades':               n_trades,
-             'daily_dates': d_dates, 'daily_returns': d_rets,
-             },
-            open(out_dir / 'stats.json', 'w'), indent=2
-        )
+        stats = {'strategy': strategy_name, 'symbol': config.get('SYMBOL'), 'interval': interval,
+                 'start': config.get('START'), 'end': df.index[-1].strftime('%Y-%m-%d'),
+                 'fee [%]': round(fee * 100, 4),
+                 'Total Return [%]':     _v(total_ret),
+                 'Benchmark Return [%]': _v(bench_ret),
+                 'Max Drawdown [%]':     _v(mdd),
+                 'Sharpe Ratio':         _v(sharpe),
+                 'Sortino Ratio':        _v(sortino),
+                 'Omega Ratio':          _v(omega),
+                 'Total Fees Paid [%]':  round(total_fees, 4),
+                 'Trades':               n_trades,
+                 'daily_dates': d_dates, 'daily_returns': d_rets,
+                 'trades': trades,
+                 'trades_start_position': trades_start_position,
+                 }
+        panes = _build_panes(config.get('PLOT_SERIES'), df)
+        if panes:  # optional field — absent (not empty) when nothing is declared/valid
+            stats['panes'] = panes
+        candles = _build_candles(df)
+        if candles:  # optional field — same absent-not-empty convention as panes
+            stats['candles'] = candles
+        json.dump(stats, open(out_dir / 'stats.json', 'w'), indent=2)
 
         if not quiet:
             plot_pnl(df, result_d, title=strategy_name,

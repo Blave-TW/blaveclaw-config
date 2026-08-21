@@ -174,13 +174,15 @@ Clearing (`clear_halt`) is ONLY done when the user explicitly asks to resume —
 
 ## Backtest Output
 
-**Taiwan futures (TXF / stock futures) strategies MUST apply `txf_settlement_mask` in compute_signals** — the data is an unadjusted continuous series; skipping it books fake roll gaps as PnL (see `references/lib.md`).
+**Taiwan futures (TXF / stock futures) strategies MUST apply `txf_settlement_mask` in compute_signals** — the data is an unadjusted continuous series; skipping it books fake roll gaps as PnL (see `references/lib.md`). Machine-enforced: `lib/quality_check.py` flags a missing mask as CRITICAL and the backtest runner refuses to run without it.
 
 **Taiwan index futures `SYMBOL` declares the contract actually traded** (`TXF` 大台 / `MXF` 小台 / `TMF` 微台) — the data layer auto-aliases MXF/TMF to the TXF series, and `FEE` is still per-instrument (see `references/lib.md`).
 
 Do NOT call `bt.plot()` — heavy interactive HTML, useful on neither surface.
 
 After every backtest, `run()` automatically writes `strategies/{name}/stats.json`, generates `strategies/{name}/pnl.png`, and delivers it on the active surface.
+
+**Type A strategies should declare `PLOT_SERIES`** — the 1–2 indicator series that explain the entries/exits, shown on the web workspace trade chart. Contract and examples: `references/plot-series.md`.
 
 ## Manager & Reconciler
 

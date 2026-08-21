@@ -199,8 +199,10 @@ Custom lib: lib/orders_bybit.py — place_order("BUY"|"SELL"|"SHORT"|"COVER"). R
 
 **Before submitting a Type A or C strategy** (skip only for Type B — no backtest, no FEE),
 run `python3 lib/quality_check.py strategies/<filename>.py` — catches a `FEE=0` backtest
-(inflates the Sharpe/return you're about to advertise to buyers) and an unfilled
-`compute_signals()` template. Fix any findings before calling the endpoint below.
+(inflates the Sharpe/return you're about to advertise to buyers), an unfilled
+`compute_signals()` template, and a TAIFEX futures strategy missing the mandatory
+`txf_settlement_mask` (its backtest books fake roll-gap PnL). Fix any findings before
+calling the endpoint below.
 
 ```
 POST /openclaw/marketplace/strategies/submit

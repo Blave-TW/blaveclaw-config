@@ -1,6 +1,7 @@
 """
 Static quality analysis for Type A / Type C strategy files — catches a broken or
-unfilled compute_signals() contract and backtest fee-drag gaming (FEE=0) before a
+unfilled compute_signals() contract, backtest fee-drag gaming (FEE=0), and a
+TAIFEX futures strategy missing the mandatory txf_settlement_mask, before a
 strategy is submitted to the marketplace or run after being purchased.
 
 Usage:
@@ -29,8 +30,20 @@ def check(filepath: str) -> list[dict]:
     except SyntaxError as e:
         return [{"level": "CRITICAL", "line": 0, "msg": f"Cannot parse file: {e}"}]
 
-    findings = _check_fee(tree) + _check_compute_signals(tree)
+    findings = _check_fee(tree) + _check_compute_signals(tree) + _check_txf_settlement_mask(tree)
     return sorted(findings, key=lambda f: f["line"])
+
+
+def txf_settlement_findings(filepath: str) -> list[dict]:
+    """TAIFEX settlement-mask check only — the backtest runner's runtime guard
+    (lib/runner.py) calls this before producing stats. Unreadable/unparsable
+    files return [] here: a file that is *executing* obviously parses, and the
+    full CLI already reports read/parse problems as CRITICAL."""
+    try:
+        tree = ast.parse(Path(filepath).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError):
+        return []
+    return _check_txf_settlement_mask(tree)
 
 
 # ── FEE=0 gaming check ──────────────────────────────────────────────────────────
@@ -118,6 +131,92 @@ def _check_compute_signals(tree: ast.AST) -> list[dict]:
                 findings.append(_w(n.lineno, "raise NotImplementedError — a TEMPLATE stub "
                                              "section was left unfilled"))
     return findings
+
+
+# ── TAIFEX settlement-mask check ────────────────────────────────────────────────
+
+# Only the R1 continuous-series fetchers — the ones whose roll gap fabricates
+# PnL. Auxiliary TAIFEX feeds (pcr, bid_ask_vol) and the per-contract-month
+# fetch_stock_futures_batch_daily deliberately do NOT trigger: a strategy may
+# use them as indicators while trading a non-TAIFEX symbol.
+_TWFUTURES_PRICE_FETCHERS = {
+    "fetch_twfutures_ohlcv",
+    "fetch_twfutures_ohlcv_batch",
+}
+_TAIFEX_INDEX_SYMBOLS = {"TXF", "MXF", "TMF"}
+
+_MASK_FIX = (
+    "Fix in compute_signals: `settle = txf_settlement_mask(df.index); "
+    "signal[settle] = 0.0; return signal, settle` (Type C: `weights.loc[settle] = 0.0` "
+    "and return settle as exec_at_close). See references/lib.md › txf_settlement_mask "
+    "and strategies/txf_composite_60m/strategy.py for a real example."
+)
+
+
+def _call_name(node: ast.Call):
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return None
+
+
+def _check_txf_settlement_mask(tree: ast.AST) -> list[dict]:
+    # A strategy is treated as TAIFEX if it fetches a TAIFEX price series, or —
+    # covering fetches hidden behind a helper module — declares SYMBOL as an
+    # index-futures contract. Stock futures (e.g. 'CDF') can't be enumerated
+    # statically, but they necessarily fetch via fetch_twfutures_* so the call
+    # trigger covers them.
+    trigger = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _call_name(node) in _TWFUTURES_PRICE_FETCHERS:
+            trigger = (node.lineno, f"calls {_call_name(node)}()")
+            break
+    if trigger is None:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                targets, value = [node.target], node.value
+            else:
+                continue
+            if (
+                any(isinstance(t, ast.Name) and t.id == "SYMBOL" for t in targets)
+                and isinstance(value, ast.Constant)
+                and value.value in _TAIFEX_INDEX_SYMBOLS
+            ):
+                trigger = (node.lineno, f"SYMBOL = '{value.value}'")
+                break
+    if trigger is None:
+        return []
+
+    mask_calls = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and _call_name(n) == "txf_settlement_mask"
+    ]
+    if not mask_calls:
+        return [_c(
+            trigger[0],
+            f"TAIFEX futures strategy ({trigger[1]}) without txf_settlement_mask — "
+            "the data is an unadjusted continuous series; every monthly roll books "
+            "the contract-basis gap as fake PnL (~+4%/yr × gross exposure) and the "
+            "backtest omits real roll fees. " + _MASK_FIX,
+        )]
+
+    # Cargo-cult guard: calling the mask but throwing the result away. Only the
+    # bare-expression-statement form is detectable statically; assigning the mask
+    # without actually zeroing the signal with it passes this check.
+    discarded = {
+        id(s.value) for s in ast.walk(tree)
+        if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call)
+    }
+    if all(id(c) in discarded for c in mask_calls):
+        return [_c(
+            mask_calls[0].lineno,
+            "txf_settlement_mask() is called but its result is discarded — the "
+            "mask must zero the signal and be returned as exec_at_close. " + _MASK_FIX,
+        )]
+    return []
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

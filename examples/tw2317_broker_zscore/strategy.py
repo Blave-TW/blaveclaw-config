@@ -22,6 +22,10 @@ ENTRY_Z    = -0.77
 EXIT_Z     =  0.29
 WARMUP     = WINDOW + ZSCORE_WIN
 
+# The one series that explains every entry/exit — shown as a sub-pane under the
+# workspace trade chart (see references/plot-series.md)
+PLOT_SERIES = {"Broker Flow Z-Score": "zscore"}
+
 
 # ── indicators ────────────────────────────────────────────────────────────────
 def _add_indicators(df, window=WINDOW, zscore_win=ZSCORE_WIN):
