@@ -85,6 +85,12 @@ function Find-X64Dir([string]$root, [string]$marker) {
 # quotes (r"C:\..." / print("ok")) gets its quoting mangled through SSH -> powershell ->
 # python.exe and python sees a SyntaxError. Returns $true iff python exits 0.
 function Invoke-Py([string]$py, [string[]]$lines, [string]$name) {
+    # Local EAP=Continue: under the script's Stop preference, a native python that exits
+    # non-zero writing a traceback to stderr gets wrapped into a terminating
+    # NativeCommandError by the 2>&1 redirect -- turning "check returned false" into a
+    # thrown exception (hit live 2026-08-21: Test-SkcomRegistered on an unregistered box
+    # blew up the component step as "FAILED: Traceback..."). Exit code is the only truth.
+    $ErrorActionPreference = 'Continue'
     $f = Join-Path $tmp "_$name.py"
     Set-Content -Path $f -Value $lines -Encoding ASCII
     & $py $f 2>&1 | Out-Null
@@ -104,18 +110,28 @@ New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 
 # --- 1. VC++ 2010 runtime ---------------------------------------------------------------
 Step 'vcredist2010' {
+    $ErrorActionPreference = 'Continue'   # choco writes progress noise to stderr; exit-state is the Test-Path below
     $have = (Test-Path 'C:\Windows\System32\mfc100.dll') -and (Test-Path 'C:\Windows\System32\msvcr100.dll')
     if ($have) { return 'present' }
     if (-not (Get-Command choco -ErrorAction SilentlyContinue)) { throw 'mfc100.dll missing and choco not installed -- install Chocolatey first' }
     & choco install vcredist2010 -y --no-progress 2>&1 | Out-Null
     $have = (Test-Path 'C:\Windows\System32\mfc100.dll') -and (Test-Path 'C:\Windows\System32\msvcr100.dll')
-    if (-not $have) { throw 'choco install vcredist2010 finished but mfc100.dll/msvcr100.dll still missing' }
+    if (-not $have) {
+        # choco can hold a stale "already installed" record when a previous install was
+        # interrupted (measured 2026-08-21: a killed background run left the package
+        # registered but the DLLs never landed, so a plain install returns instantly and
+        # does nothing). --force reinstalls for real.
+        & choco install vcredist2010 -y --no-progress --force 2>&1 | Out-Null
+        $have = (Test-Path 'C:\Windows\System32\mfc100.dll') -and (Test-Path 'C:\Windows\System32\msvcr100.dll')
+    }
+    if (-not $have) { throw 'choco install vcredist2010 (incl. --force retry) finished but mfc100.dll/msvcr100.dll still missing' }
     return 'installed'
 }
 
 # --- 2. Python deps ---------------------------------------------------------------------
 $py = $null
 Step 'python_deps' {
+    $ErrorActionPreference = 'Continue'   # pip writes to stderr; Invoke-Py judges by exit code
     $script:py = Resolve-Python
     # Test exactly what capital_worker.py imports (comtypes.client + pythoncom), NOT win32api --
     # pywin32's win32api can fail to import from a bare interpreter even when pythoncom works.
