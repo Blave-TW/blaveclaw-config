@@ -214,6 +214,34 @@ def fetch_twstock_market_value(stock_id: str, start: str, end: str, headers: dic
     return pd.DataFrame(data).set_index("date") if data else pd.DataFrame()
 ```
 
+### Whole-market market-cap ranking (全市場市值排名)
+
+`fetch_twstock_market_value_all(headers, top=None)` in `lib/data.py` returns the latest
+market-cap ranking of the whole market in ONE call — use it whenever a question or a
+screen is about market cap (前十大權值股, top-N pool by market cap). Never rebuild the
+ranking from per-stock shares × price (that is ~2,000 calls and minutes of waiting).
+
+```python
+from lib.data import fetch_twstock_market_value_all
+
+top10 = fetch_twstock_market_value_all(hdrs, top=10)
+# columns: rank (1-based, market_value desc), stock_id, name, market_value (NTD 元, int)
+top10.attrs["date"]                     # as-of publication date, 'YYYY-MM-DD'
+
+mv = fetch_twstock_market_value_all(hdrs)          # all ~2,400 rows
+no_etf = mv[~mv["stock_id"].str.startswith("00")]     # drop ETFs (ETFs such as 0050 rank among the large caps)
+pool = no_etf.head(300)["stock_id"].tolist()          # market-cap top-300 universe
+```
+
+Notes:
+- Universe = TWSE listed + TPEx OTC + ETFs; 興櫃 (emerging) excluded, ETNs have no data.
+- Updated once a day after the close (EOD); the server caches the ranking 30 min. Locally the
+  FULL ranking is cached 1 hour as a single file and `top` is sliced locally, so repeat calls
+  with different `top` are free within the hour; `attrs["date"]` survives cache hits.
+- `top` must be an int in 1–3000 (validated locally, same range as the server); None = all.
+- Errors: 404 = no recent data server-side; 503 = upstream rate limit (`_retry_get` retries
+  503 with backoff, so a 503 that surfaces means the retries were exhausted).
+
 ---
 
 ## 八大行庫買賣超
@@ -404,22 +432,28 @@ from lib.data import (
 
 ---
 
-## 全市場選股（Screening）
+## Whole-market Screening (全市場選股)
 
-**絕不對多支股票 fan-out 單檔 fetcher（含自開 ThreadPool 平行打）** —— 單檔 endpoint 有
-rate limit，300 支就會 429 退避到分鐘級；上表的 batch 函式一次 50 支、全市場約 40 個請求。
+**Never fan out per-stock fetchers across many stocks (including your own ThreadPool)** — the
+per-stock endpoints are rate-limited; ~300 stocks already push 429 backoff into minutes. The
+batch functions above take 50 ids per request, ~40 requests for the whole market.
 
-流程走漏斗，先縮池再拉時間序列（實測 uid=1 機器）：
+Work as a funnel — narrow the pool first, then pull time series (measured on the uid=1 machine):
 
-1. **縮池（秒級）**：`fetch_twstock_list`（產業別；注意 list **沒有市值欄**——市值在逐股的
-   `/market_value/` 端點，只能對縮完的池子逐支拉，不能拿來當第一層濾網）、`fetch_twstock_quote_batch`
-   （全市場漲幅/量比約 24s）、`fetch_twstock_monthly_revenue_batch`／`fetch_twstock_per_batch`
-   （基本面/價值條件）→ 縮到幾百支。
-2. **時間序列條件（每百支約 10–30s）**：對縮完的池子用
-   `fetch_twstock_price_batch`（KD/突破等需 High/Low 的技術條件）、
-   `fetch_twstock_price_adj_batch`（均線/報酬類）、`fetch_twstock_institutional_batch`（法人連買）。
-3. 全市場直接拉時間序列（不縮池）一次約 2–3 分鐘——用戶明確要全市場掃描才這樣做，
-   並先講清楚要等多久。
+1. **Narrow the pool (seconds)**: `fetch_twstock_market_value_all` (whole-market market-cap
+   ranking in one call — THE first-layer filter for market-cap conditions: top-N pool, 前十大權值股;
+   drop ETFs with `stock_id.str.startswith("00")`; `fetch_twstock_list` itself has no
+   market-cap column), `fetch_twstock_list` (industry), `fetch_twstock_quote_batch`
+   (whole-market change/volume ratio, ~24s), `fetch_twstock_monthly_revenue_batch` /
+   `fetch_twstock_per_batch` (fundamental / value conditions) → down to a few hundred stocks.
+   Per-stock `/market_value/{stock_id}` history is for the already-narrowed pool only.
+2. **Time-series conditions (~10–30s per 100 stocks)**: on the narrowed pool use
+   `fetch_twstock_price_batch` (KD / breakout and other conditions needing High/Low),
+   `fetch_twstock_price_adj_batch` (moving averages / returns),
+   `fetch_twstock_institutional_batch` (consecutive institutional buying).
+3. Pulling time series for the whole market without narrowing takes ~2–3 minutes per pass —
+   only do this when the user explicitly asks for a full-market scan, and say up front how
+   long it will take.
 
 ---
 

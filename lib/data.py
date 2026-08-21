@@ -1,4 +1,5 @@
 import os
+import numbers
 import time
 import threading
 import requests
@@ -1491,6 +1492,46 @@ def fetch_twstock_info(stock_id, headers):
     if df.empty or stock_id not in df.index:
         return None
     return {'stock_id': stock_id, **df.loc[stock_id].to_dict()}
+
+
+def fetch_twstock_market_value_all(headers, top=None):
+    """全市場市值排名快照 (whole-market market-cap ranking). 上市 + 上櫃 + ETF
+    (興櫃 excluded, ETNs have no data) — about 2,400 rows. DataFrame with columns
+    rank (1-based, market_value desc), stock_id, name, market_value (NTD 元,
+    integer); the as-of publication date rides along in `df.attrs['date']`
+    ('YYYY-MM-DD'). Updated once a day after the close; server caches 30 min.
+
+    `top` (int 1–3000) keeps the first N ranks, None = all. This is the first-layer
+    screening filter for anything market-cap based (top-N pool, top-10 權值股) —
+    never rebuild it from per-stock shares × price across the market. ETFs are in
+    the ranking (ETFs such as 0050 rank among the large caps); drop ETFs with
+    `df[~df['stock_id'].str.startswith('00')]`.
+
+    Single-file cache like fetch_twmarket_dividend_points: the FULL ranking is
+    fetched once (one call, ~2.4k rows) and kept 1 hour, `top` is sliced locally,
+    so repeat calls with different `top` are free within the hour. attrs survive
+    the parquet round-trip, so cache hits keep the as-of date."""
+    if top is not None and (not isinstance(top, numbers.Integral)
+                            or isinstance(top, bool) or not 1 <= top <= 3000):
+        raise ValueError(f'top must be an int in 1–3000 or None, got {top!r}')
+    path = _CACHE_DIR / 'twstock_market_value_all.parquet'
+    df = _load_fundamental_cache(path, max_age_days=1 / 24)
+    if df is None:
+        r = _retry_get(f'{BASE}/studio/market/twstock/market_value/all',
+                       headers=headers, timeout=60)
+        payload = r.json()
+        data = payload.get('data', [])
+        if not data:
+            out = pd.DataFrame(columns=['rank', 'stock_id', 'name', 'market_value'])
+            out.attrs['date'] = payload.get('date')
+            return out
+        df = pd.DataFrame(data)[['rank', 'stock_id', 'name', 'market_value']]
+        df = df.sort_values('rank').reset_index(drop=True)
+        df.attrs['date'] = payload.get('date')
+        _save_fundamental_cache(path, df)
+    out = df if top is None else df.head(top).copy()
+    out.attrs = dict(df.attrs)   # slicing must not drop the as-of date
+    return out
 
 
 def _fetch_fundamental_batch(prefix, endpoint, stock_ids, headers):
