@@ -65,20 +65,24 @@ def _log(msg):
     print(f"[capital_worker] {msg}", flush=True)
 
 
-def _read_env():
+def _parse_env():
     env = {}
+    with open(os.path.join(WORKSPACE, ".env")) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip().strip("'\"")
+    return env
+
+
+def _read_env():
     try:
-        with open(os.path.join(WORKSPACE, ".env")) as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    env[k.strip()] = v.strip().strip("'\"")
+        return _parse_env()
     except OSError as e:
         _write_snapshot({"ok": False, "error": f".env unreadable: {e}"})
         time.sleep(30)  # don't hot-loop through NSSM restarts
         sys.exit(1)
-    return env
 
 
 def _write_snapshot(payload):
@@ -226,42 +230,42 @@ def query_balance(order, login_id, ts_acct):
     ]
 
 
-def main():
-    _init_com()
-    env = _read_env()
-    login_id = env.get("capital_api_key") or env.get("capital_id")
-    password = env.get("capital_password")
-    if not login_id or not password:
-        _write_snapshot({"ok": False, "error": "capital_api_key/capital_password missing in .env"})
-        sys.exit(1)
+class ProbeError(RuntimeError):
+    """A connect step failed with a Capital return code — carries the stage
+    name so --once can report WHERE it broke (login/cert/accounts) without the
+    daemon's _write_snapshot + sys.exit side effects."""
 
+    def __init__(self, stage, message):
+        super().__init__(message)
+        self.stage = stage
+
+
+def _connect(login_id, password):
+    """Login -> SKOrderLib init -> ReadCertByID -> GetUserAccount, the exact
+    order that works (see 602/2017 notes). Returns (center, order, tf, ts,
+    handles) on success; raises ProbeError(stage, msg) on any Capital return
+    code. Handles are returned so the caller keeps the event sinks alive —
+    dropping them GCs the connection point and breaks the session."""
     center = comtypes.client.CreateObject(sk.SKCenterLib, interface=sk.ISKCenterLib)
     reply = comtypes.client.CreateObject(sk.SKReplyLib, interface=sk.ISKReplyLib)
     order = comtypes.client.CreateObject(sk.SKOrderLib, interface=sk.ISKOrderLib)
     handler = Events()
-    _reply_h = comtypes.client.GetEvents(reply, handler)
-    _order_h = comtypes.client.GetEvents(order, handler)
+    reply_h = comtypes.client.GetEvents(reply, handler)
+    order_h = comtypes.client.GetEvents(order, handler)
 
     code = center.SKCenterLib_Login(login_id, password)
     if code not in (0, 2003):
-        msg = center.SKCenterLib_GetReturnCodeMessage(code)
-        _write_snapshot({"ok": False, "error": f"login failed code={code} {msg}"})
-        time.sleep(30)  # don't crash-loop hot on a bad password
-        sys.exit(1)
+        raise ProbeError("login", f"login failed code={code} {center.SKCenterLib_GetReturnCodeMessage(code)}")
     _log(f"login ok ({code})")
 
     if (rc := order.SKOrderLib_Initialize()) != 0:
-        _write_snapshot({"ok": False, "error": f"SKOrderLib_Initialize code={rc}"})
-        sys.exit(1)
+        raise ProbeError("init", f"SKOrderLib_Initialize code={rc}")
     if (rc := order.ReadCertByID(login_id)) != 0:
-        _write_snapshot({"ok": False, "error": f"ReadCertByID code={rc} (cert/identity issue — see 602 notes)"})
-        sys.exit(1)
+        raise ProbeError("cert", f"ReadCertByID code={rc} (cert/identity issue — see 602 notes)")
 
     Events.futures_accounts, Events.stock_accounts = [], []
     if (rc := order.GetUserAccount()) != 0:
-        _write_snapshot({"ok": False, "error": f"GetUserAccount code={rc}"})
-        time.sleep(30)
-        sys.exit(1)
+        raise ProbeError("accounts", f"GetUserAccount code={rc}")
     # One OnAccount event fires per account — the first arrival proves nothing
     # about the OTHER market's account. Keep pumping a grace window after the
     # first event or a late TS/TF row is silently dropped for the whole
@@ -275,7 +279,83 @@ def main():
     ts = Events.stock_accounts[0] if Events.stock_accounts else None
     _log(f"accounts TF={tf} TS={ts}")
     if not tf and not ts:
-        _write_snapshot({"ok": False, "error": "GetUserAccount returned no TF/TS accounts"})
+        raise ProbeError("accounts", "GetUserAccount returned no TF/TS accounts")
+    return center, order, tf, ts, (reply_h, order_h)
+
+
+def _tick_snapshot(order, login_id, tf, ts):
+    """One equity/position/holding read. May raise QueryInProgress (rate-limit)."""
+    # equity None = securities-only account (no TF) — written explicitly
+    # so lib/account_capital.py can raise a READABLE error instead of
+    # KeyError (audit P1-1). Securities valuation is a known gap.
+    snap = {"ok": True, "error": None, "positions": [], "holdings": [],
+            "equity": None, "currency": "TWD", "accounts": None,
+            "available": None}
+    if tf:
+        rights = query_rights(order, login_id, tf)
+        snap["equity"] = rights["equity"]
+        snap["currency"] = rights["currency"]
+        snap["accounts"] = {"futures": rights["equity"]}
+        snap["available"] = rights["available"]
+        snap["positions"] = query_open_interest(order, login_id, tf)
+    if ts:
+        snap["holdings"] = query_balance(order, login_id, ts)
+    return snap
+
+
+def run_once():
+    """One-shot read-only probe for onboarding (lib/capital_probe.ps1 wraps this
+    in the schtasks Administrator vehicle). Logs in, reads accounts + one tick,
+    writes state/capital_probe.json, exits 0/2. Does NOT touch the daemon's
+    capital_account.json or heartbeat — safe to run alongside the live worker."""
+    _init_com()
+    # Parse .env directly (NOT _read_env): _read_env's failure path writes the
+    # DAEMON snapshot capital_account.json and exit(1), which would break the
+    # probe contract (must only touch capital_probe.json, only exit 0/2).
+    try:
+        env = _parse_env()
+    except OSError as e:
+        _write_probe({"ok": False, "stage": "env", "error": f".env unreadable: {e}"})
+        sys.exit(2)
+    login_id = env.get("capital_api_key") or env.get("capital_id")
+    password = env.get("capital_password")
+    if not login_id or not password:
+        _write_probe({"ok": False, "stage": "env", "error": "capital_api_key/capital_password missing in .env"})
+        sys.exit(2)
+    try:
+        _center, order, tf, ts, _handles = _connect(login_id, password)
+        snap = _tick_snapshot(order, login_id, tf, ts)
+        _write_probe({"ok": True, "stage": "done", "error": None,
+                      "login_code": 0, "accounts": {"futures": tf, "securities": ts},
+                      "equity": snap["equity"], "available": snap["available"],
+                      "currency": snap["currency"],
+                      "positions": snap["positions"], "holdings": snap["holdings"]})
+        _log("probe ok")
+        sys.exit(0)
+    except ProbeError as e:
+        _write_probe({"ok": False, "stage": e.stage, "error": str(e)})
+        _log(f"probe failed at {e.stage}: {e}")
+        sys.exit(2)
+    except Exception as e:
+        _write_probe({"ok": False, "stage": "tick", "error": f"{type(e).__name__}: {e}"})
+        _log(f"probe failed: {e}")
+        sys.exit(2)
+
+
+def main():
+    _init_com()
+    env = _read_env()
+    login_id = env.get("capital_api_key") or env.get("capital_id")
+    password = env.get("capital_password")
+    if not login_id or not password:
+        _write_snapshot({"ok": False, "error": "capital_api_key/capital_password missing in .env"})
+        sys.exit(1)
+
+    try:
+        _center, order, tf, ts, _handles = _connect(login_id, password)
+    except ProbeError as e:
+        _write_snapshot({"ok": False, "error": str(e)})
+        time.sleep(30)  # don't crash-loop hot on a bad password / venue blip
         sys.exit(1)
 
     while True:
@@ -284,21 +364,7 @@ def main():
         HEARTBEAT_PATH.touch()
 
         try:
-            # equity None = securities-only account (no TF) — written explicitly
-            # so lib/account_capital.py can raise a READABLE error instead of
-            # KeyError (audit P1-1). Securities valuation is a known gap.
-            snap = {"ok": True, "error": None, "positions": [], "holdings": [],
-                    "equity": None, "currency": "TWD", "accounts": None,
-                    "available": None}
-            if tf:
-                rights = query_rights(order, login_id, tf)
-                snap["equity"] = rights["equity"]
-                snap["currency"] = rights["currency"]
-                snap["accounts"] = {"futures": rights["equity"]}
-                snap["available"] = rights["available"]
-                snap["positions"] = query_open_interest(order, login_id, tf)
-            if ts:
-                snap["holdings"] = query_balance(order, login_id, ts)
+            snap = _tick_snapshot(order, login_id, tf, ts)
             _write_snapshot(snap)
             _log(f"snapshot ok equity={snap.get('equity')} {snap.get('currency')} "
                  f"pos={len(snap['positions'])} hold={len(snap['holdings'])}")
@@ -332,5 +398,20 @@ def main():
                 break
 
 
+PROBE_PATH = os.path.join(WORKSPACE, "state", "capital_probe.json")
+
+
+def _write_probe(payload):
+    payload["read_at"] = int(time.time())
+    os.makedirs(os.path.dirname(PROBE_PATH), exist_ok=True)
+    tmp = PROBE_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(payload, f)
+    os.replace(tmp, PROBE_PATH)
+
+
 if __name__ == "__main__":
-    main()
+    if "--once" in sys.argv[1:]:
+        run_once()
+    else:
+        main()

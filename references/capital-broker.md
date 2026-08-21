@@ -79,12 +79,15 @@ gate — why is unknown (possibly a pre-existing 檢核 on that ID); treat the g
    page (「API申請步驟」block, item 2 — below the three 下載元件 buttons); the zip is a static,
    login-free URL the agent can pre-stage:
    `https://www.capital.com.tw/Service2/download/api_zip/CapitalAPI_v5.0_SKCOMVerifyDJ.zip`
-   After extracting, **copy `SKCOMVerifyDJ.exe` to `$env:PUBLIC\Desktop`** (same pattern as
-   RAWinApp.exe in Step 2) — the zip's own folder structure buries it several levels deep
-   (`CapitalAPI_v5.0_SKCOMVerifyDJ\元件\x64\SKCOMVerifyDJ.exe`), which is a bad time for the user
-   to be hunting through Explorer during an RDP session (measured 2026-08-14: told the user to run
-   it from that nested path — annoying to find). Tell the user it's "on the desktop", not the full
-   nested path.
+   After extracting, **copy the whole `...\元件\x64\` folder to `$env:PUBLIC\Desktop\SKCOMVerifyDJ\`**
+   (or drop a shortcut to the exe on the desktop) — NOT the bare exe. `SKCOMVerifyDJ.exe` is a
+   28 KB .NET shell that P/Invokes `SKCOM.dll` from its own directory; copied alone it starts,
+   but clicking 登入 dies with `DllNotFoundException: Unable to load DLL 'SKCOM.dll'` (and the
+   form may first show a vague "no certificate"-style message) — measured 2026-08-21, uid
+   29026, after the agent had copied just the exe. The desktop staging is still the point: the
+   zip buries the tool several levels deep (`CapitalAPI_v5.0_SKCOMVerifyDJ\元件\x64\`), a bad
+   time for the user to hunt through Explorer over RDP (measured 2026-08-14). Tell the user it's
+   "on the desktop, in the SKCOMVerifyDJ folder", not the nested path.
    Run `SKCOMVerifyDJ.exe`, log in with 身分證字號 + trading password, submit both
    **模擬國內證券下單** and **模擬國內期貨下單**, then — **required, not optional — click
    「查詢是否已驗證」**: the two simulated orders alone do NOT complete the verification;
@@ -96,11 +99,18 @@ gate — why is unknown (possibly a pre-existing 檢核 on that ID); treat the g
    Verification status appears to be stored **per 身分證字號 account, not per machine**
    (consistent with uid 12890 never hitting the gate on a fresh machine) — so a user who
    relaunches their machine should NOT need to re-run the 檢核; what a new machine does need
-   is a fresh certificate (Step 2) + component install (Step 3). Not yet isolated
-   experimentally — if a relaunched machine ever hits error 321, re-run the 檢核 and update
-   this note.
-   **GAP — pin when observed:** whether the verify tool itself requires the certificate to be
-   installed (2026-08-13 run had the cert already issued, so this remains untested).
+   is a fresh certificate (Step 2) + component install (Step 3). **Isolated 2026-08-21 (uid
+   29026, ID previously verified on another machine):** fresh machine, new cert, 檢核 NOT
+   re-run (the tool was opened but never completed) → login `code 0` and both TF/TS accounts
+   returned. So: if the user says they passed the 檢核 before, skip this step entirely and go
+   to Step 5 — do not send them back to the tool. Only if login returns 321 re-run it.
+   **Verify tool says "no certificate" / crashes on 登入 (observed 2026-08-21):** with a
+   valid cert in Administrator's `CurrentUser\My` (private key present, chain built, same RDP
+   identity) the tool still complained, and its error detail was
+   `DllNotFoundException: Unable to load DLL 'SKCOM.dll'` — the exe had been copied to the
+   desktop ALONE (see item 0 above). It is a tool-staging problem, not a certificate problem. Do
+   NOT read it as "the cert wasn't installed": verify the store via the schtasks vehicle (Step
+   2), and re-stage the tool with its sibling DLLs if the 檢核 is needed at all.
 1. User signs the declaration(s) for whichever market(s) they want, on the same 同意書簽署 portal:
    **證券API服務下單聲明書** (securities) and/or **期貨API服務下單聲明書** (futures) — two separate
    checkbox items on one page: https://tradeweb.capital.com.tw/TSWEB/agreeList.aspx (also available
@@ -127,6 +137,14 @@ Since API 2.13.35, login is dual-factor: **a valid 群益 trading certificate mu
 the machine that runs the API — even for quote-only use.** The issuance tool (`RAWinApp.exe`) is
 Windows-only, and the cert lands in the Windows certificate store, so issue it **directly on the
 Blave Agent Windows machine** via RDP. The user does NOT need their own Windows PC.
+
+**HARD RULE — never judge the cert store from your own shell.** Your shell runs as
+`nt authority\system`; `certutil -user -store My` there lists SYSTEM's (empty) store, not the
+Administrator store the wizard installs into. Two onboardings in a row (2026-08-20 and
+2026-08-21, uid 29026) the agent looked from its own shell, saw "empty", and told the user
+their cert "wasn't really installed" / asked for the .pfx password to re-import — both times
+the cert was fine. Check (and log in) ONLY through the password-logon schtasks vehicle
+described in the CONFIRMED notes below, or by running `lib/capital_worker.py` once (Step 5).
 
 Flow (agent orchestrates):
 
@@ -201,6 +219,20 @@ BlaveClaw machines, or `.env` `admin_password` on the oldest ones. Never reset i
 
 ## Step 3 — Install the Capital API Component
 
+**Just run the script — one call does this whole step:**
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\blave-agent\workspace\lib\capital_setup.ps1
+```
+`lib/capital_setup.ps1` installs VC++ 2010 + Python deps, downloads/extracts/registers the
+component (proves it with `CreateObject`), and stages the verify tool **with its DLLs**. It is
+idempotent (re-runs skip what's already registered — keyed on `CreateObject` working, not a marker)
+and prints a JSON summary; exit 0 = every step ok, else read `errors`. Runs fine from your own
+(SYSTEM) shell — nothing here touches the certificate. This replaces ~20 hand tool-calls that took
+7–12 min per onboarding (2026-08-20/21). Only fall back to the manual steps below if the script
+reports a failure you need to diagnose, or 群益 bumps the version (`-Version 2.13.60`).
+
+<details><summary>Manual fallback (what the script automates)</summary>
+
 **Every step is agent-executed (both zips are static, login-free URLs — see below).
 Do not ask the user to extract, install, or register anything themselves; do not leave a zip on
 the desktop for the user to double-click.**
@@ -241,6 +273,8 @@ Python 3.14 (2026-07-17, medium_win POC box): comtypes 1.4.16 + pywin32 312 inst
 COM CreateObject / Dispatch / message pump all work. (SKCOM.dll itself untested there — the zip
 was believed login-gated at the time; confirm `GetModule` on first real onboarding.)
 
+</details>
+
 ---
 
 ## Step 4 — Collect Credentials & Write `.env`
@@ -269,7 +303,24 @@ runtime's pair rule ever learns venue-specific secrets, drop the web workaround 
 
 ---
 
-## Step 5 — Test Login
+## Step 5 — Read-Only Verify (login + accounts + equity)
+
+**Just run the probe — one call does Steps 5–6:**
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\blave-agent\workspace\lib\capital_probe.ps1
+```
+`lib/capital_probe.ps1` wraps `lib/capital_worker.py --once` in the schtasks Administrator
+password vehicle (the ONLY context where SKCOM login passes — see Step 2), logs in, reads both
+accounts + one equity/position tick, and prints `state/capital_probe.json`. Exit 0 =
+`{"ok":true,...login_code 0, accounts, equity}`; exit 2 = ran but failed (read `stage`/`error` —
+`login`/`cert`/`accounts`); exit 3 = worker hung. Safe to run alongside the live worker service.
+
+**Do NOT hand-write a login script, and do NOT judge the cert store from your own shell** — both
+misfired repeatedly (2026-08-20/21, uid 29026: SYSTEM-shell `certutil` showed an empty store and
+the agent wrongly told the user the cert "wasn't installed"). The probe is the whole story: if it
+returns `ok`, login and accounts work; if `stage:"cert"` (login 602), re-read Step 2's 602 notes.
+
+<details><summary>Manual fallback — raw login snippet (what the probe runs, must go through a password logon)</summary>
 
 ```python
 import comtypes.client
@@ -291,12 +342,13 @@ code = center.SKCenterLib_Login(env['capital_api_key'], env['capital_password'])
 print(code, center.SKCenterLib_GetReturnCodeMessage(code))
 ```
 
-**For read-only account verification, run `lib/capital_worker.py` once directly instead of
-writing your own login script** — it already gets login order, event handlers, and the query flow
-right. If you do hand-write one, keep every `comtypes.client.GetEvents(...)` return value in a
+If you hand-write a login script, keep every `comtypes.client.GetEvents(...)` return value in a
 live variable (as above): discard it and the COM event sink is garbage-collected, the registration
 silently disappears, and login returns 2017 even though your code "registered" the handler
-(measured 2026-08-20, uid 29026 — burned ~9 min re-deriving this against a working lib).
+(measured 2026-08-20, uid 29026 — burned ~9 min re-deriving this against a working lib). This is
+exactly why Step 5's `capital_probe.ps1` / `capital_worker.py --once` exists — prefer it.
+
+</details>
 
 **成功**：`code == 0`（`2003` = 已登入，也算成功）。
 **失敗常見代碼**：300 密碼錯誤 / 307 密碼被鎖定 / 600 憑證錯誤（未安裝或有過期舊憑證，刪除過期的那張）/
