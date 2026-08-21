@@ -223,6 +223,16 @@ BlaveClaw machines, or `.env` `admin_password` on the oldest ones. Never reset i
 ```
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\blave-agent\workspace\lib\capital_setup.ps1
 ```
+**Run it in the FOREGROUND with an explicit long timeout (300000 ms — it takes 2–3 min).
+NEVER `run_in_background`:** background tool tasks are killed when your turn ends, silently —
+measured 2026-08-21 (uid 29026): the agent backgrounded this script to dodge the default 120 s
+tool timeout, replied "kicked off on my side", the turn ended, and 5 s later the runtime tore
+the process down (`[killed]`, zero files on disk) while the user believed the install was in
+progress. The "you will be notified when it completes" promise does not survive the turn — the
+next message is a fresh process. This applies to ANY long install, not just this script: run it
+foreground with a bigger timeout, or through a detached vehicle (schtasks) if it truly must
+outlive the turn.
+
 `lib/capital_setup.ps1` installs VC++ 2010 + Python deps, downloads/extracts/registers the
 component (proves it with `CreateObject`), and stages the verify tool **with its DLLs**. It is
 idempotent (re-runs skip what's already registered — keyed on `CreateObject` working, not a marker)
