@@ -14,7 +14,7 @@
 Simulates the manager's dynamic allocation day by day (strictly out-of-sample). Compares against random static portfolios as benchmark. Run BEFORE going live to validate combined portfolio performance.
 
 ```
-python3 manager/management_backtest.py [--lookback 365] [--random-n 500]
+python3 manager/management_backtest.py [--lookback 365] [--random-n 1000]
 ```
 
 When the user asks to backtest the portfolio / combined strategies, use THIS script — not individual strategy backtests.
@@ -222,16 +222,28 @@ when available) — this fix makes the field it falls back to more accurate,
 it does not change what the frontend computes.
 
 **The flatten (全部平倉) interaction — read this before wiring self_ledger to
-anything live.** `manager/flatten.py` closes every REAL open position on every
-venue, including a manually-opened one self_ledger was never told about — that
-is correct (a panic button must close everything, not just what the bot
-thinks it owns). But `flatten()` logs those closes to `manager/orders.jsonl`
-the same as any other order (`_append_reconciler_log`), and without more,
+anything live.** What `manager/flatten.py` closes depends on `self_ledger`
+(matching the 3Commas/Cryptohopper panic semantics the 暫停下單 dialog was
+modeled on): with `self_ledger` ON it closes ONLY the bot's own ledger
+positions (`lib.portfolio.ledger_positions`) — a manually-opened position
+self_ledger was never told about is untouched even by this button, and each
+close is capped at what the account actually holds on that side. Spot stays on
+the inventory scope either way (`spot_scope` — strategy-targeted symbols only;
+personal coins are never sold). If the ledger is unreadable on the panic path,
+swap closes are skipped loudly rather than silently widening scope to the
+whole account — the failure mode must never close the manual positions the
+feature exists to protect. With `self_ledger` OFF (every pre-feature machine)
+it closes every open position on the account — under the old alignment logic
+the whole account is the bot's world.
+
+Either way `flatten()` logs its closes to `manager/orders.jsonl` the same as
+any other order (`_append_reconciler_log`), and without more,
 `ledger_positions()` would sum them in as if they were an ordinary bot trade —
-driving the ledger to a large phantom position (e.g. closing a 2000 manual
-long the bot never held reads back as the bot now being 2000 short). The next
-`self_ledger` reconcile round would then try to "correct" that phantom
-position — right after the user asked to close everything.
+driving the ledger to a phantom position (worst on an OFF-mode machine that
+later switches ON: closing a 2000 manual long the bot never held reads back as
+the bot now being 2000 short). The next `self_ledger` reconcile round would
+then try to "correct" that phantom position — right after the user asked to
+close everything.
 
 `flatten()` fixes this itself: it tracks every symbol it actually closed
 (including sub-minimum dust left behind — still "as flat as it gets") and

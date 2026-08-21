@@ -20,8 +20,7 @@ Strategy execution MUST be scheduled as a system cron job (Linux) or Scheduled T
    - **Spot or futures/perpetual?** This determines which order API and position sizing logic to use.
    - **Align positions?** Do you want to reconcile current open positions before the first live run? If YES, fetch current positions from the exchange and align them with what the strategy's initial state expects — place orders for any difference. If NO, the strategy will align naturally over the next few signals.
 4. After all three are answered, confirm portfolio_config.json settings with the user:
-   - **`account_value`**: total USDT capital allocated to the portfolio
-   - **`target_vol_pct`**: target annual volatility % (default 30%). If the user prefers to think in terms of acceptable MDD, use the approximation `target_vol ≈ MDD / 2` (e.g. willing to lose 20% → target_vol ≈ 10%). Show both the vol and the implied MDD so the user can decide.
+   - **`amounts`**: per-strategy dollar allocation — "what this strategy trades with at position=1", in account currency (contracts for Capital Taiwan futures). `amounts` is canonical (see `lib/portfolio.py` `strategy_amounts`); ask the user for this strategy's amount directly. Legacy configs without `amounts` fall back to `account_value × leverage × weight` — do not create new deployments on the legacy fields.
    - Show current values from portfolio_config.json if it exists, and ask the user to confirm or update them before proceeding.
 5. Only after all confirmations: change `MODE = "live"`, update portfolio_config.json, and set up the schedule (cron on Linux, Scheduled Tasks on Windows — see OS check in `AGENTS.md`):
    a. Add the strategy schedule entry (see Cron Job Format / Scheduled Task Format below)
@@ -29,7 +28,7 @@ Strategy execution MUST be scheduled as a system cron job (Linux) or Scheduled T
 
 Never assume the user wants to go live just because they described a strategy or said "let's try it."
 Even if the user says "deploy it" or "run it", always confirm with one message before touching the schedule or MODE = "live".
-Once deployed live, send a confirmation message with: strategy name, schedule, account_value, target_vol_pct, and one line noting the healthcheck will alert them if the strategy stops running.
+Once deployed live, send a confirmation message with: strategy name, schedule, amount, and one line noting the healthcheck will alert them if the strategy stops running.
 
 ## Editing a FUNDED Strategy (in the 下單組合) — identity vs tunables
 
