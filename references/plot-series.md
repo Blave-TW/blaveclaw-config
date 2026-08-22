@@ -63,6 +63,12 @@ matplotlib). Referencing a df column (the usual case) means the series is exactl
 
 ## When to declare (and when not to)
 
+Declaring is **mandatory** whenever a computed or external indicator drives the
+entries/exits (anything from `_add_indicators`, a `rolling`/`ewm` window, an alpha or
+twstock feed) — without it the workspace has no indicator pane. Only a pure price rule
+(e.g. Close breaks a fixed level) may omit it. `lib/quality_check.py` flags a missing
+declaration as WARNING and the backtest runner prints the same hint.
+
 Declare only the 1–2 series that **explain the entry/exit decisions** — the indicator
 the thresholds are applied to is almost always the right choice. Do NOT dump every
 intermediate column of the df: the chart is for the user to see *why* the strategy

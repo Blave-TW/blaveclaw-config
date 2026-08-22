@@ -21,6 +21,8 @@ SMA_FAST = 5                   # 週線
 SMA_SLOW = 60                  # 季線
 WARMUP   = SMA_SLOW
 
+PLOT_SERIES = {"SMA 5": ("SMA_F", {"overlay": True}), "SMA 60": ("SMA_S", {"overlay": True})}
+
 
 # ── indicators ────────────────────────────────────────────────────────────────
 def _add_indicators(df, fast=SMA_FAST, slow=SMA_SLOW):

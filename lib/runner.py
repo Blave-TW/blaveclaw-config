@@ -431,6 +431,14 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         if n_trades == 0:
             print("  ⚠️ WARNING: 0 trades — the entry condition never fired; "
                   "all stats are meaningless. Check thresholds against the data's actual range.")
+        # Non-blocking, unlike the settlement guard: a missing PLOT_SERIES only costs
+        # the workspace its indicator pane, so hint in the output the agent reads
+        # after every backtest rather than refuse the run.
+        if mode == 'backtest' and config.get('__file__'):
+            from lib.quality_check import plot_series_findings
+            for p in plot_series_findings(config['__file__']):
+                logging.warning(p['msg'])
+                print(f"  ⚠️ WARNING: {p['msg']}")
 
         equity   = np.cumprod(1 + np.nan_to_num(pf_ret))
         result_d = {

@@ -22,6 +22,8 @@ SMA_SLOW   = 8000   # ~3.7 週 (300 min/day × 26 days)
 VOL_WINDOW = 21600  # 30 天 (720 bars/day × 30)
 WARMUP     = max(SMA_SLOW, VOL_WINDOW)
 
+PLOT_SERIES = {"SMA 1500": ("SMA_F", {"overlay": True}), "SMA 8000": ("SMA_S", {"overlay": True})}
+
 
 # ── indicators ────────────────────────────────────────────────────────────────
 def _add_indicators(df, fast=SMA_FAST, slow=SMA_SLOW):
@@ -37,7 +39,7 @@ def fetch_data(hdrs):
     from lib.strategy import add_realized_vol
     df = fetch_twfutures_ohlcv(SYMBOL, '1m', START, END, hdrs)
     add_realized_vol(df, lookback=VOL_WINDOW, periods_per_year=252000)
-    return df
+    return _add_indicators(df)   # PLOT_SERIES reads the columns off this df
 
 
 # ── compute_signals ───────────────────────────────────────────────────────────

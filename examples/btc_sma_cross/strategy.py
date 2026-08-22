@@ -21,6 +21,8 @@ SMA_FAST = 45
 SMA_SLOW = 100
 WARMUP   = SMA_SLOW
 
+PLOT_SERIES = {"SMA 45": ("SMA_F", {"overlay": True}), "SMA 100": ("SMA_S", {"overlay": True})}
+
 
 # ── indicators ────────────────────────────────────────────────────────────────
 def _add_indicators(df, fast=SMA_FAST, slow=SMA_SLOW):
@@ -33,7 +35,8 @@ def _add_indicators(df, fast=SMA_FAST, slow=SMA_SLOW):
 # ── fetch_data ────────────────────────────────────────────────────────────────
 def fetch_data(hdrs):
     from lib.data import fetch_kline
-    return fetch_kline(SYMBOL, INTERVAL, START, END, hdrs)
+    df = fetch_kline(SYMBOL, INTERVAL, START, END, hdrs)
+    return _add_indicators(df)   # PLOT_SERIES reads the columns off this df
 
 
 # ── compute_signals ───────────────────────────────────────────────────────────

@@ -21,6 +21,8 @@ ENTRY_TH = 1.686
 EXIT_TH  = -0.473
 WARMUP   = 0
 
+PLOT_SERIES = {"Taker Intensity 24h": "TI"}   # the column _add_indicators adds
+
 
 # ── indicators ────────────────────────────────────────────────────────────────
 # TI 本身不隨 threshold 變動，所以 scan 時只需呼叫一次

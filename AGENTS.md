@@ -171,7 +171,7 @@ Do NOT call `bt.plot()` — heavy interactive HTML, useful on neither surface.
 
 After every backtest, `run()` automatically writes `strategies/{name}/stats.json`, generates `strategies/{name}/pnl.png`, and delivers it on the active surface. Type A backtests also write `strategies/{name}/chart/` (full-history chart data the web pulls in the background) — never edit or hand-copy it.
 
-**Type A strategies should declare `PLOT_SERIES`** — the 1–2 indicator series that explain the entries/exits, shown on the web workspace trade chart. Contract and examples: `references/plot-series.md`.
+**Type A strategies whose entries/exits are driven by any computed or external indicator (`_add_indicators`, `rolling`/`ewm`, an alpha / twstock feed) MUST declare `PLOT_SERIES` in the config section** — the 1–2 series that explain the trades, drawn on the web workspace trade chart; without it the workspace shows no indicator pane. Checklist item, not optional — only a pure price rule (e.g. Close breaks a fixed level) may omit it. Contract and examples: `references/plot-series.md`; `lib/quality_check.py` and the backtest runner warn when it is missing.
 
 ## Manager & Reconciler
 

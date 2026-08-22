@@ -1,7 +1,8 @@
 """
 Static quality analysis for Type A / Type C strategy files — catches a broken or
-unfilled compute_signals() contract, backtest fee-drag gaming (FEE=0), and a
-TAIFEX futures strategy missing the mandatory txf_settlement_mask, before a
+unfilled compute_signals() contract, backtest fee-drag gaming (FEE=0), a
+TAIFEX futures strategy missing the mandatory txf_settlement_mask, and an
+indicator-driven Type A strategy without a PLOT_SERIES declaration, before a
 strategy is submitted to the marketplace or run after being purchased.
 
 Usage:
@@ -30,20 +31,33 @@ def check(filepath: str) -> list[dict]:
     except SyntaxError as e:
         return [{"level": "CRITICAL", "line": 0, "msg": f"Cannot parse file: {e}"}]
 
-    findings = _check_fee(tree) + _check_compute_signals(tree) + _check_txf_settlement_mask(tree)
+    findings = (
+        _check_fee(tree) + _check_compute_signals(tree)
+        + _check_txf_settlement_mask(tree) + _check_plot_series(tree)
+    )
     return sorted(findings, key=lambda f: f["line"])
 
 
-def txf_settlement_findings(filepath: str) -> list[dict]:
-    """TAIFEX settlement-mask check only — the backtest runner's runtime guard
-    (lib/runner.py) calls this before producing stats. Unreadable/unparsable
-    files return [] here: a file that is *executing* obviously parses, and the
-    full CLI already reports read/parse problems as CRITICAL."""
+def _parse_for_runner(filepath: str):
+    # The backtest runner (lib/runner.py) calls the single-check entry points
+    # below on the file that is *executing* — it obviously parses, and the full
+    # CLI already reports read/parse problems as CRITICAL, so return None here.
     try:
-        tree = ast.parse(Path(filepath).read_text(encoding="utf-8"))
+        return ast.parse(Path(filepath).read_text(encoding="utf-8"))
     except (OSError, SyntaxError, ValueError):
-        return []
-    return _check_txf_settlement_mask(tree)
+        return None
+
+
+def txf_settlement_findings(filepath: str) -> list[dict]:
+    """TAIFEX settlement-mask check only — the runner's blocking guard."""
+    tree = _parse_for_runner(filepath)
+    return _check_txf_settlement_mask(tree) if tree is not None else []
+
+
+def plot_series_findings(filepath: str) -> list[dict]:
+    """PLOT_SERIES check only — the runner's non-blocking backtest hint."""
+    tree = _parse_for_runner(filepath)
+    return _check_plot_series(tree) if tree is not None else []
 
 
 # ── FEE=0 gaming check ──────────────────────────────────────────────────────────
@@ -217,6 +231,84 @@ def _check_txf_settlement_mask(tree: ast.AST) -> list[dict]:
             "mask must zero the signal and be returned as exec_at_close. " + _MASK_FIX,
         )]
     return []
+
+
+# ── PLOT_SERIES declaration check (Type A) ──────────────────────────────────────
+
+# Fetchers that return the traded instrument's own price/OHLCV (or pure metadata):
+# calling one says nothing about indicators. Any OTHER lib.data fetch_* call
+# (alpha feeds, twstock institutional / broker / PER, TAIFEX pcr, a spot index
+# used for basis …) pulls an exogenous series the signal is almost certainly
+# built on — that is the "external indicator" case the rule targets.
+_PRICE_OR_META_FETCHERS = {
+    "fetch_data",  # the strategy's own entry point
+    "fetch_kline", "fetch_kline_batch", "fetch_bingx_kline", "fetch_db_kline",
+    "fetch_twstock_price", "fetch_twstock_price_adj",
+    "fetch_twstock_price_batch", "fetch_twstock_price_adj_batch",
+    "fetch_twstock_ohlcv", "fetch_twstock_quote", "fetch_twstock_quote_batch",
+    "fetch_twfutures_ohlcv", "fetch_twfutures_ohlcv_batch",
+    "fetch_stock_futures_batch_daily",
+    "fetch_twstock_ohlcv_symbols", "fetch_stock_futures_ohlcv_symbols",
+    "fetch_twstock_list", "fetch_twstock_info", "fetch_economic_calendar",
+}
+# Window computations — the self-computed indicator case. shift/diff/pct_change
+# deliberately do NOT count: "Close above yesterday's Close" is a pure price rule.
+_INDICATOR_METHODS = {"rolling", "ewm"}
+
+_PLOT_SERIES_FIX = (
+    "Declare the 1–2 df columns that explain the entries/exits in the config "
+    "section — e.g. PLOT_SERIES = {\"Taker Intensity 24h\": \"TI\"} (oscillator, "
+    "sub-pane) or {\"SMA fast\": (\"SMA_F\", {\"overlay\": True})} (price units, "
+    "overlay); the column must exist in the df fetch_data returns. See AGENTS.md › "
+    "Backtest Output, references/plot-series.md, examples/btc_ti_5min/strategy.py."
+)
+
+
+def _assigns(tree: ast.AST, name: str) -> bool:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+        else:
+            continue
+        if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+            return True
+    return False
+
+
+def _check_plot_series(tree: ast.AST) -> list[dict]:
+    # Type A = single-symbol config. Type C files declare UNIVERSE instead of
+    # SYMBOL and have no single trade chart to overlay, so they are skipped.
+    if not _assigns(tree, "SYMBOL") or _assigns(tree, "UNIVERSE"):
+        return []
+    if _assigns(tree, "PLOT_SERIES"):
+        return []
+
+    trigger = next(
+        ((n.lineno, "defines _add_indicators()") for n in ast.walk(tree)
+         if isinstance(n, ast.FunctionDef) and n.name == "_add_indicators"),
+        None,
+    )
+    if trigger is None:
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = _call_name(node)
+            if name in _INDICATOR_METHODS or (
+                name and name.startswith("fetch_") and name not in _PRICE_OR_META_FETCHERS
+            ):
+                trigger = (node.lineno, f"calls {name}()")
+                break
+    if trigger is None:
+        return []  # pure price rule — PLOT_SERIES is optional
+
+    return [_w(
+        trigger[0],
+        f"indicator-driven Type A strategy ({trigger[1]}) without PLOT_SERIES — "
+        "the web workspace chart gets no indicator pane, so the user cannot see "
+        "why it traded. " + _PLOT_SERIES_FIX,
+    )]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

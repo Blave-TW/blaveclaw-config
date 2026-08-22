@@ -25,6 +25,10 @@ FEE           = 0.0005            # VERIFIED real rate for this symbol/venue —
 # PARAM2 = ...
 # WARMUP = PARAM1 + PARAM2   # bars to skip at start of backtest (sum of rolling windows)
 
+# MUST when an indicator drives entries/exits: the 1–2 df columns (added by _add_indicators)
+# that explain the trades — price-unit series overlay, oscillators sub-pane (references/plot-series.md)
+PLOT_SERIES = {"SMA fast": ("SMA_F", {"overlay": True}), "SMA slow": ("SMA_S", {"overlay": True})}
+
 
 # ── indicators ────────────────────────────────────────────────────────────────
 # Called by fetch_data (normal run) and scan.py (param scan) with different params.
