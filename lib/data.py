@@ -2738,9 +2738,10 @@ def txf_settlement_mask(index):
         return signal, settle       # settle doubles as exec_at_close
     """
     import datetime
-    import pytz
+    from zoneinfo import ZoneInfo   # stdlib — no pytz dependency (pandas 3.x stopped pulling it in;
+                                    # a fresh Windows box had no pytz and every 台指期 backtest died here)
 
-    twn = pytz.timezone('Asia/Taipei')
+    twn = ZoneInfo('Asia/Taipei')   # ZoneInfo handles offsets/DST natively — no pytz localize() needed
 
     def _third_wed(year, month):
         d, count = datetime.date(year, month, 1), 0
@@ -2759,8 +2760,8 @@ def txf_settlement_mask(index):
     while True:
         wed = _third_wed(year, month)
         ts_settle = pd.Timestamp(
-            twn.localize(datetime.datetime(wed.year, wed.month, wed.day, 13, 30))
-            .astimezone(pytz.utc)
+            datetime.datetime(wed.year, wed.month, wed.day, 13, 30, tzinfo=twn)
+            .astimezone(datetime.timezone.utc)
         )
         if index.tz is None:
             ts_settle = ts_settle.tz_localize(None)

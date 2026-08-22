@@ -30,6 +30,16 @@ hdrs = {'api-key': env.get('blave_api_key', ''), 'secret-key': env.get('blave_se
 - `fetch_market_sentiment(symbol, interval, start, end, headers)` → DataFrame with `alpha`
 - `fetch_top_trader_exposure(interval, start, end, headers)` → DataFrame with `alpha` (BTC only, no symbol)
 
+**Data coverage & scale — measured facts, do NOT probe the API first.** When the user has not fixed a START (or you need the full history), request from the dataset's start date below — never widen a START the user gave; the actual first bar for a given symbol is simply `df.index[0]` (= max(dataset start, listing date) — e.g. DOGEUSDT 2020-07-10, SOLUSDT 2020-09-14, 1000PEPEUSDT 2023-05-05; HC for late listings can start months after listing). Every alpha below is on a z-score-like scale (mean≈0, std≈1) unless stated, so the scale is the same for every symbol. Measured 2026-08-22 on BTC/ETH/DOGE/SOL/1000PEPE, `1d` and `1h` both available:
+- `fetch_kline` — from **2020-01-01** (or listing); price, not a z-score. The `1d` series includes today's still-open bar (not closed until 00:00 UTC).
+- `fetch_holder_concentration` — from **2021-05-11** (BTC/ETH; DOGE/SOL 2021-05-28; 1000PEPE 2024-02-27); mean≈0, std≈1.2, p1≈−2.4, p99≈+3, extremes ≈−5…+11 (`1h` tails fatter).
+- `fetch_taker_intensity` — from **2020-01-01** (or listing); std≈1.1, p1≈−3.4, p99≈+2.5…3, extremes ≈−10…+11.
+- `fetch_whale_hunter` — from **2021-12-01** (or listing month); std≈1.05–1.1, p1≈−2.7, p99≈+3…4, `1h` extremes ≈±25.
+- `fetch_liquidation` — from **2020-01-01** (or listing); mean slightly negative (−0.0…−0.2), std≈0.8–1.1, p1≈−3.3, p99≈+2.5, `1h` fat tails to ±65.
+- `fetch_funding_rate` — **only from 2025-09-30** (≈11 months of history — say so before proposing a long backtest); NOT a z-score: funding rate × 100, mean≈0.002–0.003, std≈0.005–0.02, extremes ≈−0.3…+0.07.
+- Daily alphas end at the **last closed day (yesterday)** — that is not a lag, it is the last complete bar; joining onto today's open `1d` kline bar leaves that row's alpha NaN (a blind `ffill` would carry yesterday's value onto it). Hourly alphas and kline run to the current hour.
+- Not yet measured (`unusual_movement`, `squeeze_momentum`, `market_direction`, `capital_shortage`, `market_sentiment`, `top_trader_exposure`): fetch from 2020-01-01 and read `df.index[0]`; one call answers the question.
+
 **Taiwan stock price — raw vs adjusted (critical distinction):**
 - `fetch_twstock_price(sid, start, end, headers)` → Open/High/Low/Close/Volume, **actual market prices**. Use when the user asks to plot or view a stock's trend — matches what they see on broker apps.
 - `fetch_twstock_price_adj(sid, start, end, headers)` → Open/Close, **dividend-adjusted backward prices**. Use for backtesting only — ensures returns are comparable across ex-dividend dates.
