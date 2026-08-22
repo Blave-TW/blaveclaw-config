@@ -69,6 +69,8 @@ matplotlib). Referencing a df column (the usual case) means the series is exactl
 
 ## Threshold levels — how to choose
 
+> Note: `label` is accepted and stored but **not rendered** on the web chart for now — the text would not follow the UI language. Declare levels as a plain list of values unless you need the label for your own bookkeeping.
+
 `"levels"` draws fixed horizontal dashed lines in the series' pane so the user can
 see *where* the rule fires, not just the indicator wiggling. Two forms:
 
