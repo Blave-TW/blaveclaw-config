@@ -1,4 +1,4 @@
-import json, logging, math, os
+import hashlib, json, logging, math, os, shutil, time
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -29,8 +29,15 @@ PANES_PANE_MAX   = 32  # pane group id length cap
 # bars = full history, 5min ≈ ten weeks — coordinated with the trades 10,000 tail window.
 CANDLES_MAX_COUNT = 20000
 
+# Full-history chart export (strategies/<name>/chart/, Type A backtest only) — the
+# stats.json tails above are the first-paint payload; this is the complete version the
+# workspace pulls chunk-by-chunk (api/openclaw/agent_chart_data.py). Caps mirrored there.
+CHART_CHUNK_BARS = 20000
+CHART_MAX_CHUNKS = 50
+CHART_LIVE_REFRESH_MIN_AGE = 86400  # live-tick rebuild throttle: at most once a day per strategy
 
-def _build_panes(plot_series, df):
+
+def _build_panes(plot_series, df, max_points=PANES_MAX_POINTS):
     """PLOT_SERIES declaration → stats.json `panes` (workspace indicator overlay).
 
     plot_series is a dict of display name → spec, where spec is one of:
@@ -73,8 +80,8 @@ def _build_panes(plot_series, df):
             points.append([int(t.timestamp()), round(fv, 6)])
         if not points:
             continue
-        if len(points) > PANES_MAX_POINTS:
-            points = points[-PANES_MAX_POINTS:]  # tail — same convention as trades
+        if max_points and len(points) > max_points:
+            points = points[-max_points:]  # tail — same convention as trades
         entry = {
             'name':    str(name)[:PANES_NAME_MAX],
             'overlay': bool(opts.get('overlay', False)),
@@ -87,7 +94,7 @@ def _build_panes(plot_series, df):
     return panes
 
 
-def _build_candles(df):
+def _build_candles(df, max_count=CANDLES_MAX_COUNT):
     """Backtest df → stats.json `candles`: [[ts, open, high, low, close, volume], ...].
 
     The exact bars the backtest computed on (post-warmup, post-filter slice — the same
@@ -120,9 +127,121 @@ def _build_candles(df):
         candles.append([int(t.timestamp()),
                         round(bar[0], 6), round(bar[1], 6), round(bar[2], 6), round(bar[3], 6),
                         v])
-    if len(candles) > CANDLES_MAX_COUNT:
-        candles = candles[-CANDLES_MAX_COUNT:]  # tail — same convention as trades/panes
+    if max_count and len(candles) > max_count:
+        candles = candles[-max_count:]  # tail — same convention as trades/panes
     return candles
+
+
+def _slice_ts(rows, t0, t1, key):
+    """rows sorted ascending by key(row) → the contiguous sub-list with t0 <= ts <= t1."""
+    lo, hi = 0, len(rows)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if key(rows[mid]) < t0: lo = mid + 1
+        else: hi = mid
+    start = lo
+    hi = len(rows)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if key(rows[mid]) <= t1: lo = mid + 1
+        else: hi = mid
+    return rows[start:lo]
+
+
+def _write_chart_dir(out_dir, df, candles, panes, trades, symbol, interval):
+    """Full-history chart export → strategies/<name>/chart/{manifest.json, chunk-<id>.json}.
+
+    Same element schemas as stats.json's candles / panes[].points / trades, but untruncated
+    and split into CHART_CHUNK_BARS-bar chunks (by df.index position, so a pane point or
+    trade on a bar whose candle was skipped still lands in exactly one chunk). More than
+    CHART_MAX_CHUNKS → keep the newest and flag manifest.truncated. Built in chart.tmp/
+    and swapped in whole (the reporter never sees a half-written set; per-chunk sha1 in
+    the manifest lets it detect a swap that raced its read). Hash = the chunk content, so
+    re-running an identical backtest is a no-op for the uploader.
+    """
+    chart_dir = out_dir / 'chart'
+    if not candles:
+        shutil.rmtree(chart_dir, ignore_errors=True)  # no stale chart from a previous run
+        return None
+    n = len(df)
+    n_chunks = -(-n // CHART_CHUNK_BARS)
+    first = max(0, n_chunks - CHART_MAX_CHUNKS)
+    truncated = first > 0
+    tmp_dir = out_dir / 'chart.tmp'
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    os.makedirs(tmp_dir)
+    pane_pts = [p['points'] for p in panes]
+    chunks, hasher = [], hashlib.sha1()
+    for cid, ci in enumerate(range(first, n_chunks)):
+        lo, hi = ci * CHART_CHUNK_BARS, min((ci + 1) * CHART_CHUNK_BARS, n)
+        t0, t1 = int(df.index[lo].timestamp()), int(df.index[hi - 1].timestamp())
+        c_rows = _slice_ts(candles, t0, t1, lambda r: r[0])
+        body = {
+            'candles': c_rows,
+            'panes':   [{**p, 'points': _slice_ts(pts, t0, t1, lambda r: r[0])}
+                        for p, pts in zip(panes, pane_pts)],
+            'trades':  _slice_ts(trades, t0, t1, lambda r: r['ts']),
+        }
+        raw = json.dumps(body, separators=(',', ':')).encode()
+        sha = hashlib.sha1(raw).hexdigest()
+        hasher.update(sha.encode())
+        with open(tmp_dir / f'chunk-{cid}.json', 'wb') as f:
+            f.write(raw)
+        chunks.append({'id': cid, 't0': t0, 't1': t1, 'bars': len(c_rows),
+                       'sha1': sha, 'bytes': len(raw)})
+    manifest = {
+        'v': 1, 'hash': hasher.hexdigest(),
+        'symbol': symbol, 'interval': interval,
+        'start': df.index[first * CHART_CHUNK_BARS].strftime('%Y-%m-%d'),
+        'end':   df.index[-1].strftime('%Y-%m-%d'),
+        'chunk_bars': CHART_CHUNK_BARS, 'truncated': truncated, 'chunks': chunks,
+    }
+    with open(tmp_dir / 'manifest.json', 'w') as f:
+        json.dump(manifest, f)
+    _swap_chart_dir(tmp_dir, chart_dir)
+    return manifest
+
+
+def _swap_chart_dir(tmp_dir, chart_dir, attempts=5):
+    """chart.tmp → chart, via chart → chart.old first, so the live set is never half-deleted:
+    on Windows a rename fails while the reporter has a chunk open or Defender is scanning
+    the fresh files, and a plain rmtree+rename would leave a gutted chart/ behind. Retries
+    briefly; if it still fails the old set is put back and the error propagates."""
+    old_dir = chart_dir.with_name(chart_dir.name + '.old')
+    for attempt in range(attempts):
+        try:
+            if chart_dir.exists():
+                shutil.rmtree(old_dir, ignore_errors=True)
+                os.rename(chart_dir, old_dir)
+            os.rename(tmp_dir, chart_dir)
+            break
+        except OSError:
+            if attempt == attempts - 1:
+                if old_dir.exists() and not chart_dir.exists():
+                    try: os.rename(old_dir, chart_dir)
+                    except OSError: pass
+                raise
+            time.sleep(0.5)
+    shutil.rmtree(old_dir, ignore_errors=True)
+
+
+def _chart_refresh_due(out_dir, tail_first_ts, tail_last_ts):
+    """Live tick: should chart/ be rebuilt? stats.json's candle tail keeps advancing while
+    chart/ stays frozen at backtest time; once the tail's first bar has moved past the last
+    chunk's t1 minus half the tail window, the two would soon stop overlapping and the
+    workspace would show a gap scrolling left. Rebuild then (or when no usable manifest),
+    throttled by the manifest's mtime so a short-window strategy can't rebuild every tick.
+    """
+    path = out_dir / 'chart' / 'manifest.json'
+    try:
+        with open(path) as f:
+            last_t1 = json.load(f)['chunks'][-1]['t1']
+        mtime = os.path.getmtime(path)
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        return True
+    if tail_first_ts <= last_t1 - (tail_last_ts - tail_first_ts) / 2:
+        return False
+    return time.time() - mtime >= CHART_LIVE_REFRESH_MIN_AGE
 
 
 def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
@@ -298,6 +417,7 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
                 'position':  position,
             })
             pre_positions.append(float(w_prev[t]))
+        trades_full = trades
         if len(trades) > TRADES_MAX_COUNT:
             trades        = trades[-TRADES_MAX_COUNT:]  # tail — most recent trades matter first
             pre_positions = pre_positions[-TRADES_MAX_COUNT:]
@@ -346,6 +466,19 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         if candles:  # optional field — same absent-not-empty convention as panes
             stats['candles'] = candles
         json.dump(stats, open(out_dir / 'stats.json', 'w'), indent=2)
+
+        # Full chart export on every user-run backtest; a live/cron tick rewrites stats.json
+        # every few minutes and re-serializing years of bars each time would burn the VM for
+        # nothing (the uploader is content-hashed, but the build isn't free) — so live only
+        # rebuilds when the stats tail is about to outrun chart/ (see _chart_refresh_due).
+        if mode == 'backtest' or (candles and _chart_refresh_due(
+                out_dir, candles[0][0], int(df.index[-1].timestamp()))):
+            try:
+                _write_chart_dir(out_dir, df, _build_candles(df, max_count=None),
+                                 _build_panes(config.get('PLOT_SERIES'), df, max_points=None),
+                                 trades_full, config.get('SYMBOL'), interval)
+            except Exception as e:  # the chart is an extra; stats/pnl/notify still ship
+                logging.warning("chart export failed: %s", e)
 
         if not quiet:
             plot_pnl(df, result_d, title=strategy_name,

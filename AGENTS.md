@@ -180,7 +180,7 @@ Clearing (`clear_halt`) is ONLY done when the user explicitly asks to resume —
 
 Do NOT call `bt.plot()` — heavy interactive HTML, useful on neither surface.
 
-After every backtest, `run()` automatically writes `strategies/{name}/stats.json`, generates `strategies/{name}/pnl.png`, and delivers it on the active surface.
+After every backtest, `run()` automatically writes `strategies/{name}/stats.json`, generates `strategies/{name}/pnl.png`, and delivers it on the active surface. Type A backtests also write `strategies/{name}/chart/` (full-history chart data the web pulls in the background) — never edit or hand-copy it.
 
 **Type A strategies should declare `PLOT_SERIES`** — the 1–2 indicator series that explain the entries/exits, shown on the web workspace trade chart. Contract and examples: `references/plot-series.md`.
 
