@@ -46,19 +46,20 @@ GET /openclaw/marketplace/strategies/{id}
    - `GET /openclaw/marketplace/my/official` — free official strategies (no purchase needed)
 2. Merge and deduplicate by id. Show the combined list to the user
 3. User picks one → `GET /openclaw/marketplace/strategies/{id}/code`
-4. Save code to `tmp/<filename>.py`
+4. Save code to `tmp/<filename>.py` (`mkdir -p tmp` first — it is gitignored and absent on a fresh machine)
 5. **Check for multi-strategy bundle** — scan the file for lines matching `# ===== STRATEGY \d+:`:
    - If found: split into separate files (see "Deploying a multi-strategy bundle" below), security scan and deploy each one individually
    - If not found: proceed as single strategy
 6. **Security scan** — run `python3 lib/security_check.py tmp/<filename>.py`
-   - Exit 0 (clean) → move to `strategies/<filename>.py` and proceed
-   - Exit 1 (warnings) → show findings to user, ask for confirmation; if confirmed, move to `strategies/` and run
+   - Exit 0 (clean) → move to `strategies/<name>/strategy.py` and proceed (`mkdir -p strategies/<name>`; `<name>` = the file's `STRATEGY_NAME`)
+   - Exit 1 (warnings) → show findings to user, ask for confirmation; if confirmed, move to `strategies/<name>/strategy.py` and run
    - Exit 2 (critical) → show findings, delete `tmp/<filename>.py`, do NOT run
-7. **Quality scan** (Type A and C — skip only Type B) — run `python3 lib/quality_check.py strategies/<filename>.py`
+   - The layout is always `strategies/<name>/strategy.py`, never a flat `strategies/<name>.py` — the template's `sys.path.insert(0, parent.parent.parent)` and the runner's `stats.json` output both assume that depth; a flat file dies with `No module named 'lib'`
+7. **Quality scan** (Type A and C — skip only Type B) — run `python3 lib/quality_check.py strategies/<name>/strategy.py`
    - Exit 0 (clean) → proceed
    - Exit 1 (warnings) → show findings to user, ask for confirmation before running
    - Exit 2 (critical) → show findings, do NOT run — a broken `compute_signals()` contract means the backtest about to run produces garbage results
-8. **Run it — MANDATORY, never skip:** `python3 strategies/<filename>.py`. Every run writes `strategies/<name>/stats.json` (metrics + daily returns); that file is what makes the strategy selectable in the web workspace's 下單設定 › 選擇策略 picker — a downloaded-but-never-run strategy is invisible there and reads as a broken install. Report the resulting stats to the user.
+8. **Run it — MANDATORY, never skip:** `python3 strategies/<name>/strategy.py`. Every run writes `strategies/<name>/stats.json` (metrics + daily returns); that file is what makes the strategy selectable in the web workspace's 下單設定 › 選擇策略 picker — a downloaded-but-never-run strategy is invisible there and reads as a broken install. Report the resulting stats to the user.
 
 Purchases and shared-with-me are separate lists — checking only purchases will miss shared strategies.
 
@@ -83,11 +84,11 @@ When the downloaded code contains `# ===== STRATEGY N: <name> =====` markers, tr
 3. Run `python3 lib/security_check.py` on **each** file separately
    - If any file exits 2 (critical) → delete that file, do NOT run it; continue with the others
    - If any file exits 1 (warnings) → show findings, ask user for confirmation before moving
-4. Move approved files to `strategies/<name_slug>.py`
-5. Run `python3 lib/quality_check.py strategies/<name_slug>.py` on each Type A/C file (skip only Type B) — exit 1: confirm with user; exit 2: do NOT run that file
-6. Run each: `python3 strategies/<name_slug>.py`
+4. Move approved files to `strategies/<name_slug>/strategy.py` (one directory per strategy)
+5. Run `python3 lib/quality_check.py strategies/<name_slug>/strategy.py` on each Type A/C file (skip only Type B) — exit 1: confirm with user; exit 2: do NOT run that file
+6. Run each: `python3 strategies/<name_slug>/strategy.py`
 
-Example: a file containing two strategies marked as `# ===== STRATEGY 1: BTC SMA Cross =====` and `# ===== STRATEGY 2: ETH RSI Fade =====` should produce `strategies/btc_sma_cross.py` and `strategies/eth_rsi_fade.py`.
+Example: a file containing two strategies marked as `# ===== STRATEGY 1: BTC SMA Cross =====` and `# ===== STRATEGY 2: ETH RSI Fade =====` should produce `strategies/btc_sma_cross/strategy.py` and `strategies/eth_rsi_fade/strategy.py`.
 
 ## Load official strategies (free)
 
@@ -126,13 +127,13 @@ Response: `[{id, title, description, category, shared_at}, ...]`
 **Flow when user says a strategy was shared with them, or asks what strategies they have access to:**
 1. `GET /openclaw/marketplace/my/shared-with-me` — show the list
 2. User picks one → `GET /openclaw/marketplace/strategies/{id}/code`
-3. Save code to `tmp/<filename>.py` (NOT strategies/ yet)
+3. Save code to `tmp/<filename>.py` (NOT strategies/ yet; `mkdir -p tmp` first)
 4. **Security scan** — run `python3 lib/security_check.py tmp/<filename>.py`
-   - Exit 0 (clean) → move to `strategies/<filename>.py` and proceed
-   - Exit 1 (warnings) → show findings to user, ask for confirmation; if confirmed, move to `strategies/` and run
+   - Exit 0 (clean) → move to `strategies/<name>/strategy.py` and proceed (`<name>` = the file's `STRATEGY_NAME`)
+   - Exit 1 (warnings) → show findings to user, ask for confirmation; if confirmed, move to `strategies/<name>/strategy.py` and run
    - Exit 2 (critical) → show findings, delete `tmp/<filename>.py`, do NOT run
-5. **Quality scan** (Type A and C — skip only Type B) — run `python3 lib/quality_check.py strategies/<filename>.py`; exit 1: confirm with user before running; exit 2: do NOT run
-6. **Run it — MANDATORY, never skip:** `python3 strategies/<filename>.py` — writes `stats.json`, which the 下單設定 › 選擇策略 picker requires (same as step 8 of the install flow above). Report the stats to the user.
+5. **Quality scan** (Type A and C — skip only Type B) — run `python3 lib/quality_check.py strategies/<name>/strategy.py`; exit 1: confirm with user before running; exit 2: do NOT run
+6. **Run it — MANDATORY, never skip:** `python3 strategies/<name>/strategy.py` — writes `stats.json`, which the 下單設定 › 選擇策略 picker requires (same as step 8 of the install flow above). Report the stats to the user.
 
 ## Strategy report (performance data)
 
@@ -198,7 +199,7 @@ Custom lib: lib/orders_bybit.py — place_order("BUY"|"SELL"|"SHORT"|"COVER"). R
 ## Submit a strategy for sale
 
 **Before submitting a Type A or C strategy** (skip only for Type B — no backtest, no FEE),
-run `python3 lib/quality_check.py strategies/<filename>.py` — catches a `FEE=0` backtest
+run `python3 lib/quality_check.py strategies/<name>/strategy.py` — catches a `FEE=0` backtest
 (inflates the Sharpe/return you're about to advertise to buyers), an unfilled
 `compute_signals()` template, and a TAIFEX futures strategy missing the mandatory
 `txf_settlement_mask` (its backtest books fake roll-gap PnL). Fix any findings before
@@ -353,6 +354,6 @@ Download code (works for owned, purchased, or shared strategies):
 ```
 GET /openclaw/marketplace/strategies/{id}/code
 ```
-Response: `{"code": "..."}` — save to `strategies/` directory and run with `python3`.
+Response: `{"code": "..."}` — save to `strategies/<name>/strategy.py` and run with `python3 strategies/<name>/strategy.py`.
 
 If execution fails with `ImportError` on a custom lib module, read the strategy's description "Custom lib dependencies" section and create the missing file in `lib/` before re-running.
