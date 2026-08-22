@@ -23,6 +23,8 @@ PANES_MAX_SERIES = 4
 PANES_MAX_POINTS = 20000
 PANES_NAME_MAX   = 64
 PANES_PANE_MAX   = 32  # pane group id length cap
+PANES_MAX_LEVELS = 4   # horizontal threshold lines per series
+PANES_LEVEL_LABEL_MAX = 16
 
 # Cap for the stats.json `candles` output (Type A backtest OHLCV) — mirrored server-side
 # in api/openclaw/agent_strategies.py. Same per-series budget as PANES_MAX_POINTS: daily
@@ -37,6 +39,39 @@ CHART_MAX_CHUNKS = 50
 CHART_LIVE_REFRESH_MIN_AGE = 86400  # live-tick rebuild throttle: at most once a day per strategy
 
 
+def _build_levels(raw):
+    """opts["levels"] → stats.json panes[].levels (horizontal threshold lines).
+
+    Accepts {label: value} or [value, ...]. Non-finite / non-numeric values are
+    skipped (not the whole declaration), labels are truncated, first 4 kept. A
+    sentinel "disabled" threshold (e.g. -1e9) is the author's to leave out — the
+    runner does not guess which values are off-scale.
+    """
+    if isinstance(raw, dict):
+        items = [(k, v) for k, v in raw.items()]
+    elif isinstance(raw, (list, tuple)):
+        items = [(None, v) for v in raw]
+    else:
+        return []
+    levels = []
+    for label, v in items:
+        if len(levels) >= PANES_MAX_LEVELS:
+            break
+        if isinstance(v, bool):
+            continue
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(fv):
+            continue
+        lvl = {'value': round(fv, 6)}
+        if isinstance(label, str) and label.strip():
+            lvl['label'] = label[:PANES_LEVEL_LABEL_MAX]
+        levels.append(lvl)
+    return levels
+
+
 def _build_panes(plot_series, df, max_points=PANES_MAX_POINTS):
     """PLOT_SERIES declaration → stats.json `panes` (workspace indicator overlay).
 
@@ -46,6 +81,8 @@ def _build_panes(plot_series, df, max_points=PANES_MAX_POINTS):
       ("col" | pd.Series, {"overlay": True})  — drawn on the price chart instead
       ("col" | pd.Series, {"pane": "<group>"}) — series sharing a group id render in
                                           one sub-pane (e.g. MACD + its signal line)
+      ("col" | pd.Series, {"levels": {...} | [...]}) — horizontal threshold lines
+                                          in that series' pane (see _build_levels)
 
     Timestamps use the same basis as trades[].ts (df.index[t].timestamp()) so the
     frontend aligns both against one axis. Non-finite points are skipped rather
@@ -90,6 +127,9 @@ def _build_panes(plot_series, df, max_points=PANES_MAX_POINTS):
         pane = opts.get('pane')
         if isinstance(pane, str) and pane.strip() and len(pane) <= PANES_PANE_MAX:
             entry['pane'] = pane
+        levels = _build_levels(opts.get('levels'))
+        if levels:  # optional field — absent (not empty) when nothing is declared/valid
+            entry['levels'] = levels
         panes.append(entry)
     return panes
 
@@ -279,8 +319,14 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
     # already-deployed strategy's signal feed is a fleet-ops decision, not this
     # guard's call.
     if mode == 'backtest' and config.get('__file__'):
-        from lib.quality_check import txf_settlement_findings
-        problems = txf_settlement_findings(config['__file__'])
+        # Defensive import: a workspace whose lib/quality_check.py predates this
+        # guard (partial/stale sync) must not crash every backtest — fail open.
+        try:
+            from lib.quality_check import txf_settlement_findings
+        except ImportError:
+            logging.warning("lib/quality_check.py is stale — settlement-mask guard skipped")
+            txf_settlement_findings = None
+        problems = txf_settlement_findings(config['__file__']) if txf_settlement_findings else []
         if problems:
             raise SystemExit(
                 '\n'.join(f"❌ Line {p['line']}: {p['msg']}" for p in problems)
@@ -435,8 +481,12 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         # the workspace its indicator pane, so hint in the output the agent reads
         # after every backtest rather than refuse the run.
         if mode == 'backtest' and config.get('__file__'):
-            from lib.quality_check import plot_series_findings
-            for p in plot_series_findings(config['__file__']):
+            try:
+                from lib.quality_check import plot_series_findings
+            except ImportError:  # stale lib/quality_check.py on this workspace
+                logging.warning("lib/quality_check.py is stale — PLOT_SERIES hint skipped")
+                plot_series_findings = None
+            for p in (plot_series_findings(config['__file__']) if plot_series_findings else []):
                 logging.warning(p['msg'])
                 print(f"  ⚠️ WARNING: {p['msg']}")
 

@@ -27,6 +27,9 @@ PLOT_SERIES = {
     "MACD":   ("MACD",     {"pane": "macd"}),
     "Signal": ("MACD_SIG", {"pane": "macd"}),
 }
+
+# Threshold levels — fixed horizontal dashed lines in the series' pane (TradingView hline):
+PLOT_SERIES = {"Taker Intensity": ("TI", {"levels": {"Entry": ENTRY_TI, "Exit": EXIT_TI}})}
 ```
 
 Spec forms:
@@ -37,6 +40,9 @@ Spec forms:
 | `pd.Series` | any series (reindexed to the df), sub-pane |
 | `("col"` or `pd.Series, {"overlay": True})` | drawn over the price chart |
 | `("col"` or `pd.Series, {"pane": "<group>"})` | sub-pane shared with all series of the same group id |
+| `("col"` or `pd.Series, {"levels": {...}` or `[...]})` | fixed horizontal threshold lines in that series' pane |
+
+Options combine freely in one dict, e.g. `{"pane": "macd", "levels": [0]}`.
 
 The display name may be in the user's language (it renders in the web UI, not
 matplotlib). Referencing a df column (the usual case) means the series is exactly what
@@ -61,6 +67,43 @@ matplotlib). Referencing a df column (the usual case) means the series is exactl
 - `"pane"` is ignored for `"overlay": True` series (they already share the price
   chart). Group ids are internal (≤ 32 chars, any string) and never rendered.
 
+## Threshold levels — how to choose
+
+`"levels"` draws fixed horizontal dashed lines in the series' pane so the user can
+see *where* the rule fires, not just the indicator wiggling. Two forms:
+
+```python
+# label → value (label renders next to the line; ≤ 16 chars, user's language is fine)
+PLOT_SERIES = {"Taker Intensity": ("TI", {"levels": {"進場": 1.2, "出場": -0.5}})}
+
+# plain values, no labels
+PLOT_SERIES = {"RSI": ("RSI", {"levels": [30, 70]})}
+```
+
+Pass the **same constants `compute_signals` compares against** (`ENTRY_Z`, `EXIT_Z`,
+…) — never retype the number, or the chart drifts from the rule.
+
+Use it for:
+- entry / exit thresholds the indicator is compared against (`z < ENTRY_Z`)
+- a filter line (`ratio > 1.0`, `spread > 0`)
+- the indicator's centre line (RSI 50, z-score 0, MACD 0)
+- a fixed price level on an `"overlay": True` series (a breakout level, a cap) — same
+  `levels` option, in price units
+
+Do NOT use it for:
+- a **dynamic** threshold (rolling quantile, ATR band, a moving average of the
+  indicator) — that is a line that moves, so declare it as another series, grouped
+  into the same `"pane"`
+- a **disabled** threshold: if a parameter is a sentinel (`EXIT_Z = -1e9` meaning
+  "never"), leave it out of `levels` yourself — the runner draws whatever finite value
+  you give it and does not guess that an off-scale number means "off"
+- a pure trend series with no threshold (a moving-average overlay, a cumulative flow
+  line) — nothing to mark
+
+Limits: ≤ **4** levels per series (first 4 kept), value must be finite
+(nan/inf/non-numeric entries are skipped, the rest still render), label ≤ **16**
+chars (truncated). A series with no valid level simply has no `levels` field.
+
 ## When to declare (and when not to)
 
 Declaring is **mandatory** whenever a computed or external indicator drives the
@@ -81,17 +124,20 @@ from (raw volume, unsmoothed flow) usually add noise, not explanation.
 - Max **20,000** points per series (tail kept, same as the trade log)
 - Non-finite values (nan/inf — e.g. the z-score's warm-up head) are skipped per point;
   the frontend shows a gap there, which is correct
+- Max **4** `levels` per series, label ≤ **16** chars, value finite
 
 ## Complete example
 
 `examples/tw2317_broker_zscore/strategy.py` — a contrarian strategy entering when the
-broker-flow z-score drops below `ENTRY_Z` and exiting above `EXIT_Z`:
+broker-flow z-score drops below `ENTRY_Z` and exiting above `EXIT_Z` (the shipped
+example declares the plain `"zscore"` form; shown here with its thresholds added):
 
 ```python
 ENTRY_Z = -0.77
 EXIT_Z  =  0.29
 
-PLOT_SERIES = {"Broker Flow Z-Score": "zscore"}   # the column _add_indicators adds
+# the column _add_indicators adds, with the two thresholds drawn in the same pane
+PLOT_SERIES = {"Broker Flow Z-Score": ("zscore", {"levels": {"Entry": ENTRY_Z, "Exit": EXIT_Z}})}
 
 def _add_indicators(df, ...):
     ...
@@ -104,9 +150,12 @@ After `run()` completes, `stats.json` contains:
 ```json
 "panes": [
   {"name": "Broker Flow Z-Score", "overlay": false,
-   "points": [[1651017600, -1.23], [1651104000, -0.98], ...]}
+   "points": [[1651017600, -1.23], [1651104000, -0.98], ...],
+   "levels": [{"value": -0.77, "label": "Entry"}, {"value": 0.29, "label": "Exit"}]}
 ]
 ```
+
+`levels` is absent when the series declares none.
 
 `points` timestamps are epoch seconds on the same basis as `trades[].ts`, so the
 workspace aligns the indicator, the candles, and the trade markers on one time axis.
