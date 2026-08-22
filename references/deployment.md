@@ -81,6 +81,17 @@ Strategies scheduled through `wait_for_bar.py` (or the older direct `run_strateg
 
 Alert behavior: at most one alert per deployment per 6 hours; a one-line recovery message when the heartbeat returns. Weekday-only schedules (day-of-week restricted cron) use a conservative 3-day threshold so weekends never false-alarm.
 
+## Long-running processes — memory discipline
+
+RAM on the machine is limited and shared with the agent runtime itself (check with `free -m`); a process that grows without bound freezes the ENTIRE machine — the bot dies with it and the user is locked out (it has happened: an in-memory trade log grew to 1.9 GB and froze a machine for 24 hours). For any process that runs continuously (live monitors, scanners, paper-trading engines):
+
+- Every in-memory list/dict that grows per tick, per signal, or per trade MUST be bounded — `deque(maxlen=N)` or trim to the last N entries. No exceptions.
+- Records that must be kept forever go to disk (append to a `.jsonl` file), NOT into a Python list.
+- NEVER attach large snapshots (full feature caches, candle histories, whole DataFrames) to per-trade/per-signal records. Store IDs or the few fields you need.
+- Keep only the candles a computation needs (e.g. last 50 bars), not the full history.
+- After starting a long-running process, check its memory once (`ps -o rss= -p <pid>`) and tell the user roughly how much it uses; if it grows run over run, treat that as a bug and fix it before leaving it running.
+- Every daemon must heartbeat: touch `state/heartbeat/<name>` at the top of each loop iteration, and register the daemon in `state/deployments.json` so `manager/healthcheck.py` alerts the user when it dies (see *Deployment Healthcheck* above). A daemon nobody watches WILL die silently and the user finds out weeks later.
+
 ## Cron Job Format (Linux)
 **The `cd` is mandatory in every cron entry.** Cron runs from `/root` by default. All scripts in this repo use relative paths (`manager/`, `strategies/`, `lib/`, `cache/`). Without `cd`, every relative path resolves from `/root` → `FileNotFoundError` → the script crashes silently before sending any Telegram notification.
 

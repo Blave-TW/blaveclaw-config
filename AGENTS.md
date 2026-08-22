@@ -34,13 +34,11 @@ IMPORTANT: For ANY market data question — crypto (holder concentration, whale 
 
 Screening many Taiwan stocks: use the `*_batch` fetchers and narrow the pool before pulling time series — never fan out per-stock fetchers in parallel (rate limits). Full flow: `references/twstock.md` › 全市場選股.
 
-Per-stock dividend events (`fetch_twstock_dividend` / `_batch`) and TAIEX daily index dividend points incl. forward estimates (`fetch_twmarket_dividend_points`) are available — details in `references/twstock.md` and `references/twfutures.md`. Any TXF basis (正逆價差) logic must subtract the dividend-points sum, never raw futures−spot. Whole-market market-cap ranking (前十大權值股, top-N pool) is one call — `fetch_twstock_market_value_all(headers, top=None)` — never rebuild it from per-stock shares × price.
+Dividend events, TAIEX dividend points and whole-market market-cap ranking are one lib call each (`references/twstock.md`, `references/twfutures.md`): TXF basis (正逆價差) must subtract the dividend-points sum, never raw futures−spot; top-N market-cap pools come from `fetch_twstock_market_value_all`, never rebuilt from shares × price.
 
 **The symbol you backtest must be the symbol the orders go to, and it must be the contract the user named.** `fetch_kline` carries Binance USDT-M perps only — for a contract listed elsewhere use the exchange-native fetcher (`fetch_bingx_kline()`, see `references/lib.md`), and if the data genuinely is not reachable, say so and stop instead of substituting a similar-looking symbol from another exchange (`XAUUSDT` is not BingX's `GOLD(XAU)-USDT` — that swap silently backtested a different instrument than the one being traded).
 
-**Macro events and their numbers come from `fetch_economic_calendar()` — never from a web search, never from memory.** Release dates/times, consensus (`predict`), prior (`last`) and actual (`real`) values for every macro indicator are in that one call (`references/lib.md`). A generic web search lands on calendar-aggregator content farms whose tables are themselves wrong, and whatever the page does not cover gets filled in from your training data: measured on a real digest, that produced a wrong prior for China's PMI (49.5 vs the actual 50.3 — a published fact with only one right answer), a prior belonging to a different indicator entirely, and a Q2 GDP consensus off by 0.7pp.
-
-**Anything time-sensitive that the calendar does not cover — say you are unsure instead of filling it in.** Who currently holds an office (Fed chair, central bank governors), recent policy decisions, news: these change after your training cutoff, and your memory of them silently overrides what you just read. (A weekly digest called the FOMC press conference Powell's months after Warsh replaced him — and in a later run the model wrote "鮑威爾（Kevin Warsh）" while the page it had just fetched said Warsh.) Verify on the web and cite the source, or state plainly that you could not verify it. **A search that returns nothing, errors, or comes back blocked is not permission to answer from memory — it IS the answer: "I could not verify this."** (Web search is currently blocked outright on some machines, and every one of those failures is a moment where the tempting move is to fill the gap from training data.) Never present an unverified name or number as fact.
+**Macro events and their numbers come from `fetch_economic_calendar()` — never from a web search, never from memory** (release times, consensus `predict`, prior `last`, actual `real`). **Anything time-sensitive the calendar does not cover (who holds an office, recent decisions, news) — verify on the web and cite, or say plainly you could not verify; a search that returns nothing, errors, or is blocked is not permission to answer from memory — it IS the answer.** Why these are absolute, with the measured failures: `references/lib.md` › *Macro facts discipline*.
 
 Blave API credentials are in .env file in the workspace.
 
@@ -52,16 +50,7 @@ CRITICAL: Read `references/deployment.md` before deploying any strategy live or 
 
 ## Examples
 
-`examples/` contains complete reference strategies:
-- `btc_sma_cross/` — Type A, SMA crossover, includes `scan.py` for parameter search
-- `btc_ti_5min/` — Type A, Taker Intensity threshold (Blave alpha), 5min kline
-- `cl_sma/` — Type A, WTI crude oil with NYMEX settlement exit; uses `fetch_db_kline` + `settlement_signals_from_db()`
-- `tsmc_ma/` — Type A, Taiwan stock (2330) SMA crossover
-- `txf_ma_1m/` — Type A, Taiwan Index Futures (TXF) 1m SMA crossover
-- `tw100_foreign_zscore/` — Type C, Taiwan 100-stock portfolio, foreign institutional z-score
-- `twstock_momentum/` — Type C, Taiwan stock momentum, top-N equal weight
-
-These are not user strategies. User strategies live in `strategies/`.
+`examples/` holds complete reference strategies (Type A/C across crypto, CME, 台股, 台指) — list and what each demonstrates in `examples/README.md`. These are not user strategies; user strategies live in `strategies/`.
 
 ## Strategy Types
 
@@ -132,7 +121,7 @@ Always call `lib.chart_style.apply()` before plotting — never matplotlib defau
 - **NEVER write `except Exception: pass`** — always `except Exception as e: print(f"Error: {e}")`
 - NEVER chain commands with `&&`, `||`, or `;` — run ONE command at a time
 - Use `python3 file.py [args]` or `node file.js` directly
-- To run a strategy: `python3 strategies/my_strategy/strategy.py` with `workdir=$BLAVECLAW_HOME/workspace` — `$BLAVECLAW_HOME` defaults to `/root/.openclaw` (old BlaveClaw runtime) / `/opt/blave-agent` (newer Blave Agent runtime — detect by whether `/opt/blave-agent/openclaw.json` exists, not just the directory) on Linux, `C:\openclaw` on Windows, when unset; same resolution as `lib/notify.py`. Getting this wrong doesn't error — `lib/notify.py` just silently stops sending Telegram alerts — so when in doubt, check the actual environment rather than assume
+- To run a strategy: `python3 strategies/my_strategy/strategy.py` from the workspace directory (`$BLAVECLAW_HOME/workspace`). How `$BLAVECLAW_HOME` resolves per runtime/OS — and why getting it wrong silently kills Telegram alerts — is in `references/lib.md` › *`lib/notify.py`*; when in doubt check the actual environment, don't assume
 
 ## Cross-Day Task Memory
 
@@ -145,21 +134,21 @@ Always call `lib.chart_style.apply()` before plotting — never matplotlib defau
 
 When writing any process that runs continuously (live monitors, scanners, paper-trading engines):
 
-- **Every in-memory list/dict that grows per tick, per signal, or per trade MUST be bounded** — use `deque(maxlen=N)` or trim to the last N entries. No exceptions.
-- Records that must be kept forever go to disk (append to a `.jsonl` file), NOT into a Python list.
-- NEVER attach large snapshots (full feature caches, candle histories, whole DataFrames) to per-trade/per-signal records. Store IDs or the few fields you need.
-- Keep only the candles a computation needs (e.g. last 50 bars), not the full history.
-- After starting a long-running process, check its memory once (`ps -o rss= -p <pid>`) and tell the user roughly how much it uses; if it grows run over run, treat that as a bug and fix it before leaving it running.
-- **Every daemon must heartbeat:** touch `state/heartbeat/<name>` at the top of each loop iteration, and register the daemon in `state/deployments.json` so `manager/healthcheck.py` alerts the user when it dies (see `references/deployment.md` › Deployment Healthcheck). A daemon nobody watches WILL die silently and the user finds out weeks later.
+- **Every in-memory list/dict that grows per tick, per signal, or per trade MUST be bounded** (`deque(maxlen=N)` or trim) — records that must be kept forever go to disk, never into a Python list.
+- **Every daemon must heartbeat** (`state/heartbeat/<name>` each loop) and be registered in `state/deployments.json` so `manager/healthcheck.py` can see it die.
+- After starting it, check its RSS once and tell the user; growth run over run is a bug to fix before leaving it running.
+
+Full memory-discipline checklist: `references/deployment.md` › *Long-running processes — memory discipline*.
 
 ## Iteration Brakes — hard limits on autonomous runs
 
 Every backtest costs the user real credit. These limits are absolute; no goal justifies breaking them.
 
 - **Default: ONE backtest per user request, then STOP.** After a backtest, report the result — good or bad — and wait. Do NOT adjust parameters and re-run on your own. A poor result is a valid stopping point: report it honestly, explain why you think it failed, and propose next steps for the user to choose from.
-- **A poor result is not permission to widen scope.** If the user asked for one specific indicator/data source/symbol, build and test ONLY that. Do NOT add other alphas, indicators, or data sources on your own because the result was weak (e.g. do not turn a request for a single holder-concentration strategy into a 3-indicator composite just because the single-indicator Sharpe was low). Report the mediocre result and offer combining with other signals as a next-step option — let the user decide, don't decide for them.
+- **A poor result is not permission to widen scope.** If the user asked for one specific indicator/data source/symbol, build and test ONLY that — do not add alphas, indicators or data sources on your own because the result was weak. Report it and offer the wider version as a next-step option; let the user decide.
 - **Iterating requires explicit user permission.** Only adjust-and-rerun autonomously when the user's message explicitly asks for it (e.g. "自己調", "幫我優化", "掃參數", "keep tuning until..."). Even with permission: max 3 iterations, then stop and report the best result and what you tried. One `lib/param_scan.py` run counts as ONE iteration — prefer it over many manual re-runs.
 - **Two identical results in a row = malfunction.** If two consecutive backtests return the same stats, do NOT re-run — stop immediately and tell the user something is wrong.
+- **Never end your turn while a backtest you started is still running** — ending the turn kills it and the user pays for nothing. Long runs (large Type C universes, cold cache) go in the foreground with a long `timeout`; before re-running an existing strategy delete its stale `stats.json` so you never report the old one. How to wait if a run gets backgrounded: `references/strategy-code.md` › *Steps* (4).
 - **A user question is not permission to resume.** If the user interrupts or asks what you are doing, answer the question and stay stopped — do not treat their message as a green light to continue working.
 
 ## Kill Switch (state/HALT)
@@ -193,9 +182,7 @@ Three rules to always remember:
 2. **`manager.py` is dry-run by default** — show proposed weights first, only `--apply` after user confirms
 3. **Order library → reconciler is one atomic task** — wire `reconciler.py` in the same session as `lib/order_*.py`
 
-The slope/std optimiser is the default weighting method, not the only one — when the user wants their own way of weighting, write it as `allocators/<name>/allocator.py` and use `--allocator`: `references/allocator-code.md`.
-
-Execution styles (市價/TWAP per strategy) are set from the web 下單設定 — never hand-wire TWAP into the reconciler. When the user wants their own execution shape, write `manager/executors/<name>.py` per `references/lib.md` › *Custom executors*.
+Custom weighting → `allocators/<name>/allocator.py` + `--allocator` (`references/allocator-code.md`); custom execution shape → `manager/executors/<name>.py` (`references/lib.md` › *Custom executors*). Execution style (市價/TWAP) is set from the web 下單設定 — never hand-wire TWAP into the reconciler.
 
 ## Broker Onboarding
 
@@ -205,7 +192,7 @@ Execution styles (市價/TWAP per strategy) are set from the web 下單設定 �
 - **SinoPac (永豐金):** `references/sinopac-broker.md`
 - **President Futures (統一期貨):** `references/president-broker.md`
 - **Capital Futures (群益期貨):** `references/capital-broker.md` (Windows workspace only)
-- **Paper trading (模擬交易, no keys):** ships pre-built — `lib/account_paper.py` + `lib/order_paper.py` (see `references/lib.md`); the web binds it like any venue (`PAPER_API_KEY`/`PAPER_SECRET_KEY` are fixed markers, not secrets) and fills are simulated at live Binance public prices. On its web handoff only run the read-only validation and tell the user how fills are priced; **never hand-write a paper lib** — if `lib/order_paper.py` is missing the workspace is behind, update per `references/updating.md` first; `order_paper.reset_account(env)` only on an explicit user request.
+- **Paper trading (模擬交易, no keys):** ships pre-built (`lib/account_paper.py` + `lib/order_paper.py`) — **never hand-write a paper lib**; web-handoff steps, how fills are priced, and when to reset: `references/lib.md` › *Paper venue — web handoff*.
 
 **One machine, one trading venue (TW brokers included).** When writing a new venue's credentials into `.env`, delete the previously bound venue's credential lines — every ID that has BOTH `{ID}_API_KEY` and `{ID}_SECRET_KEY` (plus its `_PASSPHRASE`). Keep `blave_*`, singleton service keys (`OPENAI_API_KEY` etc. — no secret sibling = not an exchange), and non-credential lines like CA paths. Stale keys from a previous venue confuse venue detection and keep dead access alive.
 

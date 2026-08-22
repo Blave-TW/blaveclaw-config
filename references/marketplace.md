@@ -84,7 +84,7 @@ When the downloaded code contains `# ===== STRATEGY N: <name> =====` markers, tr
 3. Run `python3 lib/security_check.py` on **each** file separately
    - If any file exits 2 (critical) → delete that file, do NOT run it; continue with the others
    - If any file exits 1 (warnings) → show findings, ask user for confirmation before moving
-4. Move approved files to `strategies/<name_slug>/strategy.py` (one directory per strategy)
+4. Move approved files to `strategies/<name_slug>/strategy.py` (one directory per strategy) — the directory name MUST equal the file's `STRATEGY_NAME` (the runner writes `stats.json` under `strategies/<STRATEGY_NAME>/`, and the web only sees a backtest whose `stats.json` sits next to its `strategy.py`): set `STRATEGY_NAME = "<name_slug>"` in each split file
 5. Run `python3 lib/quality_check.py strategies/<name_slug>/strategy.py` on each Type A/C file (skip only Type B) — exit 1: confirm with user; exit 2: do NOT run that file
 6. Run each: `python3 strategies/<name_slug>/strategy.py`
 

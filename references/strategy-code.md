@@ -13,6 +13,7 @@ CRITICAL: Every Type A strategy MUST be based on `strategies/TEMPLATE_A.py`. Cop
    - `fetch_data(hdrs)` — fetch kline, call `_add_indicators` with module params
    - `compute_signals(df)` — vectorized signal logic, returns pd.Series
 4. Run: `python3 strategies/[strategy_name]/strategy.py`
+   - **Long runs:** a large universe (Type C with 100+ symbols, cold cache) can take 10+ minutes. Run it in the foreground with an explicit long `timeout` on the Bash tool (up to 30 min) and report the stats when it finishes. Before re-running an existing strategy, delete its stale `stats.json` first (`rm -f strategies/<name>/stats.json`) — the runner overwrites it only at the end, so an old file would otherwise be mistaken for the new result. If a run does get moved to the background anyway, wait in the foreground with `until [ -f strategies/<name>/stats.json ]; do sleep 10; done` (same long timeout); never a background loop you then stop. Never end the turn while it is running: the turn's exit kills the process and the user paid for nothing. Warn the user up front when a run will take minutes.
 
 ## Naming & description
 
