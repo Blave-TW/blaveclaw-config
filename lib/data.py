@@ -1,9 +1,12 @@
 import os
+import json
+import shutil
 import numbers
 import time
 import threading
 import requests
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -213,7 +216,14 @@ def _extend_cache_monthly(prefix, params, fetch_raw_fn, start, end,
 
     Directory: cache/{prefix}_{params}/
     Files:     YYYY-MM.parquet  (one per month)
+
+    Daily-frequency prefixes listed in _SINGLE_FILE_PREFIXES are routed to the
+    one-file-per-id layout (_extend_cache_single) — same contract, same return.
     """
+    if prefix in _SINGLE_FILE_PREFIXES:
+        if empty_marker_ttl_hours is not None:
+            raise ValueError(f'{prefix}: empty_marker_ttl_hours is monthly-layout only')
+        return _extend_cache_single(prefix, params, fetch_raw_fn, start, end)
     cache_dir = _monthly_cache_dir(prefix, params)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -353,6 +363,329 @@ def _save_monthly(prefix, params, df):
             grp = pd.concat([existing, grp])
             grp = grp[~grp.index.duplicated(keep='last')].sort_index()
         grp.to_parquet(path, compression='snappy')
+
+
+# ── Single-file cache layout (daily datasets) ─────────────────────────────────
+#
+# Monthly partitioning is right for minute bars (hundreds of thousands of rows,
+# only the current month ever changes) but wrong for daily series: a 台股 daily
+# dataset is ~20 rows / 7KB per month, so a 300-stock universe is 41,400 tiny
+# parquets and the per-file open/parse/write overhead dominates everything.
+# Measured on a real Windows customer box (2026-08-22, 300 stocks, 723k rows):
+# cold write 41,400 monthly files ≈ 13 min vs 300 single files ≈ 2.3 s; warm
+# read 32.0 s vs 1.1 s; the same 300-stock Type C backtest went 14.5 min cold /
+# 57 s warm → 45 s cold / 15 s warm. So daily datasets keep ONE parquet per
+# (prefix, id) whose parquet footer metadata carries what the monthly layout
+# encoded in file names and mtimes: which months are covered (one contiguous
+# range — fetch spans always fill the whole requested range, empty months
+# included, so no empty-month markers are needed) and when the tail was last
+# fetched (a month is complete iff it was fetched after it ended; the current
+# month is delta-updated on every call, exactly as before). Meta lives INSIDE
+# the parquet (schema metadata key b'blave_cache_meta'), so frame and coverage
+# are always written together in one atomic replace — no sidecar that could
+# describe somebody else's frame under concurrent writers.
+#
+# File: cache/{prefix}_{params}.parquet   all rows, tz-naive UTC index, sorted;
+#       footer meta {"from": "YYYY-MM", "to": "YYYY-MM",
+#                    "tail_fetched_at": "YYYY-MM-DDTHH:MM:SS"}
+# An existing monthly directory for the same (prefix, params) is consolidated
+# into the single file on first touch and removed — machines already in the
+# field migrate lazily, no manual step.
+_SINGLE_FILE_PREFIXES = frozenset({
+    'twstock_price', 'twstock_price_nonadj', 'twstock_inst', 'twstock_shareholding',
+    'twstock_per', 'twstock_foreign_sh',
+    'twmarket_index', 'twmarket_turnover', 'twmarket_institutional', 'twmarket_margin',
+})
+_META_TS_FMT = '%Y-%m-%dT%H:%M:%S'
+_META_KEY = b'blave_cache_meta'
+
+
+def _single_path(prefix, params):
+    return Path(f'{_monthly_cache_dir(prefix, params)}.parquet')   # same stem as the old directory
+
+
+def _write_single(prefix, params, df, meta):
+    """One atomic write: frame + coverage meta in the parquet footer."""
+    path = _single_path(prefix, params)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not df.empty:
+        df = _normalise_index(df)
+        df = df[~df.index.duplicated(keep='last')].sort_index()
+    table = pa.Table.from_pandas(df, preserve_index=True)
+    table = table.replace_schema_metadata({**(table.schema.metadata or {}),
+                                           _META_KEY: json.dumps(meta).encode()})
+    tmp = path.with_name(f'{path.name}.{os.getpid()}.tmp')
+    try:
+        pq.write_table(table, tmp)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _read_single_meta(prefix, params):
+    """Footer-only read of the coverage meta (no data pages). None if absent/unreadable."""
+    path = _single_path(prefix, params)
+    try:
+        raw = (pq.read_schema(path).metadata or {}).get(_META_KEY)
+        meta = json.loads(raw) if raw else None
+        if meta and all(k in meta for k in ('from', 'to', 'tail_fetched_at')):
+            return meta
+    except Exception:
+        pass
+    return None
+
+
+def _read_monthly_dir_all(cache_dir):
+    """Read every month file in a monthly cache dir. Returns (frame, months_ok,
+    months_bad): markers count as ok (fetched, empty); unreadable files are
+    reported in months_bad so the caller can keep them OUT of the claimed
+    coverage. Same schema-uniform batch read / per-file fallback as
+    _extend_cache_monthly."""
+    paths, names0, uniform, ok, bad = [], None, True, [], []
+    for path in sorted(cache_dir.glob('*.parquet')):
+        ym = path.stem
+        if not (len(ym) == 7 and ym[4] == '-'):
+            continue                      # not a month file (e.g. a stray tmp)
+        try:
+            names = pq.read_schema(path).names
+        except Exception:
+            bad.append(ym)
+            continue
+        ok.append(ym)
+        if not names:
+            continue                      # empty-month marker
+        if names0 is None:
+            names0 = names
+        elif names != names0:
+            uniform = False
+        paths.append(path)
+    if not paths:
+        return pd.DataFrame(), ok, bad
+    df = None
+    if uniform:
+        try:
+            df = pd.read_parquet(paths)
+        except Exception:
+            df = None
+    if df is None:
+        frames = []
+        for p in paths:
+            try:
+                f = pd.read_parquet(p)
+            except Exception:
+                bad.append(p.stem); ok.remove(p.stem)
+                continue
+            if not f.empty:
+                frames.append(f)
+        df = pd.concat(frames) if frames else pd.DataFrame()
+    return df, ok, bad
+
+
+def _migrate_monthly_to_single(prefix, params):
+    """Consolidate an old monthly directory into the single-file layout and
+    remove it. Claimed coverage = the LAST contiguous run of readable month
+    files (a directory can legitimately hold disjoint ranges — a 2021 backtest
+    then a 2025 live run — and claiming the gap would freeze a hole forever;
+    rows outside the claimed range are kept and simply get overlaid when an
+    earlier start is requested). tail_fetched_at = mtime of the LAST month's
+    file, which is exactly what the monthly layout used to judge that month's
+    completeness (only the last month can ever be incomplete). The directory
+    is renamed first so a concurrent caller never globs a half-deleted dir:
+    the loser of the rename sees no cache and takes the cold path, which merges
+    on write (_merge_single). Returns (frame, meta) or (None, None)."""
+    cache_dir = _monthly_cache_dir(prefix, params)
+    work = cache_dir.with_name(f'{cache_dir.name}.migrating.{os.getpid()}')
+    try:
+        os.rename(cache_dir, work)
+    except OSError:
+        return None, None                 # someone else is migrating it, or it's gone
+    try:
+        df, ok, _bad = _read_monthly_dir_all(work)
+        spans = _contiguous_spans(sorted(set(ok)))
+        if not spans:
+            shutil.rmtree(work, ignore_errors=True)   # nothing readable in it
+            return None, None
+        last = spans[-1]
+        try:
+            newest = (work / f'{last[-1]}.parquet').stat().st_mtime
+        except Exception:
+            newest = 0                    # unstatable → treated as never complete → re-fetched
+        meta = {'from': last[0], 'to': last[-1],
+                'tail_fetched_at': datetime.utcfromtimestamp(newest).strftime(_META_TS_FMT)}
+        _write_single(prefix, params, df, meta)
+    except Exception:
+        # Keep the history: put the directory back so the next call retries the
+        # migration instead of paying a full cold fetch for 41k files' worth of data.
+        try:
+            os.rename(work, cache_dir)
+        except OSError:
+            pass
+        raise
+    shutil.rmtree(work, ignore_errors=True)       # only after the single file landed
+    return (_normalise_index(df) if not df.empty else df), meta
+
+
+def _read_single(prefix, params):
+    """→ (frame, meta) or (None, None) when nothing is cached. Migrates a
+    monthly directory on first touch."""
+    path = _single_path(prefix, params)
+    if path.exists():
+        meta = _read_single_meta(prefix, params)
+        if meta is not None:
+            try:
+                df = pd.read_parquet(path)
+            except Exception:
+                df = None                 # unreadable: fall through, treat as uncached
+            if df is not None:
+                # A monthly dir (rename lost a race / an earlier cold write beat the
+                # migration) or an orphan .migrating.* would otherwise sit forever.
+                stale = _monthly_cache_dir(prefix, params)
+                for d in [stale] + list(stale.parent.glob(f'{stale.name}.migrating.*')):
+                    if d.is_dir():
+                        shutil.rmtree(d, ignore_errors=True)
+                return (_normalise_index(df) if not df.empty else df), meta
+    cache_dir = _monthly_cache_dir(prefix, params)
+    if cache_dir.is_dir():
+        return _migrate_monthly_to_single(prefix, params)
+    return None, None
+
+
+def _has_single_cache(prefix, params):
+    if _single_path(prefix, params).exists():
+        return True
+    cache_dir = _monthly_cache_dir(prefix, params)
+    return cache_dir.is_dir() and any(cache_dir.glob('*.parquet'))
+
+
+def _tail_needs_completion(meta, ym):
+    """True if month `ym` (<= meta['to']) may be missing its tail: it was last
+    fetched before it ended — the single-file twin of _written_before_month_end."""
+    try:
+        fetched = datetime.strptime(meta['tail_fetched_at'], _META_TS_FMT)
+    except Exception:
+        return True
+    return fetched < _month_end_utc(ym)
+
+
+def _merge_frames(a, b):
+    parts = [x for x in (a, b) if x is not None and not x.empty]
+    if not parts:
+        return pd.DataFrame()
+    out = pd.concat([_normalise_index(x) for x in parts])
+    return out[~out.index.duplicated(keep='last')].sort_index()
+
+
+def _extend_cache_single(prefix, params, fetch_raw_fn, start, end):
+    """One-file-per-id twin of _extend_cache_monthly. Fetch windows are month-
+    aligned like the monthly layout's spans, so the batch prefetch in
+    _fetch_batch_cached serves the same spans:
+      - no cache:        fetch [from-01, upper)
+      - earlier start:   fetch [req_from-01, from-01) and prepend
+      - tail:            fetch [max(last cached bar, to-01), upper) when the
+                         last covered month is the current one or was fetched
+                         before it ended; or [next_month(to)-01, upper) when
+                         the request reaches past a complete `to`
+    upper = tomorrow when the request touches the current month, else the first
+    day after the requested end month. Returns rows in [start, end]."""
+    now        = datetime.utcnow()
+    end_str    = end or now.strftime('%Y-%m-%d')
+    current_ym = now.strftime('%Y-%m')
+    tomorrow   = (now + timedelta(days=1)).strftime('%Y-%m-%d')
+    req_from, req_to = start[:7], end_str[:7]
+    cap_to = min(req_to, current_ym)       # never claim coverage of a future month
+    upper  = tomorrow if req_to >= current_ym else f'{_next_month(req_to)}-01'
+    stamp  = now.strftime(_META_TS_FMT)
+
+    df, meta = _read_single(prefix, params)
+    changed = False
+    if df is None:
+        fetched = fetch_raw_fn(f'{req_from}-01', upper)
+        df = _merge_frames(fetched, None)
+        meta = {'from': req_from, 'to': cap_to, 'tail_fetched_at': stamp}
+        # Merge rather than write: a concurrent migration may have landed a
+        # wider file between our read and now (we'd be the rename-race loser).
+        _merge_single(prefix, params, df, meta)
+        df, meta2 = _read_single(prefix, params)
+        if df is None:                    # vanishingly unlikely; keep the fetched frame
+            df = _merge_frames(fetched, None)
+        else:
+            meta = meta2
+        changed = False
+    else:
+        if req_from < meta['from']:
+            early = fetch_raw_fn(f'{req_from}-01', f"{meta['from']}-01")
+            df = _merge_frames(early, df)
+            meta['from'] = req_from
+            changed = True
+        delta_start = None
+        if meta['to'] >= current_ym or _tail_needs_completion(meta, meta['to']):
+            floor = f"{meta['to']}-01"
+            if not df.empty:
+                floor = max(floor, df.index[-1].strftime('%Y-%m-%d'))
+            delta_start = floor
+        elif req_to > meta['to']:
+            delta_start = f"{_next_month(meta['to'])}-01"
+        if delta_start is not None and delta_start < upper:
+            delta = fetch_raw_fn(delta_start, upper)
+            df = _merge_frames(df, delta)
+            meta['to'] = max(meta['to'], cap_to)
+            meta['tail_fetched_at'] = stamp
+            changed = True
+    if changed:
+        _write_single(prefix, params, df, meta)
+    if df.empty:
+        return pd.DataFrame()
+    start_ts = pd.Timestamp(start)
+    end_ts   = pd.Timestamp(end_str) + pd.Timedelta(days=1)
+    return df[(df.index >= start_ts) & (df.index < end_ts)]
+
+
+def _merge_meta(old, new):
+    """Coverage union ONLY when the two ranges overlap or touch — a gap between
+    them was never fetched and must not be claimed (it would freeze a hole).
+    Disjoint: keep the segment with the larger `to` (same rule as migration;
+    the other segment's rows stay in the file as harmless extras and get
+    overlaid by the next early fetch). tail_fetched_at follows the segment
+    that owns `to`; when both end in the same month, the fresher stamp wins."""
+    a, b = (old, new) if old['to'] <= new['to'] else (new, old)   # a ends first
+    if _next_month(a['to']) >= b['from'] and _next_month(b['to']) >= a['from']:
+        if a['to'] == b['to']:
+            tail = max(a['tail_fetched_at'], b['tail_fetched_at'])
+        else:
+            tail = b['tail_fetched_at']
+        return {'from': min(a['from'], b['from']), 'to': b['to'], 'tail_fetched_at': tail}
+    return dict(b)
+
+
+def _merge_single(prefix, params, df, meta):
+    """Write `df`+`meta` merged with whatever is already cached — never narrows
+    or blanks an existing file. Used by the phase-2 batch save and by the cold
+    path of _extend_cache_single (a concurrent migration may have landed a wider
+    file in between)."""
+    existing, old_meta = _read_single(prefix, params)
+    if existing is None:
+        _write_single(prefix, params, df if df is not None else pd.DataFrame(), meta)
+        return
+    if df is None or df.empty:
+        return                            # never blank a cache that has something
+    _write_single(prefix, params, _merge_frames(existing, df), _merge_meta(old_meta, meta))
+
+
+def _save_single(prefix, params, df, start, end):
+    """Phase-2 twin of _save_monthly + _mark_empty_months: a full-range batch
+    fetch covered every month in [start, end] (empty ones included). Merges with
+    whatever is already cached (an id can reach phase 2 after a phase-1 demotion
+    in a rate-limit storm, and a wider older cache must survive that); an empty
+    result only creates a file when none exists (same rule as _mark_empty_months).
+    tail_fetched_at = min(now, end+1d): "freshness = how far the fetch reached",
+    so a past mid-month `end` leaves that month marked incomplete and the next
+    call completes it instead of freezing a hole."""
+    now = datetime.utcnow()
+    end_str = end or now.strftime('%Y-%m-%d')
+    reached = min(now, datetime.strptime(end_str, '%Y-%m-%d') + timedelta(days=1))
+    meta = {'from': start[:7], 'to': min(end_str[:7], now.strftime('%Y-%m')),
+            'tail_fetched_at': reached.strftime(_META_TS_FMT)}
+    _merge_single(prefix, params, df, meta)
 
 
 # ── Kline ─────────────────────────────────────────────────────────────────────
@@ -1628,13 +1961,15 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
     """
     results, uncached = {}, []
 
+    single = prefix in _SINGLE_FILE_PREFIXES
     to_extend = []
     for _id in ids:
-        cache_dir = _monthly_cache_dir(prefix, {'id': _id})
-        if cache_dir.exists() and list(cache_dir.glob('*.parquet')):
-            to_extend.append(_id)
+        if single:
+            cached = _has_single_cache(prefix, {'id': _id})
         else:
-            uncached.append(_id)
+            cache_dir = _monthly_cache_dir(prefix, {'id': _id})
+            cached = cache_dir.exists() and bool(list(cache_dir.glob('*.parquet')))
+        (to_extend if cached else uncached).append(_id)
 
     def _date_spans(range_start, range_end):
         """Split [range_start, range_end] into <= date_chunk_days pieces. Some batch
@@ -1711,6 +2046,10 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
         tomorrow = (now + timedelta(days=1)).strftime('%Y-%m-%d')
 
         def _prev_month_needs_completion(_id):
+            if single:
+                meta = _read_single_meta(prefix, {'id': _id})   # footer only, no data pages
+                # unknown / older coverage → treat as needing the wider window
+                return meta is None or meta['to'] < prev_ym or _tail_needs_completion(meta, prev_ym)
             path = _monthly_cache_dir(prefix, {'id': _id}) / f'{prev_ym}.parquet'
             return not path.exists() or _written_before_month_end(path, prev_ym)
 
@@ -1755,12 +2094,21 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
             except Exception:
                 uncached.append(_id)
 
-    fetched, failed_ids = _fetch_batch_range(uncached, start, end)
+    # Month-aligned start for the single-file layout, like _extend_cache_monthly's
+    # spans: the cache claims the whole start month, so it must hold the whole month
+    # (a later request from the 1st would otherwise find a permanent hole).
+    # (Single layout only: the monthly batch path keeps its exact `start` — sub-5min
+    # kline batches are validated against the server's earliest date and a month-
+    # aligned start before it is a hard 400, not a clamp.)
+    fetched, failed_ids = _fetch_batch_range(uncached, f'{start[:7]}-01' if (single and start) else start, end)
     end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
     start_ts = pd.Timestamp(start)
     end_ts = pd.Timestamp(end_str) + pd.Timedelta(days=1)
     for _id, df in fetched.items():
-        _save_monthly(prefix, {'id': _id}, df)
+        if single:
+            _save_single(prefix, {'id': _id}, df, start, end)
+        else:
+            _save_monthly(prefix, {'id': _id}, df)
         # match _extend_cache_monthly's own [start, end] clamp so both phases return
         # the same range regardless of how much extra the raw fetch pulled back
         results[_id] = df[(df.index >= start_ts) & (df.index < end_ts)]
@@ -1768,12 +2116,19 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
     # run is a cache hit instead of re-fetching the empty months. Ids with any
     # failed chunk are skipped for the whole range: a transient fetch failure is
     # not evidence of an empty month, and a wrongly-frozen empty parquet would
-    # hide that id's history on every future warm run.
+    # hide that id's history on every future warm run. (Single-file layout: an
+    # id that came back with no rows at all gets an empty frame whose footer meta
+    # covers the range — same "fetched, empty" meaning; never overwrites a file
+    # that already has rows.)
     if start and mark_empty_months:
         for _id in uncached:
             if _id in failed_ids:
                 continue
-            _mark_empty_months(prefix, _id, start, end)
+            if single:
+                if _id not in fetched:
+                    _save_single(prefix, {'id': _id}, pd.DataFrame(), start, end)
+            else:
+                _mark_empty_months(prefix, _id, start, end)
 
     return results
 
