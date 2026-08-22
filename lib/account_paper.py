@@ -13,18 +13,19 @@ from lib import order_paper as _paper
 
 
 def get_equity(env: dict) -> dict:
-    """{'equity', 'currency': 'USDT', 'accounts'} — equity = cash + unrealized
-    swap PnL + spot inventory at market; the breakdown shows where it sits."""
+    """{'equity', 'currency': 'USDT'} — equity = cash + unrealized swap PnL +
+    spot inventory at market.
+
+    No `accounts` wallet breakdown: paper is ONE simulated account, so there is
+    no spot/funding/futures split to show (that field exists on real venues so
+    funds parked outside the trading wallet don't look vanished — moot here). A
+    cash/unrealized/spot split would be wrong as a "wallet" list anyway
+    (unrealized PnL is not a parked balance), and the web sums every accounts
+    value into the displayed equity, so a partial split would misstate it.
+    Omitting it makes the web fall back to `equity` — correct, and no
+    confusing/untranslated wallet rows."""
     s = _paper.snapshot(env)
-    return {
-        "equity": float(s["equity"]),
-        "currency": "USDT",
-        "accounts": {
-            "cash": round(float(s["cash"]), 2),
-            "unrealized": round(float(s["unrealized"]), 2),
-            "spot": round(float(s["spot_value"]), 2),
-        },
-    }
+    return {"equity": float(s["equity"]), "currency": "USDT"}
 
 
 def get_positions(env: dict) -> list:
