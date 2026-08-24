@@ -723,39 +723,11 @@ def _is_sub_5min(interval):
     return pd.Timedelta(interval) < pd.Timedelta('5min')
 
 
-def _sub_5min_earliest():
-    """Midnight-floored, mirroring server-side validate_sub_5min_request — start is a
-    date-only string, so an un-floored cutoff would reject the very date the error
-    message advertises as valid (00:00 < now's time-of-day)."""
-    return (datetime.utcnow() - timedelta(days=45)).replace(
-        hour=0, minute=0, second=0, microsecond=0)
-
-
-def _validate_sub_5min_start(interval, start):
-    """Sub-5min klines only go back 45 days server-side; fail loudly, never clamp
-    a user-facing range — a silently shortened backtest window is worse than an error."""
-    if _is_sub_5min(interval):
-        earliest = _sub_5min_earliest()
-        if datetime.strptime(start, '%Y-%m-%d') < earliest:
-            raise ValueError(
-                f'{interval} kline only goes back 45 days '
-                f'(start must be {earliest.strftime("%Y-%m-%d")} or later)')
-
-
 def _fetch_kline_raw(symbol, interval, start, end, headers):
     from concurrent.futures import ThreadPoolExecutor, as_completed
     sub_5min = _is_sub_5min(interval)
     s = datetime.strptime(start, '%Y-%m-%d')
     e = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d')
-    if sub_5min:
-        # The cache layer widens ranges to month starts, which can reach past the
-        # API's 45-day floor even when the user's own start is legal — clamp only
-        # here (internal ranges); user-facing starts are validated before this,
-        # on the same _sub_5min_earliest basis so a start exactly at the validated
-        # earliest is never silently clamped away.
-        s = max(s, _sub_5min_earliest())
-        if s >= e:
-            return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume'])
     chunks, cursor = [], s
     chunk_days = 30 if sub_5min else 365
     while cursor < e:
@@ -811,14 +783,16 @@ def normalize_symbol(symbol):
 def fetch_kline(symbol, interval, start, end, headers):
     """Fetch OHLCV kline data from Blave API with date chunking and local cache.
 
-    Sub-5min intervals (1min..4min): served live from Binance by the API,
-    45-day lookback max, real volume. Cache namespace is kline2 — the old
+    All intervals reach back to the symbol's Binance um-futures listing date
+    (sub-5min included — the API backfills old months from Binance's official
+    archive). A window before listing returns empty, not an error. Sub-5min
+    requests are chunked 30 days each server-side, so deep 1min backtests pull
+    history month-by-month on first run. Cache namespace is kline2 — the old
     kline cache has Volume hard-zeroed and must not be mixed with real volume.
     """
     # Venue forms like 'BTC/USDT' → Binance 'BTCUSDT'; the API 400s on
     # separator forms and the separator would leak into the cache dir name.
     symbol = normalize_symbol(symbol)
-    _validate_sub_5min_start(interval, start)
     df = _extend_cache_monthly(
         'kline2', {'symbol': symbol, 'period': interval},
         lambda s, e: _fetch_kline_raw(symbol, interval, s, e, headers),
@@ -838,7 +812,6 @@ def fetch_kline_batch(symbols, interval, start, end, headers):
     fetch_kline is a warm hit here too, and vice versa. Warm ids are extended through
     the batch endpoint too (not one call per symbol) — see _fetch_batch_cached."""
     symbols = [normalize_symbol(s) for s in symbols]
-    _validate_sub_5min_start(interval, start)
     def _parse(records):
         df = pd.DataFrame(records)
         df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
