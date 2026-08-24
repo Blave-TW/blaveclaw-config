@@ -1,4 +1,4 @@
-import glob, inspect, json, logging, os, re
+import glob, inspect, json, logging, os, re, time
 from datetime import datetime
 
 from lib import guard
@@ -422,13 +422,86 @@ def spot_scope(inventory_value_fn, threshold=10):
     return values
 
 
+# ── UI-authoritative 下單設定 (deployment redline L2) ───────────────────────
+# manager/amounts.ui.json is written by the platform runtime (command_listener)
+# after every successful web save of amounts/exchanges — the LAST UI-confirmed
+# copy. When it exists, load_portfolio_config() REPLACES the returned dict's
+# amounts/exchanges with it — ONE choke point, so every downstream reader
+# (aggregate_portfolio, spot_symbols, strategy_amounts, resume_wait, venue
+# detection…) gets the override for free instead of each re-implementing it
+# (audit P1-1: a guard on a helper nothing calls is a guard on dead code).
+# An agent talked into hand-editing the config can no longer change what
+# trades. Missing or corrupt file = fail-open, exactly the pre-guard behavior
+# (incl. the legacy weights fallback): the guard only tightens after the
+# user's first UI save. A mismatch alerts the user once (24h cooldown via a
+# state/ stamp-file mtime) so the override is never silent. Every OTHER key
+# (execution, asset_specs, self_ledger…) is untouched — order-style etc. stay
+# agent-editable.
+_UI_MIRROR_PATH = 'manager/amounts.ui.json'
+_UI_ALERT_STAMP_PATH = 'state/ui_amounts_alert'
+_UI_ALERT_COOLDOWN_S = 24 * 3600
+_UI_ALERT_MSG = ('網頁儲存與機器設定不一致,以投資組合頁為準——'
+                 '請重存一次下單設定')
+
+
+def _load_ui_mirror():
+    """{'amounts': {name: float}, 'exchanges': {name: str}} from the UI
+    mirror, or None when absent/invalid (fail-open — see section comment)."""
+    try:
+        with open(_UI_MIRROR_PATH) as f:
+            raw = json.load(f)
+        amounts = raw.get('amounts')
+        exchanges = raw.get('exchanges')
+        if not isinstance(amounts, dict) or not isinstance(exchanges, dict):
+            return None
+        return {'amounts': {str(k): float(v) for k, v in amounts.items()},
+                'exchanges': {str(k): str(v if v is not None else '')
+                              for k, v in exchanges.items()}}
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _ui_override_alert():
+    """Tell the user the UI copy overrode the config — once per 24h. Stamp is
+    written BEFORE sending so a slow send can't spam; a failed stamp write
+    still sends (a broken disk already alerts loudly elsewhere — silence here
+    would hide that the agent's change didn't take)."""
+    try:
+        if os.path.exists(_UI_ALERT_STAMP_PATH) and \
+                time.time() - os.path.getmtime(_UI_ALERT_STAMP_PATH) < _UI_ALERT_COOLDOWN_S:
+            return
+        os.makedirs(os.path.dirname(_UI_ALERT_STAMP_PATH), exist_ok=True)
+        with open(_UI_ALERT_STAMP_PATH, 'w') as f:
+            f.write(datetime.utcnow().isoformat())
+    except OSError as e:
+        logging.warning(f'ui override alert stamp failed: {e}')
+    try:
+        from lib.notify import send_text
+        send_text(_UI_ALERT_MSG)
+    except Exception:
+        logging.error(f'[notify-unavailable] {_UI_ALERT_MSG}')
+
+
 def load_portfolio_config():
-    """Load portfolio_config.json from manager/ directory."""
+    """Load portfolio_config.json from manager/ directory.
+
+    Deployment redline (L2): when manager/amounts.ui.json exists, the
+    returned dict's `amounts`/`exchanges` come from IT — see the
+    UI-authoritative section above. Single choke point for the override."""
     path = 'manager/portfolio_config.json'
     if not os.path.exists(path):
-        return {'account_value': 0, 'weights': {}, 'exchanges': {}, 'asset_specs': {}}
-    with open(path) as f:
-        return json.load(f)
+        config = {'account_value': 0, 'weights': {}, 'exchanges': {}, 'asset_specs': {}}
+    else:
+        with open(path) as f:
+            config = json.load(f)
+    ui = _load_ui_mirror()
+    if ui is not None and isinstance(config, dict):
+        if config.get('amounts') != ui['amounts'] \
+                or config.get('exchanges') != ui['exchanges']:
+            _ui_override_alert()
+        config['amounts'] = ui['amounts']
+        config['exchanges'] = ui['exchanges']
+    return config
 
 
 def portfolio_members():
@@ -450,6 +523,9 @@ def portfolio_members():
     A backtest-only experiment left in that pool takes a share of the capital
     purely by existing, and the strategies actually trading get sized down for
     it — silently, since nothing anywhere reports that split.
+
+    Deployment redline (L2): the exchanges dict read here is already the
+    UI-authoritative copy — load_portfolio_config applies the override.
     """
     exchanges = load_portfolio_config().get('exchanges') or {}
     return set(exchanges) or None
@@ -476,6 +552,10 @@ def strategy_amounts(config=None):
     from before the change have no `amounts`; for those, fall back to the old
     account_value × leverage × weight expression so existing deployments keep
     trading identically until they are re-saved from the web.
+
+    Deployment redline (L2): a config loaded via load_portfolio_config already
+    carries the UI-authoritative amounts (mirror override, incl. over this
+    legacy fallback — the mirror always has an `amounts` dict).
     """
     config = config if config is not None else load_portfolio_config()
     amounts = config.get('amounts')

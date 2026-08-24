@@ -21,10 +21,12 @@ from spot_scope() so removing a spot strategy sells its inventory down and
 personal coins never enter.
 """
 import importlib
+import json
 import logging
 import math
 import os
 import re
+import time
 from datetime import datetime
 
 from lib.portfolio import load_portfolio_config, market_key, split_key, spot_scope
@@ -50,8 +52,69 @@ def read_env(path=".env"):
     return env
 
 
+# Deployment redline L2 (spec §3.2): manager/credentials.ui.json is written by
+# the platform runtime on every UI bind — the venue ids (paper included) whose
+# credentials the user confirmed through the web. When it exists, only those
+# ids can route; keys an agent hand-writes into .env never become a live
+# venue. Missing/corrupt manifest = fail-open (pre-manifest machines
+# unchanged). Warn-once set is process-lifetime — official_venues runs every
+# reconcile round and must not spam the log; the USER notify (spec §3.2, a
+# filtered venue means "looks bound, will not trade" and staying silent hides
+# it) has its own 24h stamp-file cooldown, same pattern as lib/portfolio's
+# _ui_override_alert.
+_CRED_MANIFEST_PATH = "manager/credentials.ui.json"
+_MANIFEST_ALERT_STAMP_PATH = "state/ui_credentials_alert"
+_MANIFEST_ALERT_COOLDOWN_S = 24 * 3600
+_MANIFEST_ALERT_MSG = ("機器上的交易所金鑰與投資組合頁的綁定不一致,"
+                       "以投資組合頁為準——請在投資組合頁重新連接交易所")
+_manifest_filtered_warned = set()
+
+
+def _ui_bound_ids():
+    """Lowercased venue ids from the UI bind manifest, or None when
+    absent/invalid (fail-open — see comment above)."""
+    try:
+        with open(_CRED_MANIFEST_PATH) as f:
+            ids = json.load(f).get("ids")
+        if not isinstance(ids, list):
+            return None
+        return {str(i).lower() for i in ids}
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _manifest_filtered_alert(vid):
+    """A vid with keys+libs got filtered by the manifest: log once per
+    process, and tell the user once per 24h (stamp written BEFORE sending so
+    a slow send can't spam; failed stamp still sends — same trade-off as
+    lib/portfolio._ui_override_alert)."""
+    if vid not in _manifest_filtered_warned:
+        _manifest_filtered_warned.add(vid)
+        logging.warning(
+            f"[venue_wiring] {vid} has keys+libs but is not in the web bind "
+            f"manifest ({_CRED_MANIFEST_PATH}) — not routed; bind it from the "
+            f"投資組合 page")
+    try:
+        if os.path.exists(_MANIFEST_ALERT_STAMP_PATH) and \
+                time.time() - os.path.getmtime(_MANIFEST_ALERT_STAMP_PATH) \
+                < _MANIFEST_ALERT_COOLDOWN_S:
+            return
+        os.makedirs(os.path.dirname(_MANIFEST_ALERT_STAMP_PATH), exist_ok=True)
+        with open(_MANIFEST_ALERT_STAMP_PATH, "w") as f:
+            f.write(datetime.utcnow().isoformat())
+    except OSError as e:
+        logging.warning(f"[venue_wiring] manifest alert stamp failed: {e}")
+    try:
+        from lib.notify import send_text
+        send_text(_MANIFEST_ALERT_MSG)
+    except Exception:
+        logging.error(f"[notify-unavailable] {_MANIFEST_ALERT_MSG}")
+
+
 def official_venues(env):
-    """Venue ids with keys in .env AND both official libs on disk."""
+    """Venue ids with keys in .env AND both official libs on disk — and, when
+    the UI bind manifest exists, listed in it (see _ui_bound_ids)."""
+    allowed = _ui_bound_ids()
     out = []
     for k in env:
         m = _ENV_KEY_RE.match(k + "=")
@@ -61,6 +124,9 @@ def official_venues(env):
         if m.group(1).upper() in _RESERVED_PREFIXES or vid in _NON_AUTO:
             continue
         if os.path.isfile(f"lib/account_{vid}.py") and os.path.isfile(f"lib/order_{vid}.py"):
+            if allowed is not None and vid not in allowed:
+                _manifest_filtered_alert(vid)
+                continue
             out.append(vid)
     return sorted(set(out))
 
