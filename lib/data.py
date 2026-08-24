@@ -133,6 +133,36 @@ def _written_before_month_end(path, ym):
         return True
 
 
+_HEAD_VERIFIED_META = {b'blave_head_verified': b'1'}
+_HEAD_TOLERANCE = timedelta(hours=1)
+
+
+def _head_short_unverified(path, ym):
+    """True if past month `path` starts more than _HEAD_TOLERANCE after the month
+    begins and has never been re-fetched to confirm that — one completing
+    re-fetch, then the footer flag _HEAD_VERIFIED_META stops it recurring.
+
+    Why: an earlier lib clamped sub-5min fetch ranges to a 45-day floor, so a
+    month straddling that floor was cached from the clamp date onward (real
+    incident: 2026-07 stored as 07-10 → 07-31, nine days missing) — and the
+    mtime rule above then treats it as complete forever, so a later two-year
+    backtest inherits the hole. A listing month is legitimately head-short;
+    it re-fetches once, gets the flag, and is never re-fetched again.
+    Footer-only schema read first (cheap), index read only when unflagged.
+    """
+    try:
+        schema = pq.read_schema(path)
+        if not schema.names or (schema.metadata or {}).get(b'blave_head_verified'):
+            return False                  # empty marker, or already verified
+        idx = pd.to_datetime(pd.read_parquet(path, columns=[]).index)
+        if getattr(idx, 'tz', None) is not None:
+            idx = idx.tz_convert('UTC').tz_localize(None)
+        month_start = datetime(int(ym[:4]), int(ym[5:7]), 1)
+        return idx.min() > pd.Timestamp(month_start) + _HEAD_TOLERANCE
+    except Exception:
+        return True
+
+
 def _stale_incomplete_month(path, ttl_hours, ym, edge_days=15):
     """True if `path` is an empty or implausibly-partial past month older than
     `ttl_hours` — used by sources whose history is backfilled progressively
@@ -179,8 +209,9 @@ def _stale_incomplete_month(path, ttl_hours, ym, edge_days=15):
         return True
 
 
-def _atomic_to_parquet(df, path):
+def _atomic_to_parquet(df, path, footer_meta=None):
     """Write `df` to `path` via same-directory tmp file + os.replace.
+    `footer_meta` (bytes→bytes) is merged into the parquet schema metadata.
 
     Readers (and concurrent writers racing on the same month) never see a
     half-written parquet: a crash/kill mid-write leaves only a *.tmp file,
@@ -188,7 +219,12 @@ def _atomic_to_parquet(df, path):
     """
     tmp = path.with_name(f'{path.name}.{os.getpid()}.tmp')
     try:
-        df.to_parquet(tmp)
+        if footer_meta:
+            table = pa.Table.from_pandas(df)
+            table = table.replace_schema_metadata({**(table.schema.metadata or {}), **footer_meta})
+            pq.write_table(table, tmp)
+        else:
+            df.to_parquet(tmp)
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
@@ -245,12 +281,22 @@ def _extend_cache_monthly(prefix, params, fetch_raw_fn, start, end,
     # Empty months still get a marker file so they are never re-fetched — unless
     # empty_marker_ttl_hours is set, in which case an expired empty or implausibly-
     # partial month is treated as missing and re-fetched (see docstring).
+    # Sub-5min klines get a one-shot month-head check (see _head_short_unverified);
+    # every past month written below carries the verified flag so it never recurs.
+    try:
+        head_check = prefix == 'kline2' and _is_sub_5min(params.get('period', '1d'))
+    except Exception:
+        head_check = False
+    footer_meta = _HEAD_VERIFIED_META if head_check else None
+
     def _needs_fetch(ym):
         path = cache_dir / f'{ym}.parquet'
         if not path.exists():
             return True
         if _written_before_month_end(path, ym):
             return True   # cached mid-month, tail may be missing — complete it once
+        if head_check and _head_short_unverified(path, ym):
+            return True   # cached from a clamped start, head may be missing — complete it once
         return (empty_marker_ttl_hours is not None
                 and _stale_incomplete_month(path, empty_marker_ttl_hours, ym))
     missing = [ym for ym in past_months if _needs_fetch(ym)]
@@ -275,7 +321,7 @@ def _extend_cache_monthly(prefix, params, fetch_raw_fn, start, end,
                 if not existing.empty:
                     grp = existing if grp is None else pd.concat([existing, grp])
                     grp = grp[~grp.index.duplicated(keep='last')].sort_index()
-            _atomic_to_parquet(grp if grp is not None else pd.DataFrame(), path)
+            _atomic_to_parquet(grp if grp is not None else pd.DataFrame(), path, footer_meta)
 
     # One batched read for all past months instead of one read_parquet call per month
     # file — with hundreds of ids x ~140 month files each, the per-file open/parse
