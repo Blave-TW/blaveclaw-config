@@ -31,22 +31,56 @@ DESCRIPTION   = "追蹤 DOGE 大戶持倉集中度,集中度升高時進場做�
 
 Always set `DISPLAY_NAME` and `DESCRIPTION` when creating a strategy — the workspace shows the technical id only as a fallback when they are missing.
 
-## Editing a live strategy (soft lock)
+## Editing a live strategy (fork, never in place)
 
-A strategy that is in the trading portfolio with an amount > 0 has REAL positions
-sized off its signal — an in-place edit takes effect on the very next reconcile.
-No platform lets edits act on live positions (Pionex/QuantConnect hard-stop first;
-3Commas scopes edits to new deals). Ours is agent-run, so YOU run the safe flow:
+A strategy that is in the trading portfolio with an amount > 0 is LIVE: its
+scheduled run re-imports `strategy.py` every bar, so a saved edit takes effect
+on the next bar and can flip a real position with no warning. Never edit any
+file of a live strategy in place — not even a "small" parameter tweak (a
+threshold change is exactly what flips a position). No platform lets edits act
+on live positions (Pionex/QuantConnect hard-stop first; 3Commas scopes edits
+to new deals; TradingView alerts snapshot the script). Check
+`portfolio_config.json` `amounts` before touching any deployed strategy's files.
 
-1. Tell the user the strategy is live and what the flow will do; get their OK.
-2. Suspend its sizing: save its amount as 0 via the user's 下單設定 (or ask them to)
-   — the reconciler closes its positions. Note the old amount.
-3. Make the edit. Re-run the backtest; show the result.
-4. Only after the user confirms the new behaviour, restore the amount.
+The flow is FORK → EDIT → DEPLOY → SWITCH:
 
-Never skip step 2 "because the change is small" — a one-line signal change can flip
-a live position instantly. Check portfolio_config.json `amounts` before any edit to
-strategy.py of a deployed strategy.
+1. Tell the user the strategy is live and that you will build the change as a
+   new strategy while the original keeps trading untouched.
+2. Fork it to a new strategy under its own `STRATEGY_NAME` (same conventions
+   as `references/marketplace.md` › *Forking a strategy*: own
+   `DISPLAY_NAME`/`DESCRIPTION`, `MODE = "backtest"`). Edit the fork.
+3. Backtest the fork; show the result next to the original's current stats.
+   Not satisfied → iterate (Iteration Brakes apply as usual) or discard the
+   fork; the live strategy was never touched.
+4. **Deploy the fork's signal schedule BEFORE switching** and confirm one run
+   has written `strategies/<fork>/state.json`. A funded strategy with no
+   `state.json` contributes NOTHING to the reconciler's target — switch
+   without this and the original's position closes while the fork's never
+   opens, silently (no healthcheck fires for a never-scheduled strategy). On
+   the Blave Agent runtime the platform schedules a funded strategy on its
+   own within ~a minute of the 下單設定 save; on crontab machines YOU must
+   schedule it per `references/deployment.md` first. Either way, verify
+   `state.json` exists before step 5.
+5. Only after the user confirms: switch via 下單設定 in ONE save — set the
+   fork's amount, and set the original's amount to 0 while KEEPING it
+   selected (a 0 amount stops sizing but preserves its routing and registry,
+   which is what makes rollback a one-save operation; unselecting removes
+   them). Tell the user BEFORE the save what will happen: with the fork's
+   `state.json` in place the reconciler nets old-out/new-in in the same
+   round — same symbol, same direction means little or no trading at the
+   switch; opposite direction, or a fork whose signal hasn't run yet, means
+   the original's position closes within seconds and the fork enters on its
+   own signal (a full close-and-reopen round trip of fees/slippage).
+6. Keep the defunded original unless the user asks to delete it — it is the
+   rollback path (switch back the same way).
+
+Identity changes (NAME / SYMBOL / MARKET) are the same case, not a lighter
+one: mutating identity in place makes the old target vanish, so the
+reconciler closes the position with no warning (measured 2026-08-05: an
+agent renamed a funded strategy to flip MARKET to spot; the futures position
+auto-closed, the web's picker showed a ghost entry, and the user read all of
+it as breakage). An identity change IS a new strategy — same fork-and-switch
+flow, same warning before the save.
 
 ## Signal Contract
 
