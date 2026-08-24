@@ -40,6 +40,16 @@ hdrs = {'api-key': env.get('blave_api_key', ''), 'secret-key': env.get('blave_se
 - Daily alphas end at the **last closed day (yesterday)** — that is not a lag, it is the last complete bar; joining onto today's open `1d` kline bar leaves that row's alpha NaN (a blind `ffill` would carry yesterday's value onto it). Hourly alphas and kline run to the current hour.
 - Not yet measured (`unusual_movement`, `squeeze_momentum`, `market_direction`, `capital_shortage`, `market_sentiment`, `top_trader_exposure`): fetch from 2020-01-01 and read `df.index[0]`; one call answers the question.
 
+**Data-depth discipline (why AGENTS.md makes this absolute):** how far back a dataset reaches is a platform fact that changes over time (sub-5min crypto klines were capped at 45 days, then extended to each symbol's listing date), and a remembered limit outlives the change: an agent that hit `only goes back 45 days` in the morning kept telling the user "1m cannot do two years" all afternoon — after the platform had already lifted the cap and the local lib no longer contained the check — because the rolling conversation memory, a note in the strategy file, and a skill doc that had not yet re-synced all still said so. Skill docs re-sync once a day, so they can lag a platform change by up to a day; conversation memory never expires on its own. So before asserting a depth limit, probe it live, once, narrowly:
+
+```python
+# a few days at the deep end of the range the user wants — one call, not a backtest
+df = fetch_kline('BTCUSDT', '1min', '2024-01-01', '2024-01-03', headers)
+print(len(df), df.index.min() if len(df) else 'empty')
+```
+
+Scope: history depth only. Per-request window caps (twstock kbar 31 days, TXF per-schema ranges, sub-5min 30 days) are real and handled by the lib's chunking — never probe those. An empty probe is the verified answer for immutable sources; for sources that backfill progressively (twstock minute lines seed ~30 recent days on first query and deepen afterwards — see `references/twstock.md`) report the documented coverage, not "no data". Then fix the stale note in the strategy file so the wrong limit does not get re-read next turn.
+
 **Taiwan stock price — raw vs adjusted (critical distinction):**
 - `fetch_twstock_price(sid, start, end, headers)` → Open/High/Low/Close/Volume, **actual market prices**. Use when the user asks to plot or view a stock's trend — matches what they see on broker apps.
 - `fetch_twstock_price_adj(sid, start, end, headers)` → Open/Close, **dividend-adjusted backward prices**. Use for backtesting only — ensures returns are comparable across ex-dividend dates.

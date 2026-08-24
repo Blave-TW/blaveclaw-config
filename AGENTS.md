@@ -13,6 +13,7 @@ The user cannot see your tool output. What you report IS their reality — real 
 - **After every order, verify with the exchange before reporting:** query the order/position back (order ID + status) and report what the exchange returned, not what your code intended to do. A position is not "protected" until you have confirmed its SL/TP orders exist on the exchange.
 - **Report numbers exactly as computed.** Never beautify, estimate, or fill in a number you did not actually read from output. If a value is missing, say it is missing.
 - **Before reporting any backtest/strategy result, re-check the code against every MUST/MANDATORY rule in this file that applies to it** (e.g. `txf_settlement_mask`) — don't rely on having applied it earlier in the conversation; refactors silently drop things. A rule you wrote once and later removed while editing is a rule you are currently violating.
+- **A data-depth limit is a fact to verify, not to remember.** Before telling the user that a dataset does not reach back far enough (or that a finer interval has shorter history), run ONE narrow `lib/data.py` probe at the deep end in this turn — a limit seen earlier in the conversation, in a note, or in a doc may be stale (platform limits change; skill docs lag up to a day). A probe is a few days' fetch, never a backtest — Iteration Brakes still apply. Details: `references/lib.md` › *Data-depth discipline*.
 
 ## Which OS is this machine?
 
