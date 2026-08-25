@@ -1,0 +1,45 @@
+//@version=6
+// Blave Agent export template — TradingView Pine Script v6
+// Template:  stop_loss_take_profit
+// Logic:     SMA-state entry (swap in any signal block) plus a fixed-percent stop-loss and take-profit bracket via
+//            strategy.exit(stop = , limit = ) using ABSOLUTE prices. Signal exit still applies.
+// Blave ref: Type A signal (examples/btc_sma_cross) + a percent SL/TP the Python applies to the entry price.
+//            Blave has no built-in bracket: if the Python exits via a signal only, use sma_cross_long instead.
+// Chart:     set symbol and timeframe by hand.
+// Costs:     commission 0.05 % per side = Blave FEE 0.0005; slippage 0 like Blave.
+// Not compiled by Blave Agent. Add to a chart, open the Strategy Tester, check the trade list before use.
+strategy("Blave: Signal + SL/TP", overlay = true, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type = strategy.commission.percent, commission_value = 0.05, slippage = 0, pyramiding = 1, process_orders_on_close = false, calc_on_every_tick = false)
+
+// --- inputs ---
+int   fastLen = input.int(45, "Fast SMA", minval = 1)
+int   slowLen = input.int(100, "Slow SMA", minval = 2)
+float slPct   = input.float(2.0, "Stop-loss % below entry", minval = 0.01, step = 0.1)
+float tpPct   = input.float(4.0, "Take-profit % above entry", minval = 0.01, step = 0.1)
+
+// --- signal ---
+float smaFast = ta.sma(close, fastLen)
+float smaSlow = ta.sma(close, slowLen)
+bool longState = smaFast > smaSlow
+bool flatState = smaFast < smaSlow
+
+// --- orders ---
+// Entry fills at the next bar's open. The bracket is issued twice on purpose:
+//   1) on the signal bar, anchored to this bar's close, so protection already exists on the fill bar;
+//   2) on every bar while in position, re-anchored to the actual fill price (strategy.position_avg_price).
+// Same id "L-x" both times: the later call replaces the pending exit orders.
+// UNVERIFIED: that re-issuing strategy.exit() with an existing id modifies rather than duplicates the exit orders
+// (documented for strategy.entry()/strategy.order(); the built-in strategies use this pattern for strategy.exit()).
+if longState and strategy.position_size == 0
+    strategy.entry("L", strategy.long)
+    strategy.exit("L-x", from_entry = "L", stop = close * (1 - slPct / 100), limit = close * (1 + tpPct / 100))
+if strategy.position_size > 0
+    float avgPrice = strategy.position_avg_price
+    strategy.exit("L-x", from_entry = "L", stop = avgPrice * (1 - slPct / 100), limit = avgPrice * (1 + tpPct / 100))
+if flatState and strategy.position_size > 0
+    strategy.close("L")
+
+// --- plots ---
+plot(smaFast, "SMA fast", color = color.blue)
+plot(smaSlow, "SMA slow", color = color.orange)
+plot(strategy.position_size > 0 ? strategy.position_avg_price * (1 - slPct / 100) : na, "Stop", color = color.red, style = plot.style_linebr)
+plot(strategy.position_size > 0 ? strategy.position_avg_price * (1 + tpPct / 100) : na, "Target", color = color.green, style = plot.style_linebr)

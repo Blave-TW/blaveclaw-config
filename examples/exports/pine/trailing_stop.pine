@@ -1,0 +1,41 @@
+//@version=6
+// Blave Agent export template — TradingView Pine Script v6
+// Template:  trailing_stop
+// Logic:     SMA-state entry (swap in any signal block) plus a trailing stop: activates once price is
+//            trailActPct above the fill, then trails trailOffPct (converted to ticks at entry) behind the best price.
+//            Signal exit still applies.
+// Blave ref: Type A signal (examples/btc_sma_cross) + a trailing-stop rule the Python applies on Close.
+//            Pine trails on intrabar HIGH via the broker emulator; the Python trails on bar Close — expect different exits.
+// Chart:     set symbol and timeframe by hand.
+// Costs:     commission 0.05 % per side = Blave FEE 0.0005; slippage 0 like Blave.
+// Not compiled by Blave Agent. Add to a chart, open the Strategy Tester, check the trade list before use.
+strategy("Blave: Signal + Trailing Stop", overlay = true, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type = strategy.commission.percent, commission_value = 0.05, slippage = 0, pyramiding = 1, process_orders_on_close = false, calc_on_every_tick = false)
+
+// --- inputs ---
+int   fastLen     = input.int(45, "Fast SMA", minval = 1)
+int   slowLen     = input.int(100, "Slow SMA", minval = 2)
+float trailActPct = input.float(1.0, "Activate trail at % above entry", minval = 0.0, step = 0.1)
+float trailOffPct = input.float(2.0, "Trail offset % (fixed at entry)", minval = 0.01, step = 0.1)
+
+// --- signal ---
+float smaFast = ta.sma(close, fastLen)
+float smaSlow = ta.sma(close, slowLen)
+bool longState = smaFast > smaSlow
+bool flatState = smaFast < smaSlow
+
+// --- orders ---
+if longState and strategy.position_size == 0
+    strategy.entry("L", strategy.long)
+// strategy.exit trail_points / trail_offset are in TICKS (not percent, not price): convert once from the fill price.
+// Re-issued every bar with the same id so the order stays anchored to strategy.position_avg_price (constant per trade).
+if strategy.position_size > 0
+    float avgPrice  = strategy.position_avg_price
+    int   actTicks  = math.round(avgPrice * trailActPct / 100 / syminfo.mintick)
+    int   offTicks  = math.round(avgPrice * trailOffPct / 100 / syminfo.mintick)
+    strategy.exit("L-trail", from_entry = "L", trail_points = actTicks, trail_offset = offTicks)
+if flatState and strategy.position_size > 0
+    strategy.close("L")
+
+// --- plots ---
+plot(smaFast, "SMA fast", color = color.blue)
+plot(smaSlow, "SMA slow", color = color.orange)

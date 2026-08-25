@@ -1,0 +1,42 @@
+//@version=6
+// Blave Agent export template — TradingView Pine Script v6
+// Template:  session_filter
+// Logic:     SMA-state entry (swap in any signal block) allowed only inside a trading session; the position is
+//            flattened at the close of the session's last bar (Blave exec_at_close / txf_settlement_mask style).
+// Blave ref: examples/txf_ma_1m/strategy.py (signal + settle mask) — contract roll has no Pine equivalent;
+//            use the exchange's continuous contract (e.g. TXF1!) so the data feed handles it.
+// Chart:     intraday timeframe. The session string is interpreted in the CHART SYMBOL's exchange timezone
+//            (TAIFEX = Asia/Taipei, Binance = UTC); Blave TW data is Asia/Taipei.
+// Costs:     commission 0.05 % per side; change to strategy.commission.cash_per_contract for futures if the
+//            Python FEE was a per-contract amount.
+// Not compiled by Blave Agent. Add to a chart, open the Strategy Tester, check the trade list before use.
+strategy("Blave: Session Filter", overlay = true, initial_capital = 1000000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type = strategy.commission.percent, commission_value = 0.05, slippage = 0, pyramiding = 1, process_orders_on_close = false, calc_on_every_tick = false)
+
+// --- inputs ---
+string sessionStr = input.session("0845-1345:23456", "Session (exchange time, days 2-6 = Mon-Fri)")
+int    fastLen    = input.int(60, "Fast SMA", minval = 1)
+int    slowLen    = input.int(240, "Slow SMA", minval = 2)
+
+// --- signal ---
+// time(timeframe, session) returns na for a bar that opens outside the session.
+bool inSession      = not na(time(timeframe.period, sessionStr))
+// Last bar of the session: this bar is inside, the next bar (bars_back = -1 looks one bar ahead) is not.
+bool lastSessionBar = inSession and na(time(timeframe.period, sessionStr, bars_back = -1))
+float smaFast = ta.sma(close, fastLen)
+float smaSlow = ta.sma(close, slowLen)
+bool longState = smaFast > smaSlow
+bool flatState = smaFast < smaSlow
+
+// --- orders ---
+// No new entries on the last session bar (the fill would land on the next session's first bar).
+if inSession and not lastSessionBar and longState and strategy.position_size == 0
+    strategy.entry("L", strategy.long)
+// Signal exit fills at the next bar's open as usual. On the last session bar, immediately = true fills at this
+// bar's close instead — the Pine equivalent of Blave's exec_at_close settlement exit.
+if strategy.position_size > 0 and (flatState or lastSessionBar)
+    strategy.close("L", immediately = lastSessionBar)
+
+// --- plots ---
+plot(smaFast, "SMA fast", color = color.blue)
+plot(smaSlow, "SMA slow", color = color.orange)
+bgcolor(inSession ? color.new(color.gray, 90) : na, title = "Session")

@@ -1,0 +1,39 @@
+{ ============================================================================
+  Blave export — MultiCharts PowerLanguage signal (classic MC, not .NET)
+  Template : rsi_mean_reversion (long only, dead-zone exit)
+  Blave src: RSI column in _add_indicators; compute_signals:
+               signal[rsi < BUY_TH] = 1.0 ; signal[rsi > EXIT_TH] = 0.0 ; else nan
+  Logic    : enter long when RSI is oversold, exit when it recovers above
+             ExitLevel. Between the two levels: hold (Blave nan) — no statement.
+  Indicator: RSI(Close, Len) is Wilder-smoothed. A pandas RSI built from
+             .ewm(alpha=1/n) matches after warm-up; one built from simple
+             rolling means does NOT — levels will differ. State this if the
+             Blave code used rolling means.
+  Timing   : decision at bar close, fill at next bar open.
+  Not in code: resolution, MaxBarsBack (>= Len * 3 for RSI to settle),
+             commission/slippage.
+  Generated from a template — compile and backtest inside MultiCharts before use.
+  ============================================================================ }
+
+Inputs:
+    Len(14),
+    BuyLevel(30),          // Blave BUY_TH
+    ExitLevel(55),         // Blave EXIT_TH  (must be > BuyLevel)
+    Qty(1);
+
+Variables:
+    RSIval(0);
+
+// --- indicators ---
+RSIval = RSI(Close, Len);
+
+// --- signal ---
+Condition1 = RSIval < BuyLevel;     // Blave: signal = 1.0
+Condition2 = RSIval > ExitLevel;    // Blave: signal = 0.0
+
+// --- orders ---
+if Condition1 and MarketPosition <= 0 then
+    Buy ("LE") Qty contracts next bar at market;
+
+if Condition2 and MarketPosition = 1 then
+    Sell ("LX") next bar at market;

@@ -1,0 +1,60 @@
+{ ============================================================================
+  Blave export — MultiCharts PowerLanguage signal (classic MC, not .NET)
+  Template : trailing_stop (percent trailing stop off the highest high since entry)
+  Blave src: compute_signals tracking a running max since entry and setting 0.0
+             when Close < max * (1 - TRAIL_PCT).
+  Logic    : HighSinceEntry is tracked in a Variable and reset on the entry bar
+             (BarsSinceEntry = 0). The exit is a resting STOP order at
+             HighSinceEntry * (1 - TrailPct/100), re-submitted every bar → MC
+             fills it intrabar at that price; Blave decided at bar close and
+             filled at next open. MC will exit earlier / at better prices.
+  UNVERIFIED: BarsSinceEntry = 0 on the bar where the entry fills (EasyLanguage
+             convention; the MC wiki only says "bars since the initial entry").
+             If MC returns 1 on that bar, the reset fires one bar late and the
+             first bar's High is missed — harmless for the stop level.
+  Alternative (currency-based, whole-position, intra-bar):
+               SetStopPosition;  SetPercentTrailing(ProfitFloor, Pct);
+             — trails a PROFIT amount after profit reached ProfitFloor, not a
+             price percent; not the same rule as Blave's. SetDollarTrailing(amt)
+             trails by a fixed currency amount.
+  Timing   : entry at next bar open; trailing exit intrabar.
+  Not in code: resolution, MaxBarsBack, commission/slippage.
+  Generated from a template — compile and backtest inside MultiCharts before use.
+  ============================================================================ }
+
+Inputs:
+    FastLen(20),
+    SlowLen(50),
+    TrailPct(3.0),         // Blave TRAIL_PCT (percent)
+    Qty(1);
+
+Variables:
+    FastMA(0),
+    SlowMA(0),
+    HighSinceEntry(0),
+    TrailStop(0);
+
+// --- indicators ---
+FastMA = Average(Close, FastLen);
+SlowMA = Average(Close, SlowLen);
+
+// --- signal ---
+Condition1 = FastMA > SlowMA;      // entry state (replace with the strategy's own)
+Condition2 = FastMA < SlowMA;      // signal exit
+
+// --- orders ---
+if Condition1 and MarketPosition <= 0 then
+    Buy ("LE") Qty contracts next bar at market;
+
+if MarketPosition = 1 then begin
+    if BarsSinceEntry = 0 then
+        HighSinceEntry = High
+    else
+        HighSinceEntry = MaxList(HighSinceEntry, High);
+    TrailStop = HighSinceEntry * (1 - TrailPct / 100);
+    Sell ("TS") from entry ("LE") next bar at TrailStop stop;
+    if Condition2 then
+        Sell ("LX") from entry ("LE") next bar at market;
+end
+else
+    HighSinceEntry = 0;

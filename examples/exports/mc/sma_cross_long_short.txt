@@ -1,0 +1,38 @@
+{ ============================================================================
+  Blave export — MultiCharts PowerLanguage signal (classic MC, not .NET)
+  Template : sma_cross_long_short (stop-and-reverse)
+  Blave src: SMA crossover with signal +1.0 / -1.0 (always in the market)
+  Logic    : long while fast SMA > slow SMA, short while fast SMA < slow SMA.
+             A Buy while short REVERSES to long N (MC does not flatten first);
+             SellShort while long reverses to short. That is exactly Blave's
+             +1 → -1 flip at the next bar open.
+  Timing   : decision at bar close, fill at next bar open.
+  Not in code: resolution, MaxBarsBack (>= SlowLen), commission/slippage,
+             pyramiding OFF (Strategy Properties).
+  Generated from a template — compile and backtest inside MultiCharts before use.
+  ============================================================================ }
+
+Inputs:
+    FastLen(20),
+    SlowLen(50),
+    Qty(1);
+
+Variables:
+    FastMA(0),
+    SlowMA(0);
+
+// --- indicators ---
+FastMA = Average(Close, FastLen);
+SlowMA = Average(Close, SlowLen);
+
+// --- signal ---
+Condition1 = FastMA > SlowMA;      // Blave: signal = +1.0
+Condition2 = FastMA < SlowMA;      // Blave: signal = -1.0
+
+// --- orders ---
+// Entry in the opposite direction reverses the open position in one fill.
+if Condition1 and MarketPosition <= 0 then
+    Buy ("LE") Qty contracts next bar at market;
+
+if Condition2 and MarketPosition >= 0 then
+    SellShort ("SE") Qty contracts next bar at market;

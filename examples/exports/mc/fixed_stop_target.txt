@@ -1,0 +1,55 @@
+{ ============================================================================
+  Blave export — MultiCharts PowerLanguage signal (classic MC, not .NET)
+  Template : fixed_stop_target (entry + percent stop-loss + percent profit target)
+  Blave src: any Type A whose compute_signals sets 0.0 when
+               Close <= entry * (1 - STOP_PCT)  or  Close >= entry * (1 + TARGET_PCT)
+  Logic    : the entry here is an SMA state (swap for the strategy's own
+             condition). Exits are PRICE orders off EntryPrice, because Blave
+             stops are percent-of-price. They are resting stop / limit orders
+             re-submitted every bar, so MC fills them INTRABAR at the stop or
+             limit price (worst case at next open on a gap). Blave only checks
+             the stop at bar close and fills at the next open — MC's exits fire
+             earlier and at better prices. Expect fewer/smaller losses in MC.
+  Alternative (currency-based, evaluated intra-bar, whole-position basis):
+               SetStopPosition;  SetStopLoss(500);  SetProfitTarget(1000);
+             Amounts are in the symbol's currency for the WHOLE position unless
+             SetStopContract precedes them. Tick-based: SetStopLoss_pt(N).
+  Timing   : entry decision at bar close → next bar open; exits intrabar.
+  Not in code: resolution, MaxBarsBack, commission/slippage.
+  Generated from a template — compile and backtest inside MultiCharts before use.
+  ============================================================================ }
+
+Inputs:
+    FastLen(20),
+    SlowLen(50),
+    StopPct(2.0),          // Blave STOP_PCT   (percent, 2.0 = 2%)
+    TargetPct(4.0),        // Blave TARGET_PCT (percent)
+    Qty(1);
+
+Variables:
+    FastMA(0),
+    SlowMA(0),
+    StopPrice(0),
+    TargetPrice(0);
+
+// --- indicators ---
+FastMA = Average(Close, FastLen);
+SlowMA = Average(Close, SlowLen);
+
+// --- signal ---
+Condition1 = FastMA > SlowMA;            // entry state (replace with the strategy's own)
+Condition2 = FastMA < SlowMA;            // signal exit
+
+// --- orders ---
+if Condition1 and MarketPosition <= 0 then
+    Buy ("LE") Qty contracts next bar at market;
+
+// Exits: only meaningful while long. EntryPrice is the fill of the open position.
+if MarketPosition = 1 then begin
+    StopPrice   = EntryPrice * (1 - StopPct / 100);
+    TargetPrice = EntryPrice * (1 + TargetPct / 100);
+    Sell ("SL") from entry ("LE") next bar at StopPrice stop;
+    Sell ("TP") from entry ("LE") next bar at TargetPrice limit;
+    if Condition2 then
+        Sell ("LX") from entry ("LE") next bar at market;
+end;

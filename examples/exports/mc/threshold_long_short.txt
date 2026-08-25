@@ -1,0 +1,64 @@
+{ ============================================================================
+  Blave export — MultiCharts PowerLanguage signal (classic MC, not .NET)
+  Template : threshold_long_short (four independent thresholds, flat band,
+             stateful — the references/strategy-code.md long/short pattern)
+  Blave src: compute_signals loop with pos in (+1, 0, -1):
+               exit first : pos=1 and x < SELL_TH → 0 ; pos=-1 and x > COVER_TH → 0
+               then entry : pos=0 and x > BUY_TH → 1 ; x < SHORT_TH → -1
+  Logic    : MarketPosition IS the loop state. Exits are listed before entries
+             so a gap straight across the band exits and re-enters on the same
+             bar decision (MC executes the exit, re-sorts, then the entry —
+             both fill at the next bar open, matching Blave's flip).
+             Indicator here is a z-score of Close vs its SMA; replace with the
+             strategy's own (must be plain OHLCV math — see references).
+  Constraints (per Blave rules): BuyTh > SellTh, CoverTh > ShortTh, BuyTh > ShortTh.
+             SellTh vs CoverTh order is a design choice (flat band vs hold zone).
+  Indicator note: StdDev(x, n) is a POPULATION std in EasyLanguage; pandas
+             rolling().std() defaults to sample (ddof=1). Z-scores differ by
+             sqrt(n/(n-1)) — levels will not match exactly.
+  Timing   : decision at bar close, fill at next bar open.
+  Not in code: resolution, MaxBarsBack (>= ZLen), commission/slippage,
+             pyramiding OFF.
+  Generated from a template — compile and backtest inside MultiCharts before use.
+  ============================================================================ }
+
+Inputs:
+    ZLen(50),
+    BuyTh(0.8),            // enter long   when z > BuyTh
+    SellTh(0.2),           // exit long    when z < SellTh
+    CoverTh(-0.2),         // exit short   when z > CoverTh
+    ShortTh(-0.8),         // enter short  when z < ShortTh
+    Qty(1);
+
+Variables:
+    Mean(0),
+    Sd(0),
+    Z(0);
+
+// --- indicators ---
+Mean = Average(Close, ZLen);
+Sd   = StdDev(Close, ZLen);
+if Sd > 0 then
+    Z = (Close - Mean) / Sd
+else
+    Z = 0;
+
+// --- signal ---
+Condition1 = Z > BuyTh;       // long entry
+Condition2 = Z < SellTh;      // long exit
+Condition3 = Z > CoverTh;     // short exit
+Condition4 = Z < ShortTh;     // short entry
+
+// --- orders ---
+// 1) exits first
+if MarketPosition = 1 and Condition2 then
+    Sell ("LX") next bar at market;
+if MarketPosition = -1 and Condition3 then
+    BuyToCover ("SX") next bar at market;
+
+// 2) entries — a Buy while short reverses in one fill, which is the same
+//    net result as Blave's exit-then-enter on one bar.
+if MarketPosition <= 0 and Condition1 then
+    Buy ("LE") Qty contracts next bar at market;
+if MarketPosition >= 0 and Condition4 then
+    SellShort ("SE") Qty contracts next bar at market;

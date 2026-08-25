@@ -1,0 +1,58 @@
+{ ============================================================================
+  Blave export — MultiCharts PowerLanguage signal (classic MC, not .NET)
+  Template : session_time_filter (intraday: trade only inside a window, go flat
+             before the session ends)
+  Blave src: intraday Type A that masks signals outside a Taipei time window and
+             forces 0.0 on the last bars of the day (e.g. TXF day session).
+  TIME CONVENTION — convert before typing any HHmm value:
+             Blave index = bar OPEN time, UTC (13:25–13:30 Taipei bar = 05:25Z).
+             MC `Time`   = bar CLOSE time, chart/exchange time (same bar = 1330).
+             TXF day session 08:45–13:45 Taipei → first bar Time = 0846 (1-min),
+             last bar Time = 1345.
+  Flat rule: `FlatTime` is compared against bar-close time and the exit fires
+             `next bar at market`, so pick FlatTime a few bars BEFORE the session
+             end (1340 on a 1-min chart exits at the open of the 13:41 bar).
+             Do NOT use SetExitOnClose (backtest-only in MC) or
+             `this bar on close` (live/backtest mismatch) for this.
+  Timing   : decision at bar close, fill at next bar open.
+  Not in code: resolution, session template (QuoteManager), MaxBarsBack,
+             commission/slippage.
+  Generated from a template — compile and backtest inside MultiCharts before use.
+  ============================================================================ }
+
+Inputs:
+    FastLen(20),
+    SlowLen(50),
+    StartTime(0900),       // HHmm, chart time, bar-close basis — no trades before
+    EndTime(1300),         // HHmm — no NEW entries at or after this
+    FlatTime(1340),        // HHmm — force flat from this bar-close onward
+    Qty(1);
+
+Variables:
+    FastMA(0),
+    SlowMA(0),
+    InWindow(false),
+    MustFlat(false);
+
+// --- indicators ---
+FastMA = Average(Close, FastLen);
+SlowMA = Average(Close, SlowLen);
+
+// --- signal ---
+InWindow = Time >= StartTime and Time < EndTime;
+MustFlat = Time >= FlatTime;
+Condition1 = FastMA > SlowMA and InWindow;         // Blave: signal = 1.0 inside window
+Condition2 = FastMA < SlowMA;                      // Blave: signal = 0.0
+
+// --- orders ---
+// Flat rule first: it must win over any entry generated on the same bar.
+if MustFlat and MarketPosition <> 0 then begin
+    Sell ("EOD_LX") next bar at market;
+    BuyToCover ("EOD_SX") next bar at market;
+end;
+
+if Condition1 and MarketPosition <= 0 and MustFlat = false then
+    Buy ("LE") Qty contracts next bar at market;
+
+if Condition2 and MarketPosition = 1 then
+    Sell ("LX") next bar at market;

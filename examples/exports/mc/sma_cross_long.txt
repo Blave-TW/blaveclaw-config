@@ -1,0 +1,39 @@
+{ ============================================================================
+  Blave export — MultiCharts PowerLanguage signal (classic MC, not .NET)
+  Template : sma_cross_long
+  Blave src: examples/btc_sma_cross/strategy.py (BTCUSDT 1h) — same shape as
+             examples/tsmc_ma and examples/txf_ma_1m (minus settlement mask)
+  Logic    : long while fast SMA > slow SMA, flat while fast SMA < slow SMA.
+             Blave writes signal=1.0 / 0.0 as STATE, not as a cross event, so
+             the conditions below use > and <, gated by MarketPosition.
+  Timing   : decision at bar close, fill at next bar open (Blave default).
+  Not in code: chart resolution, MaxBarsBack (>= SlowLen), commission/slippage
+             (Strategy Properties). Blave FEE / fractional sizing not carried.
+  Generated from a template — compile and backtest inside MultiCharts before use.
+  ============================================================================ }
+
+Inputs:
+    FastLen(45),          // Blave SMA_FAST
+    SlowLen(100),         // Blave SMA_SLOW
+    Qty(1);               // fixed size; Blave sizes as a fraction of equity
+
+Variables:
+    FastMA(0),
+    SlowMA(0);
+
+// --- indicators ---
+// Call series functions unconditionally, every bar, before any branch.
+FastMA = Average(Close, FastLen);
+SlowMA = Average(Close, SlowLen);
+
+// --- signal ---
+Condition1 = FastMA > SlowMA;      // Blave: signal = 1.0
+Condition2 = FastMA < SlowMA;      // Blave: signal = 0.0
+// FastMA = SlowMA → neither: hold (Blave nan)
+
+// --- orders ---
+if Condition1 and MarketPosition <= 0 then
+    Buy ("LE") Qty contracts next bar at market;
+
+if Condition2 and MarketPosition = 1 then
+    Sell ("LX") next bar at market;

@@ -1,0 +1,32 @@
+//@version=6
+// Blave Agent export template — TradingView Pine Script v6
+// Template:  rsi_mean_reversion
+// Logic:     long when RSI drops below the entry threshold, flat when RSI rises above the exit threshold;
+//            hold in between (dead zone) — the same two-threshold shape as examples/btc_ti_5min (ENTRY_TH / EXIT_TH).
+// Blave ref: examples/btc_ti_5min/strategy.py (threshold on an indicator column), RSI via ta.rsi
+// Chart:     set symbol and timeframe by hand. overlay = false: RSI draws in its own pane.
+// Costs:     commission 0.05 % per side = Blave FEE 0.0005; slippage 0 like Blave.
+// Not compiled by Blave Agent. Add to a chart, open the Strategy Tester, check the trade list before use.
+strategy("Blave: RSI Mean Reversion", overlay = false, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type = strategy.commission.percent, commission_value = 0.05, slippage = 0, pyramiding = 1, process_orders_on_close = false, calc_on_every_tick = false)
+
+// --- inputs ---
+int   rsiLen  = input.int(14, "RSI length", minval = 2)          // ta.rsi length must be simple int: an input is fine, a series is not
+float entryTh = input.float(30.0, "Enter long when RSI below", minval = 0.0, maxval = 100.0, step = 1.0)
+float exitTh  = input.float(55.0, "Exit long when RSI above", minval = 0.0, maxval = 100.0, step = 1.0)
+
+// --- signal ---
+float rsiVal = ta.rsi(close, rsiLen)      // Wilder RSI (RMA-smoothed). A pandas RSI built with ewm(alpha=1/n) matches; a simple-mean RSI does not.
+bool enterLong = rsiVal < entryTh         // Python: signal[RSI < ENTRY_TH] = 1.0
+bool exitLong  = rsiVal > exitTh          // Python: signal[RSI > EXIT_TH] = 0.0
+// Between the thresholds nothing fires = hold (Python nan).
+
+// --- orders ---
+if enterLong and strategy.position_size == 0
+    strategy.entry("L", strategy.long)
+if exitLong and strategy.position_size > 0
+    strategy.close("L")
+
+// --- plots ---
+plot(rsiVal, "RSI", color = color.blue)
+hline(entryTh, "Entry threshold", color = color.green)
+hline(exitTh, "Exit threshold", color = color.red)

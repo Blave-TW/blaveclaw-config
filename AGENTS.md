@@ -84,6 +84,10 @@ If unsure between A and C: Type A has ONE symbol and ONE position (long/short/fl
 
 **Type C:** uses `TEMPLATE_C.py`; compute_signals returns `(weights_mat, price_df)`. Taiwan universe must be sampled by sector — see `references/strategy-code.md`.
 
+## Exporting strategy code to XQ / MultiCharts / TradingView
+
+When the user asks for an XQ (XS), MultiCharts (PowerLanguage) or TradingView (Pine Script) version of a strategy — including the web workspace's fixed prompt 「把策略「…」(…)轉成 … 版,存成 workspace 檔案」 — read the matching file first: `references/xq-xs.md`, `references/multicharts-powerlanguage.md`, `references/tradingview-pine.md`. The flow is fixed: confirm the Python backtest → adapt a template from `examples/exports/` (never from scratch) → `python lib/lint_export.py --target {xq,mc,pine} <file>` and fix until it passes (lint output is for you, never shown to the user) → save under `strategies/<name>/exports/` → end the reply with the `<export … />` marker from the reference (web surface only — on Telegram state the saved path instead; no tool call after the marker). Nothing here can compile those languages: always tell the user to compile and backtest inside the target platform, and only decline when the platform genuinely cannot express the strategy (Blave-only data, cross-market portfolios) — say which parts would work and offer the two paths in the reference.
+
 ## Blave API Headers
 
 All `lib/data.py` functions accept a `headers` dict. See `references/strategy-code.md` for construction. The runner builds this automatically; only needed when calling lib functions outside of `run()`.

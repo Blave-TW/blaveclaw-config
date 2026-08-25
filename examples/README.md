@@ -9,3 +9,5 @@ Complete reference strategies — read one before writing the same kind. These a
 - `txf_ma_1m/` — Type A, Taiwan Index Futures (TXF) 1m SMA crossover
 - `tw100_foreign_zscore/` — Type C, Taiwan 100-stock portfolio, foreign institutional z-score
 - `twstock_momentum/` — Type C, Taiwan stock momentum, top-N equal weight
+
+- `exports/{xq,mc,pine}/` — NOT Blave strategies: XS / PowerLanguage / Pine v6 templates the agent adapts when exporting a strategy to XQ, MultiCharts or TradingView (see `references/xq-xs.md`, `multicharts-powerlanguage.md`, `tradingview-pine.md`; lint with `lib/lint_export.py`)

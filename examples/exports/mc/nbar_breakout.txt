@@ -1,0 +1,42 @@
+{ ============================================================================
+  Blave export — MultiCharts PowerLanguage signal (classic MC, not .NET)
+  Template : nbar_breakout (Donchian-style, long only)
+  Blave src: Close > rolling(EntryLen).max() of High, shifted 1 → signal 1.0;
+             Close < rolling(ExitLen).min() of Low, shifted 1 → signal 0.0.
+  Logic    : Highest(High, N)[1] = highest high of the N bars BEFORE this bar,
+             which is Blave's rolling(N).max().shift(1). Without [1] the current
+             bar is inside the window and Close can never exceed it.
+  Timing   : decision at bar close, fill at next bar open — NOT an intrabar
+             stop-entry at the channel (Blave has no intrabar fills). If the
+             user wants the classic "buy stop at the channel" version, replace
+             the Buy line with:
+               Buy ("LE") Qty contracts next bar at Highest(High, EntryLen) stop;
+             and say that the Blave backtest no longer corresponds.
+  Not in code: resolution, MaxBarsBack (>= EntryLen and ExitLen + 1),
+             commission/slippage.
+  Generated from a template — compile and backtest inside MultiCharts before use.
+  ============================================================================ }
+
+Inputs:
+    EntryLen(20),
+    ExitLen(10),
+    Qty(1);
+
+Variables:
+    UpperCh(0),
+    LowerCh(0);
+
+// --- indicators ---
+UpperCh = Highest(High, EntryLen)[1];   // prior N bars, excludes current
+LowerCh = Lowest(Low, ExitLen)[1];
+
+// --- signal ---
+Condition1 = Close > UpperCh;    // breakout  → Blave signal = 1.0
+Condition2 = Close < LowerCh;    // breakdown → Blave signal = 0.0
+
+// --- orders ---
+if Condition1 and MarketPosition <= 0 then
+    Buy ("LE") Qty contracts next bar at market;
+
+if Condition2 and MarketPosition = 1 then
+    Sell ("LX") next bar at market;

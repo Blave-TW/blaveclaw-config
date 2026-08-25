@@ -1,0 +1,32 @@
+//@version=6
+// Blave Agent export template — TradingView Pine Script v6
+// Template:  sma_cross_long
+// Logic:     long while SMA fast > SMA slow, flat while SMA fast < SMA slow (state-based, not event-based)
+// Blave ref: examples/btc_sma_cross/strategy.py  (signal 1.0 / 0.0, fill at next bar open)
+// Chart:     set the symbol and timeframe by hand (Blave: BTCUSDT 1h) — they are not part of the script.
+// Costs:     commission 0.05 % per side = Blave FEE 0.0005; slippage 0 like Blave.
+// Not compiled by Blave Agent. Add to a chart, open the Strategy Tester, check the trade list before use.
+strategy("Blave: SMA Cross Long", overlay = true, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type = strategy.commission.percent, commission_value = 0.05, slippage = 0, pyramiding = 1, process_orders_on_close = false, calc_on_every_tick = false)
+
+// --- inputs ---
+int fastLen = input.int(45, "Fast SMA", minval = 1)
+int slowLen = input.int(100, "Slow SMA", minval = 2)
+
+// --- signal ---
+float smaFast = ta.sma(close, fastLen)     // Python: df['Close'].rolling(fast).mean()
+float smaSlow = ta.sma(close, slowLen)
+bool longState = smaFast > smaSlow         // Python: signal[SMA_F > SMA_S] = 1.0
+bool flatState = smaFast < smaSlow         // Python: signal[SMA_F < SMA_S] = 0.0
+// Equal or na (warm-up) → neither branch fires = hold, same as Python nan.
+
+// --- orders ---
+// Orders are created at bar close and filled at the next bar's open (strategy() default) — identical to Blave's fill model.
+// pyramiding = 1 makes the repeated "long" state while already long a no-op.
+if longState and strategy.position_size == 0
+    strategy.entry("L", strategy.long)
+if flatState and strategy.position_size > 0
+    strategy.close("L")
+
+// --- plots ---
+plot(smaFast, "SMA fast", color = color.blue)
+plot(smaSlow, "SMA slow", color = color.orange)

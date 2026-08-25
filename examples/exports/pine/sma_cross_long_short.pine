@@ -1,0 +1,44 @@
+//@version=6
+// Blave Agent export template — TradingView Pine Script v6
+// Template:  sma_cross_long_short
+// Logic:     long while SMA fast > SMA slow, short while SMA fast < SMA slow — always in the market, flips directly.
+//            For a Blave four-threshold long/short with a flat band (strategy-code.md), keep the four branches at the
+//            bottom of the orders block and delete the two flip branches.
+// Blave ref: examples/btc_sma_cross/strategy.py with signal -1.0 on the death-cross side
+// Chart:     set symbol and timeframe by hand; shorting needs a symbol the user can short (perp / futures / margin).
+// Costs:     commission 0.05 % per side = Blave FEE 0.0005; slippage 0 like Blave.
+// Not compiled by Blave Agent. Add to a chart, open the Strategy Tester, check the trade list before use.
+strategy("Blave: SMA Cross Long/Short", overlay = true, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type = strategy.commission.percent, commission_value = 0.05, slippage = 0, pyramiding = 1, process_orders_on_close = false, calc_on_every_tick = false)
+
+// --- inputs ---
+int fastLen = input.int(45, "Fast SMA", minval = 1)
+int slowLen = input.int(100, "Slow SMA", minval = 2)
+
+// --- signal ---
+float smaFast = ta.sma(close, fastLen)
+float smaSlow = ta.sma(close, slowLen)
+bool longState  = smaFast > smaSlow        // Python: signal[SMA_F > SMA_S] = 1.0
+bool shortState = smaFast < smaSlow        // Python: signal[SMA_F < SMA_S] = -1.0
+
+// --- orders ---
+// strategy.entry() in the opposite direction reverses an open position in one call (close + open, one fill).
+// position_size <= 0 guards the long branch so a repeated long state is a no-op; same for the short side.
+if longState and strategy.position_size <= 0
+    strategy.entry("L", strategy.long)
+if shortState and strategy.position_size >= 0
+    strategy.entry("S", strategy.short)
+
+// Four-threshold variant (flat band between exits): replace the two branches above with these four,
+// where enterLong / exitLong / enterShort / exitShort are the bool series built from BUY_TH / SELL_TH / SHORT_TH / COVER_TH.
+// if exitLong and strategy.position_size > 0
+//     strategy.close("L")
+// if exitShort and strategy.position_size < 0
+//     strategy.close("S")
+// if enterLong and strategy.position_size <= 0
+//     strategy.entry("L", strategy.long)
+// if enterShort and strategy.position_size >= 0
+//     strategy.entry("S", strategy.short)
+
+// --- plots ---
+plot(smaFast, "SMA fast", color = color.blue)
+plot(smaSlow, "SMA slow", color = color.orange)
