@@ -9,6 +9,9 @@ Usage:
     python3 manager/manager.py [--lookback 365] [--notify]
     python3 manager/manager.py --apply   # actually write portfolio_config.json
     python3 manager/manager.py --allocator my_method   # use allocators/my_method/
+    python3 manager/manager.py --members a,b --json manager/proposal.json
+        # subset of strategies + machine-readable proposal (what the workspace
+        # page's 跑優化 runs; --params-json '{"k": v}' overrides an allocator's PARAMS)
 
 Default is DRY-RUN: weights are computed and printed but portfolio_config.json
 is NOT touched. Pass --apply only after the user has confirmed the new weights.
@@ -22,7 +25,7 @@ account_value — that is the live position-sizing base (see lib/portfolio.py:
 contribution = account_value * leverage * weight * position). To change capital,
 edit portfolio_config.json["account_value"] directly as a separate, explicit step.
 """
-import argparse, json, sys
+import argparse, json, os, sys, time
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -112,6 +115,32 @@ def optimize_weights(ret_df, lookback):
     return {names[i]: round(float(w_opt[i]), 4) for i in range(n)}
 
 
+def _fail(msg, code=2):
+    """Bad input: reason as the LAST stderr line, exit 2 (3 = not enough
+    history) — the workspace page's command listener shows exactly that line."""
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def _atomic_json(path, obj):
+    """tmp + os.replace so a reader never sees a half-written file. default=str:
+    a user allocator's PARAMS may hold a tuple / numpy scalar — failing here,
+    after the whole run, would throw the result away over a display value."""
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(obj, f, indent=2, default=str)
+    # Windows: os.replace fails while another process (the reporter, every
+    # 10s during a run) has the target open — transient, retry briefly.
+    for attempt in range(5):
+        try:
+            os.replace(tmp, path)
+            return
+        except OSError:
+            if attempt == 4:
+                raise
+            time.sleep(0.3)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Blave Agent Strategy Manager')
     parser.add_argument('--lookback',   type=int,   default=LOOKBACK,   help=f'Lookback window in days (default {LOOKBACK})')
@@ -119,14 +148,32 @@ def main():
     parser.add_argument('--notify',     action='store_true',             default=NOTIFY, help='Send Telegram notification after update')
     parser.add_argument('--apply',      action='store_true', help='Write the new weights to portfolio_config.json (default: dry-run, file untouched)')
     parser.add_argument('--allocator',  type=str, default=None, help='Weight with allocators/<name>/allocator.py instead of the built-in slope/std optimiser')
+    parser.add_argument('--members',    type=str, default=None, help='Comma-separated strategy names to include (default: every strategy with a backtest)')
+    parser.add_argument('--params-json', type=str, default=None, help="JSON object overriding the allocator's PARAMS (declared keys only; built-in takes none)")
+    parser.add_argument('--json',       type=str, default=None, help='Also write the proposal as JSON to this path (written only on success)')
     args = parser.parse_args()
 
     np.random.seed(42)
 
-    valid = load_all_stats()
+    # Bad input exits non-zero with the reason as the LAST stderr line — the
+    # workspace page's command listener surfaces exactly that line.
+    members = [m.strip() for m in args.members.split(',') if m.strip()] if args.members else None
+    if args.members is not None and not members:
+        _fail('no members given')
+    try:
+        param_overrides = json.loads(args.params_json) if args.params_json else {}
+    except ValueError as e:
+        _fail(f'--params-json is not valid JSON: {e}')
+    if param_overrides and not args.allocator:
+        _fail(f'built-in slope/std takes no PARAMS (got {sorted(param_overrides)}); '
+              f'use --lookback / --target-vol')
+
+    try:
+        valid = load_all_stats(only=members)
+    except ValueError as e:
+        _fail(str(e))
     if not valid:
-        print('No strategies with daily_returns found. Run backtests first.')
-        return
+        _fail('No strategies with daily_returns found. Run backtests first.')
 
     # Build aligned daily returns matrix
     series_map = {}
@@ -142,6 +189,10 @@ def main():
     # the built-in, or a typo would quietly trade on different weights.
     if args.allocator:
         mod = allocator_lib.load(args.allocator)
+        try:
+            allocator_lib.apply_params(mod, param_overrides)
+        except (ValueError, TypeError) as e:
+            _fail(str(e))
         method = getattr(mod, 'DISPLAY_NAME', args.allocator)
         weights = allocator_lib.clean(
             mod.allocate(ret_df, args.lookback), list(ret_df.columns)
@@ -208,6 +259,30 @@ def main():
     if args.apply:
         with open(CONFIG_PATH, 'w') as f:
             json.dump(cfg, f, indent=2)
+
+    if args.json:
+        # The proposal the workspace page renders. Independent of --apply on
+        # purpose: the page only ever asks for a dry-run, applying stays a
+        # separate explicit step (agent chat / --apply).
+        params = {'lookback': args.lookback, 'target_vol': args.target_vol}
+        if args.allocator and isinstance(getattr(mod, 'PARAMS', None), dict):
+            params.update(mod.PARAMS)
+        proposal = {
+            'members':        list(ret_df.columns),
+            'allocator':      args.allocator,
+            'params':         params,
+            'weights':        weights,
+            'sharpe':         round(port_sharpe, 4),
+            'ann_vol_pct':    round(port_vol, 2),
+            'target_vol_pct': round(args.target_vol * 100, 1),
+            'leverage':       leverage,
+            'slope_std':      round(port_score, 4),
+            'history_days':   int(len(ret_df)),
+            'start':          ret_df.index[0].strftime('%Y-%m-%d'),
+            'end':            ret_df.index[-1].strftime('%Y-%m-%d'),
+            'computed_at':    int(time.time()),
+        }
+        _atomic_json(args.json, proposal)
 
     # Print summary
     print(f'\nBlave Agent Strategy Manager  (lookback={args.lookback}d, method={method})')

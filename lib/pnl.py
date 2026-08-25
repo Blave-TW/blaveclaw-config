@@ -19,9 +19,14 @@ def daily_returns_typeC(pf_series):
     return daily_returns_typeA(pf_series)
 
 
-def load_all_stats():
+def load_all_stats(only=None):
     """Load all strategy stats.json files that contain daily_returns.
     Returns {strategy_name: dict}.
+
+    `only` (list of names) restricts the result to those strategies — the
+    manager scripts' --members. A name with no usable stats.json raises rather
+    than silently dropping out: an optimiser that quietly weighted 3 of the 4
+    strategies you asked for would size live positions on the wrong set.
     """
     result = {}
     for path in glob.glob('strategies/*/stats.json'):
@@ -33,4 +38,9 @@ def load_all_stats():
                 result[name] = data
         except Exception:
             pass
+    if only is not None:
+        missing = [n for n in only if n not in result]
+        if missing:
+            raise ValueError(f'unknown strategies: {missing}')
+        result = {n: result[n] for n in only}
     return result

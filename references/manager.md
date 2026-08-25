@@ -32,6 +32,15 @@ python3 manager/manager.py [--lookback 365] [--target-vol 0.30] --apply    # wri
 
 `--allocator <name>`: weight with `allocators/<name>/allocator.py` instead of the built-in slope/std optimiser. `management_backtest.py` takes the same flag and writes its output to `allocators/<name>/` so each method keeps its own `stats.json` + `pnl.png`. Contract, validation rules, and the create → backtest → dry-run → apply workflow: **`references/allocator-code.md`**. The `--apply` confirmation rule below applies identically to allocator runs.
 
+Flags both scripts share (these are what the workspace page's 策略管理 tab drives; the agent can use them too):
+
+- `--members a,b,c` — restrict to those strategies (directory names under `strategies/`). Unknown name → exit 2, nothing written.
+- `--params-json '{"k": v}'` — override an allocator's `PARAMS` for this run (declared keys only; the built-in method takes none — its knobs are `--lookback` / `--target-vol`).
+- `manager.py --json PATH` — also write the dry-run proposal as JSON (weights, sharpe, leverage, `history_days`…). `management_backtest.py --progress PATH` — write `{day, total}` during the walk-forward. `stats.json` additionally carries `members`, `params`, `managed_cum` and `random_benchmark.band` (per-day p5/p50/p95 cumulative %).
+- Exit codes: 2 = bad input (reason is the last stderr line); `management_backtest.py` exits 3 when the union of member history is not longer than `--lookback`.
+
+The page writes `manager/proposal.json`, `manager/mgmt_job.json`, `manager/mgmt_progress.json` — never edit or delete them by hand.
+
 **manager.py never touches `account_value`.** It only writes `weights` and `leverage`. `account_value` is the live position-sizing base (`contribution = account_value * leverage * weight * position`), so changing capital is a separate, explicit action: edit `portfolio_config.json["account_value"]` by hand. There is intentionally no `--account` flag — updating weights must not be able to resize live positions.
 
 **`--apply` flag — protects live trading.** Default is dry-run: weights are computed and printed but `portfolio_config.json` is untouched, so a research run can never silently change the weights the live reconciler is trading on. The optimiser is seeded (`np.random.seed(42)`), so the `--apply` re-run produces exactly the weights shown in the dry-run (same stats.json inputs).

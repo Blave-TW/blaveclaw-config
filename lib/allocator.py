@@ -44,6 +44,25 @@ def load(name):
     return mod
 
 
+def apply_params(mod, overrides):
+    """Override the module's PARAMS from the caller (manager scripts'
+    --params-json, fed by the workspace page). Only keys the file already
+    declares are accepted — an unknown key is a typo that would otherwise run
+    the method with its defaults while the caller believes it changed them.
+    """
+    if not overrides:
+        return
+    if not isinstance(overrides, dict):
+        raise TypeError('params override must be a dict')
+    params = getattr(mod, 'PARAMS', None)
+    if not isinstance(params, dict):
+        raise ValueError('allocator declares no PARAMS dict to override')
+    unknown = set(overrides) - set(params)
+    if unknown:
+        raise ValueError(f'unknown PARAMS keys: {sorted(unknown)} (declared: {sorted(params)})')
+    params.update(overrides)
+
+
 def clean(raw, names):
     """Validate an allocate() return value and normalise it to sum 1.
 
@@ -115,5 +134,17 @@ if __name__ == '__main__':
         pass
     else:
         raise AssertionError('load() did not raise on a missing allocator')
+
+    import types
+    fake = types.SimpleNamespace(PARAMS={'k': 1, 'x': 2.0})
+    apply_params(fake, {'k': 5})
+    assert fake.PARAMS == {'k': 5, 'x': 2.0}, 'apply_params must update declared keys only'
+    for bad in ({'zz': 1}, 'k=1'):
+        try:
+            apply_params(fake, bad)
+        except (ValueError, TypeError):
+            pass
+        else:
+            raise AssertionError(f'apply_params accepted {bad!r}')
 
     print('lib/allocator.py self-check OK')

@@ -16,6 +16,13 @@ Usage:
     # optimiser; outputs default to allocators/my_method/ so each method keeps
     # its own stats.json + pnl.png the way each strategy does.
 
+    python3 manager/management_backtest.py --members a,b --progress manager/mgmt_progress.json
+    # subset of strategies + a progress file the workspace page polls (what its
+    # 跑回測 runs; --params-json '{"k": v}' overrides an allocator's PARAMS)
+
+Exit codes: 2 = bad input (unknown strategy / PARAMS key / JSON), 3 = not
+enough history for the lookback. The reason is the last stderr line.
+
 This is the gate for using ANY weighting method live: it answers "does this
 method beat randomly-drawn weights out of sample", which a single in-sample
 weight calculation cannot.
@@ -26,7 +33,7 @@ RANDOM_N  = 1000  # number of random portfolios for benchmark comparison
 OUTPUT    = 'manager'  # output folder (saves pnl.png + report.json inside)
 # ─────────────────────────────────────────────────────────────────────────────
 
-import argparse, json, math, os, sys
+import argparse, json, math, os, sys, time
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -41,10 +48,11 @@ from lib.pnl import load_all_stats
 from lib import allocator as allocator_lib
 
 sys.path.insert(0, str(Path(__file__).parent))
-from manager import optimize_weights
+from manager import optimize_weights, _fail, _atomic_json
 
 
-def rolling_managed_returns(ret_df: pd.DataFrame, lookback: int, allocate_fn=None):
+def rolling_managed_returns(ret_df: pd.DataFrame, lookback: int, allocate_fn=None,
+                            progress_cb=None):
     """
     Walk-forward: for each day i >= lookback, optimize weights on
     ret_df.iloc[i-lookback:i], then record ret_df.iloc[i] @ weights.
@@ -52,6 +60,8 @@ def rolling_managed_returns(ret_df: pd.DataFrame, lookback: int, allocate_fn=Non
     allocate_fn(window, lookback) -> {strategy: weight}; defaults to the
     built-in slope/std optimiser. This is the whole plug point — everything
     else here (the OOS loop, the random benchmark, the stats) is method-agnostic.
+
+    progress_cb(day, total) is called after every OOS day (see --progress).
 
     Returns:
         managed_ret:     pd.Series of OOS daily returns
@@ -74,6 +84,8 @@ def rolling_managed_returns(ret_df: pd.DataFrame, lookback: int, allocate_fn=Non
         w_arr  = np.array([w_dict[n] for n in names])
         managed_vals[k]    = float(values[i] @ w_arr)
         weights_array[k]   = w_arr
+        if progress_cb:
+            progress_cb(k + 1, oos_len)
 
     oos_index       = dates[lookback:]
     managed_ret     = pd.Series(managed_vals, index=oos_index)
@@ -110,18 +122,25 @@ def _total_return(ret_arr: np.ndarray) -> float:
     return float((np.prod(1 + ret_arr) - 1) * 100)
 
 
-def _plot(managed_ret: pd.Series, bench_rets: np.ndarray,
-          weights_history: pd.DataFrame, output_path: str):
-    dates = managed_ret.index
-
+def _cum_band(managed_ret: pd.Series, bench_rets: np.ndarray):
+    """Cumulative-return curves as fractions: managed (T,), and the random
+    portfolios' per-day p5 / p50 / p95 (each (T,)). Shared by the png and the
+    stats.json `band` the workspace page draws."""
     managed_cum = np.cumprod(1 + managed_ret.values) - 1
-    peak        = np.maximum.accumulate(managed_cum + 1)
-    dd          = (managed_cum + 1 - peak) / peak
-
     bench_cum = np.cumprod(1 + bench_rets, axis=1) - 1  # (n, T)
     p5  = np.percentile(bench_cum, 5,  axis=0)
     p50 = np.percentile(bench_cum, 50, axis=0)
     p95 = np.percentile(bench_cum, 95, axis=0)
+    return managed_cum, p5, p50, p95
+
+
+def _plot(managed_ret: pd.Series, band,
+          weights_history: pd.DataFrame, output_path: str):
+    dates = managed_ret.index
+
+    managed_cum, p5, p50, p95 = band  # from _cum_band, computed once in main
+    peak        = np.maximum.accumulate(managed_cum + 1)
+    dd          = (managed_cum + 1 - peak) / peak
 
     fig, axes = plt.subplots(3, 1, figsize=(14, 10),
                              gridspec_kw={'height_ratios': [3, 1, 2]}, sharex=True)
@@ -174,14 +193,34 @@ def main():
                         help=f'Output folder (default: {OUTPUT}, or allocators/<name> with --allocator)')
     parser.add_argument('--allocator', type=str,  default=None,
                         help='Walk-forward allocators/<name>/allocator.py instead of the built-in optimiser')
+    parser.add_argument('--members',  type=str,   default=None,
+                        help='Comma-separated strategy names to include (default: every strategy with a backtest)')
+    parser.add_argument('--params-json', type=str, default=None,
+                        help="JSON object overriding the allocator's PARAMS (declared keys only; built-in takes none)")
+    parser.add_argument('--progress', type=str,   default=None,
+                        help='Write {"day", "total", "ts"} here during the walk-forward (at most every 2s)')
     args = parser.parse_args()
 
     np.random.seed(42)
 
-    valid = load_all_stats()
+    # Bad input exits non-zero with the reason as the LAST stderr line — the
+    # workspace page's command listener surfaces exactly that line.
+    members = [m.strip() for m in args.members.split(',') if m.strip()] if args.members else None
+    if args.members is not None and not members:
+        _fail('no members given')
+    try:
+        param_overrides = json.loads(args.params_json) if args.params_json else {}
+    except ValueError as e:
+        _fail(f'--params-json is not valid JSON: {e}')
+    if param_overrides and not args.allocator:
+        _fail(f'built-in slope/std takes no PARAMS (got {sorted(param_overrides)}); use --lookback')
+
+    try:
+        valid = load_all_stats(only=members)
+    except ValueError as e:
+        _fail(str(e))
     if not valid:
-        print('No strategies with daily_returns found. Run backtests first.')
-        return
+        _fail('No strategies with daily_returns found. Run backtests first.')
 
     series_map = {}
     for name, data in valid.items():
@@ -192,14 +231,20 @@ def main():
     ret_df = pd.DataFrame(series_map).sort_index().fillna(0)
 
     if len(ret_df) <= args.lookback:
-        print(f'Not enough data: {len(ret_df)} days ≤ lookback {args.lookback}. '
-              f'Need at least {args.lookback + 1} days.')
-        return
+        # Message shape is parsed by the workspace page (it offers 「改跑 N 天」
+        # from the number) — keep it stable.
+        print(f'insufficient history: {len(ret_df)} days <= lookback {args.lookback} '
+              f'(need at least {args.lookback + 1})', file=sys.stderr)
+        sys.exit(3)
 
     # Named allocator → walk-forward that file and keep its outputs next to it,
     # so several methods can be compared without overwriting each other.
     if args.allocator:
         mod         = allocator_lib.load(args.allocator)
+        try:
+            allocator_lib.apply_params(mod, param_overrides)
+        except (ValueError, TypeError) as e:
+            _fail(str(e))
         method      = getattr(mod, 'DISPLAY_NAME', args.allocator)
         names       = list(ret_df.columns)
         allocate_fn = lambda window, lb: allocator_lib.clean(mod.allocate(window, lb), names)
@@ -218,7 +263,22 @@ def main():
           f'({ret_df.index[args.lookback].date()} → {ret_df.index[-1].date()})')
     print(f'Running walk-forward optimization... (this may take a moment)')
 
-    managed_ret, weights_history = rolling_managed_returns(ret_df, args.lookback, allocate_fn)
+    progress_cb = None
+    if args.progress:
+        last = [0.0]
+
+        def progress_cb(day, total):
+            now = time.time()
+            if day == total or now - last[0] >= 2:
+                last[0] = now
+                try:
+                    _atomic_json(args.progress, {'day': day, 'total': total, 'ts': int(now)})
+                except OSError:
+                    pass  # best-effort: on Windows os.replace fails if the
+                          # reporter has the file open — never abort the run over it
+
+    managed_ret, weights_history = rolling_managed_returns(
+        ret_df, args.lookback, allocate_fn, progress_cb=progress_cb)
     oos_index = managed_ret.index
 
     print(f'Running random benchmark (n={args.random_n})...')
@@ -241,9 +301,18 @@ def main():
     print(f'  Managed beats {managed_beats_pct:.1f}% of {args.random_n} random portfolios on Sharpe')
     print(f'{"":─<60}')
 
+    band = _cum_band(managed_ret, bench_rets)
+    managed_cum, p5, p50, p95 = band
+    params = {'lookback': args.lookback}
+    if args.allocator and isinstance(getattr(mod, 'PARAMS', None), dict):
+        params.update(mod.PARAMS)
+
     result = {
         'lookback':  args.lookback,
         'allocator': args.allocator,   # None = built-in slope/std
+        'members':   strategies,
+        'params':    params,
+        'computed_at': int(time.time()),
         'start':    oos_index[0].strftime('%Y-%m-%d'),
         'end':      oos_index[-1].strftime('%Y-%m-%d'),
         'managed': {
@@ -260,8 +329,16 @@ def main():
             'median_total_return_%':      round(float(np.median(bench_totals)),             4),
             'p5_total_return_%':          round(float(np.percentile(bench_totals, 5)),      4),
             'p95_total_return_%':         round(float(np.percentile(bench_totals, 95)),     4),
+            # per-day cumulative return % of the random portfolios — the band
+            # behind the managed curve (same numbers as pnl.png panel 1)
+            'band': {
+                'p5':  [round(float(v) * 100, 4) for v in p5],
+                'p50': [round(float(v) * 100, 4) for v in p50],
+                'p95': [round(float(v) * 100, 4) for v in p95],
+            },
         },
         'daily_dates':     [d.strftime('%Y-%m-%d') for d in oos_index],
+        'managed_cum':     [round(float(v) * 100, 4) for v in managed_cum],  # cumulative %
         'managed_returns': [round(float(v), 6) for v in m_ret],
         'weights_history': {
             col: [round(float(v), 4) for v in weights_history[col].values]
@@ -273,10 +350,11 @@ def main():
     json_path = os.path.join(output, 'stats.json')
     png_path  = os.path.join(output, 'pnl.png')
 
-    with open(json_path, 'w') as f:
-        json.dump(result, f, indent=2)
+    # Atomic: a cancelled / killed run must not leave a half-written stats.json
+    # that the reporter would read as a finished backtest.
+    _atomic_json(json_path, result)
 
-    _plot(managed_ret, bench_rets, weights_history, png_path)
+    _plot(managed_ret, band, weights_history, png_path)
 
     print(f'\n  Output: {output}/')
     print(f'          ├── stats.json')
