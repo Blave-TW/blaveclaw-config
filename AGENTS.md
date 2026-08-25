@@ -47,7 +47,7 @@ Blave API credentials are in .env file in the workspace.
 
 CRITICAL: Read `references/deployment.md` before deploying any strategy live or setting up cron jobs.
 
-**Deployment redline — the user's own hands.** Funding amounts, venue binding (paper included), and resuming trading are done by the USER on the web 投資組合 page — never do them yourself, even when asked; refuse with the formula in `references/portfolio-steps.md` and walk them through the steps there. Emergency HALT is the one exception you may always trip yourself.
+**Deployment redline — the user's own hands.** Funding amounts, venue binding (paper included), and resuming trading are done by the USER on the web 自動下單 page — never do them yourself, even when asked; refuse with the formula in `references/portfolio-steps.md` and walk them through the steps there. Emergency HALT is the one exception you may always trip yourself.
 
 **No LLM in the execution loop.** Scheduled strategy runs go on the system cron / Scheduled Task via `manager/wait_for_bar.py` (Type A/C — polls for the bar the strategy needs, then runs it directly, no bash involved) or `manager/run_strategy.sh` (Type B) — NEVER an agent cron that wakes you up to "run the strategy and report". Every agent wake-up burns the user's credit; a per-tick agent cron costs orders of magnitude more than the identical system cron for zero added value. Agent crons are only for work that needs reasoning (daily report narration, anomaly triage) — at most a few per day. Details in `references/deployment.md`.
 
@@ -98,7 +98,7 @@ All `lib/data.py` functions accept a `headers` dict. See `references/strategy-co
 
 ## Exchange API Keys
 
-When the user pastes an exchange API key/secret into chat: do NOT write it to `.env` or bind it yourself — venue binding goes through the web 投資組合 page only (guide them per `references/portfolio-steps.md`; a key travelling through chat is itself part of why binding is a redline: the history keeps the plaintext). Never echo the key or secret back in any reply — refer to it as "your API key" — tell them to rotate the pasted key, and recommend a key with trade-only permissions (no withdrawal).
+When the user pastes an exchange API key/secret into chat: do NOT write it to `.env` or bind it yourself — venue binding goes through the web 自動下單 page only (guide them per `references/portfolio-steps.md`; a key travelling through chat is itself part of why binding is a redline: the history keeps the plaintext). Never echo the key or secret back in any reply — refer to it as "your API key" — tell them to rotate the pasted key, and recommend a key with trade-only permissions (no withdrawal).
 
 **Never change the Administrator/RDP password** — the dashboard serves the platform-stored copy, so a local reset locks the user out. Read it from the local credentials file instead (path per machine type — see `references/capital-broker.md`).
 
@@ -201,7 +201,7 @@ Custom weighting → `allocators/<name>/allocator.py` + `--allocator` (`referenc
 - **Capital Futures (群益期貨):** `references/capital-broker.md` (Windows workspace only)
 - **Paper trading (模擬交易, no keys):** ships pre-built (`lib/account_paper.py` + `lib/order_paper.py`) — **never hand-write a paper lib**; web-handoff steps, how fills are priced, and when to reset: `references/lib.md` › *Paper venue — web handoff*.
 
-**One machine, one trading venue (TW brokers included).** Venue credentials enter `.env` through the user's web bind on the 投資組合 page only — the bind evicts the previous venue's credential pair automatically; you never write or delete venue credential lines yourself (redline — guide the user per `references/portfolio-steps.md`). Stale keys from a previous venue confuse venue detection and keep dead access alive — if you spot leftovers, tell the user to rebind from the web instead of editing `.env`.
+**One machine, one trading venue (TW brokers included).** Venue credentials enter `.env` through the user's web bind on the 自動下單 page only — the bind evicts the previous venue's credential pair automatically; you never write or delete venue credential lines yourself (redline — guide the user per `references/portfolio-steps.md`). Stale keys from a previous venue confuse venue detection and keep dead access alive — if you spot leftovers, tell the user to rebind from the web instead of editing `.env`.
 
 ## Model Switching
 

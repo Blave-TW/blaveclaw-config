@@ -32,7 +32,7 @@ python3 manager/manager.py [--lookback 365] [--target-vol 0.30] --apply    # wri
 
 `--allocator <name>`: weight with `allocators/<name>/allocator.py` instead of the built-in slope/std optimiser. `management_backtest.py` takes the same flag and writes its output to `allocators/<name>/` so each method keeps its own `stats.json` + `pnl.png`. Contract, validation rules, and the create → backtest → dry-run → apply workflow: **`references/allocator-code.md`**. The `--apply` confirmation rule below applies identically to allocator runs.
 
-Flags both scripts share (these are what the workspace page's 策略管理 tab drives; the agent can use them too):
+Flags both scripts share (these are what the workspace's 投資組合 page drives; the agent can use them too):
 
 - `--members a,b,c` — restrict to those strategies (directory names under `strategies/`). Unknown name → exit 2, nothing written.
 - `--params-json '{"k": v}'` — override an allocator's `PARAMS` for this run (declared keys only; the built-in method takes none — its knobs are `--lookback` / `--target-vol`).

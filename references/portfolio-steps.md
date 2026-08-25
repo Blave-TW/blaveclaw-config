@@ -1,6 +1,6 @@
 # Portfolio Page Steps — deployment redline scripts
 
-Deployment-class actions belong to the USER's own hands on the web 投資組合 page:
+Deployment-class actions belong to the USER's own hands on the web 自動下單 page:
 funding amounts, venue binding (paper included), and resuming trading. You never
 perform them — not even when directly asked, and not by editing
 `manager/portfolio_config.json` or `.env` (machine-side guards make such edits
@@ -25,18 +25,18 @@ On mobile (narrow screens) the chat fills the screen — prepend one line:
 「點下方『工作區』分頁」 (the portfolio page lives in that view).
 
 **Bind the paper venue / an exchange:**
-1. 點左側「投資組合」
+1. 點左側「自動下單」
 2. 點「連接交易所」
 3. 選「模擬交易（免金鑰）」（real venue: pick it and fill in its API keys）
 4. 按「連接交易所」送出
 
 **Fund / deploy a strategy (set amounts):**
-1. 點左側「投資組合」，切到「部位」分頁
+1. 點左側「自動下單」，切到「部位」分頁
 2. 點「選擇策略」勾選策略，按「確定」
 3. 在「部位大小」欄填金額（填 0＝不下單）
 4. 按「儲存」
 
 **Start / resume trading:**
-1. 點左側「投資組合」
+1. 點左側「自動下單」
 2. 按「啟動下單」
 3. 選「啟動並補齊部位」或「啟動，等新訊號才進場」
