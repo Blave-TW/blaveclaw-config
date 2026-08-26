@@ -43,7 +43,7 @@ python3 manager/manager.py --members a,b,c --allocator equal --apply    # write 
 Flags both scripts share (these are what the workspace's 投資組合 page drives; the agent can use them too):
 
 - `--members a,b,c` — restrict to those strategies (directory names under `strategies/`). Unknown name → exit 2, nothing written.
-- `--params-json '{"k": v}'` — override an allocator's `PARAMS` for this run (declared keys only). Neither built-in declares any: `lookback` and `target_vol` are the caller's flags, not a method's knobs — `lookback` is the walk-forward window the page sets once per run, and `--target-vol` scales leverage and is no longer offered on the page at all.
+- `--params-json '{"k": v}'` — override an allocator's `PARAMS` for this run (declared keys only). `slope` declares `lookback` (it fits on that window); `equal` declares nothing — it has no window, and the walk-forward treats every day as out of sample for it. `--target-vol` is not a method knob at all: it scales leverage and is no longer offered on the page.
 - `manager.py --json PATH` — also write the dry-run proposal as JSON (weights, sharpe, leverage, `history_days`…). `management_backtest.py --progress PATH` — write `{day, total}` during the walk-forward. `stats.json` additionally carries `members`, `params`, `managed_cum` and `random_benchmark.band` (per-day p5/p50/p95 cumulative %).
 - Exit codes: 2 = bad input (reason is the last stderr line); `management_backtest.py` exits 3 when the union of member history is not longer than `--lookback`.
 

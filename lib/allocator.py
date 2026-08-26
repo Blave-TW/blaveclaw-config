@@ -5,13 +5,15 @@ An allocator is one file, `allocators/<name>/allocator.py`, exposing:
     def allocate(returns, lookback) -> {strategy_name: weight}
 
 `returns` is a DataFrame of daily strategy returns (one column per strategy);
-`lookback` is the walk-forward window in days, supplied by the caller as
-`allocate()`'s second argument. A file must NOT declare `lookback` (or
-`target_vol`) in `PARAMS` — see RESERVED_PARAM_KEYS. The method's own knobs
-live in a module-level `PARAMS` dict, edited in the file, exactly like a
-strategy's top-of-file constants (see `references/allocator-code.md`).
-Neither built-in declares `lookback` either: it is the walk-forward window the
-page sets once for the run, not a knob belonging to any method.
+`lookback` is the walk-forward window in days, always passed as `allocate()`'s
+second argument. A method that FITS on that window owns it and declares it in
+`PARAMS` like any other knob, which is what puts it in the page's parameter
+form — the built-in `slope` does, `equal` does not. A method that declares no
+window leaves the choice to the caller. `target_vol` is the one name a file
+must never declare (see RESERVED_PARAM_KEYS): it is the account's leverage
+target, not a weighting input. The method's own knobs live in a module-level
+`PARAMS` dict, edited in the file, exactly like a strategy's top-of-file
+constants (see `references/allocator-code.md`).
 
 The two built-in methods are not files — `manager.py` holds them as functions
 and picks one by name (`equal`, the default for a new portfolio, or `slope`;
@@ -20,6 +22,7 @@ deliberately has no knowledge of them beyond refusing to load a file under
 those names (importing `manager/manager.py` from `lib/` would need the same
 sys.path hack the scripts do, for no benefit).
 """
+import ast
 import importlib.util
 import os
 
@@ -30,11 +33,14 @@ ALLOCATORS_DIR = 'allocators'
 # rather than let the user believe their file is the one being traded.
 BUILTIN_ALLOCATORS = ('equal', 'slope')
 
-# PARAMS key names the caller owns: `lookback` is the walk-forward window and
-# `target_vol` scales portfolio leverage, both supplied by the manager scripts.
-# A file that declares either would have it read as the caller's flag and never
-# see the page's value in its own PARAMS — refuse the name instead.
-RESERVED_PARAM_KEYS = ('lookback', 'target_vol')
+# `target_vol` scales portfolio leverage and is not a weighting input at all —
+# a file declaring it would have it read as the caller's flag and never see the
+# page's value in its own PARAMS, so refuse the name.
+#
+# `lookback` is NOT reserved: a method that fits on a window owns that window,
+# declares it like any other knob, and the page offers it. The scripts pass the
+# resolved value to allocate() as well, so a method can read it either way.
+RESERVED_PARAM_KEYS = ('target_vol',)
 
 
 def allocator_path(name):
@@ -67,12 +73,42 @@ def load(name):
         clash = [k for k in RESERVED_PARAM_KEYS if k in declared]
         if clash:
             raise ValueError(
-                f"{path} declares reserved PARAMS {clash} — those are the "
-                f"caller's flags, not a method's own knobs. lookback arrives as "
-                f"allocate()'s second argument; target_vol is not a weighting "
-                f"input at all."
+                f"{path} declares reserved PARAMS {clash} — target_vol is the "
+                f"portfolio's leverage target, set once for the account, not a "
+                f"weighting input a method gets to choose."
             )
+    if uses_window(path) and not (isinstance(declared, dict) and 'lookback' in declared):
+        raise ValueError(
+            f"{path} reads the window argument but declares no PARAMS['lookback']. "
+            f"A method that looks at history has to say how far: without the "
+            f"declaration the scripts hand it no window at all (every day out of "
+            f"sample), and it would be fitting on data nobody can see or set. "
+            f"Add \"lookback\": <days> to PARAMS."
+        )
     return mod
+
+
+def uses_window(path):
+    """Whether allocate() refers to its second argument anywhere in its body —
+    the syntactic tell for "this method looks at history". Pure ast, never an
+    import, so the reporter can apply the same rule to a file it will not run."""
+    # Bytes, so ast honours a BOM or a coding cookie the way import does — a
+    # text-mode read would raise on those, be swallowed, and let the file
+    # through unguarded.
+    try:
+        with open(path, 'rb') as f:
+            tree = ast.parse(f.read())
+    except (OSError, SyntaxError, ValueError):
+        return False
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == 'allocate':
+            params = [a.arg for a in node.args.posonlyargs + node.args.args]
+            if len(params) < 2:
+                return False
+            window = params[1]
+            return any(isinstance(n, ast.Name) and n.id == window
+                       for n in ast.walk(node) if n is not node)
+    return False
 
 
 def apply_params(mod, overrides):
@@ -206,6 +242,32 @@ if __name__ == '__main__':
             pass
         else:
             raise AssertionError(f'load() accepted the reserved name {reserved!r}')
+
+    # Use the window, declare the window — the guard that keeps a history-based
+    # method from silently running windowless.
+    import tempfile
+    saved = ALLOCATORS_DIR
+    with tempfile.TemporaryDirectory() as tmp:
+        globals()['ALLOCATORS_DIR'] = tmp
+        cases = {
+            'undeclared': ('PARAMS = {}\ndef allocate(returns, lookback):\n'
+                           '    return {c: 1 for c in returns[-lookback:].columns}\n', True),
+            'declared':   ('PARAMS = {"lookback": 90}\ndef allocate(returns, lookback):\n'
+                           '    return {c: 1 for c in returns[-lookback:].columns}\n', False),
+            'windowless': ('PARAMS = {}\ndef allocate(returns, lb):\n'
+                           '    return {c: 1 for c in returns.columns}\n', False),
+        }
+        for name, (src, should_raise) in cases.items():
+            os.makedirs(os.path.join(tmp, name))
+            with open(allocator_path(name), 'w') as f:
+                f.write(src)
+            try:
+                load(name)
+            except ValueError:
+                assert should_raise, f'{name}: load() refused a compliant file'
+            else:
+                assert not should_raise, f'{name}: load() accepted a window user with no lookback'
+        globals()['ALLOCATORS_DIR'] = saved
 
     import types
     fake = types.SimpleNamespace(PARAMS={'k': 1, 'x': 2.0})

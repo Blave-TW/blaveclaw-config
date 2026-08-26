@@ -22,14 +22,13 @@ Usage:
     # 跑回測 runs; --params-json '{"k": v}' overrides an allocator's PARAMS)
 
 Exit codes: 2 = bad input (unknown strategy / PARAMS key / JSON), 3 = not
-enough history for the lookback. The reason is the last stderr line.
+enough history for the method's window. The reason is the last stderr line.
 
 This is the gate for using ANY weighting method live: it answers "does this
 method beat randomly-drawn weights out of sample", which a single in-sample
 weight calculation cannot.
 """
 # ── Config ────────────────────────────────────────────────────────────────────
-LOOKBACK  = 365   # days of history used to optimize weights each step
 RANDOM_N  = 1000  # number of random portfolios for benchmark comparison
 OUTPUT    = 'manager'  # output folder (saves pnl.png + report.json inside)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -50,7 +49,7 @@ from lib import allocator as allocator_lib
 
 sys.path.insert(0, str(Path(__file__).parent))
 from manager import (BUILTIN_METHODS, DEFAULT_METHOD, _BUILTIN_FNS, default_allocator,
-                     optimize_weights, _fail, _atomic_json)
+                     _sync_lookback, optimize_weights, _fail, _atomic_json)
 
 
 def rolling_managed_returns(ret_df: pd.DataFrame, lookback: int, allocate_fn=None,
@@ -188,8 +187,10 @@ def _plot(managed_ret: pd.Series, band,
 
 def main():
     parser = argparse.ArgumentParser(description='Blave Agent Management Backtest')
-    parser.add_argument('--lookback', type=int,   default=LOOKBACK,
-                        help=f'Optimization window in days (default {LOOKBACK})')
+    parser.add_argument('--lookback', type=int,   default=None,
+                        help="Walk-forward window in days (default: the method's own; a "
+                             "method that declares none runs with no window). A window "
+                             "given here is never moved.")
     parser.add_argument('--random-n', type=int,   default=RANDOM_N,
                         help=f'Number of random benchmark portfolios (default {RANDOM_N})')
     parser.add_argument('--output',   type=str,   default=None,
@@ -228,7 +229,7 @@ def main():
     except ValueError as e:
         _fail(f'--params-json is not valid JSON: {e}')
     if param_overrides and builtin:
-        _fail(f'built-in {allocator} takes no PARAMS (got {sorted(param_overrides)}); use --lookback')
+        _fail(f'built-in {allocator} takes no PARAMS (got {sorted(param_overrides)})')
 
     try:
         valid = load_all_stats(only=members)
@@ -244,13 +245,6 @@ def main():
         series_map[name] = rets
 
     ret_df = pd.DataFrame(series_map).sort_index().fillna(0)
-
-    if len(ret_df) <= args.lookback:
-        # Message shape is parsed by the workspace page (it offers 「改跑 N 天」
-        # from the number) — keep it stable.
-        print(f'insufficient history: {len(ret_df)} days <= lookback {args.lookback} '
-              f'(need at least {args.lookback + 1})', file=sys.stderr)
-        sys.exit(3)
 
     # A user allocator keeps its outputs next to the file, so several methods
     # can be compared without overwriting each other. Both built-ins share
@@ -275,8 +269,25 @@ def main():
         allocate_fn = lambda window, lb: allocator_lib.clean(mod.allocate(window, lb), names)
         output      = args.output or os.path.join(allocator_lib.ALLOCATORS_DIR, allocator)
 
+    # The window is the method's, so it is only known once the method is.
+    # A method that declares `lookback` fits on it, and a window somebody chose
+    # is never moved: the run has to be the one that was asked for, or the
+    # number reported is not the number that ran — fail and let them pick (the
+    # page turns this message into 「改跑 N 天」). A method that declares none
+    # gets 0: it fits nothing, so nothing has to be held out, and every day of
+    # history is out of sample. That is also why a young portfolio on the
+    # default method can always run the gate.
+    declared = builtin['params'] if builtin else (getattr(mod, 'PARAMS', None) or {})
+    _sync_lookback(args, declared, method)
+    if args.lookback and len(ret_df) <= args.lookback:
+        # Message shape is parsed by the workspace page — keep it stable.
+        print(f'insufficient history: {len(ret_df)} days <= lookback {args.lookback} '
+              f'(need at least {args.lookback + 1})', file=sys.stderr)
+        sys.exit(3)
+
     strategies = list(ret_df.columns)
-    print(f'\nManagement Walk-Forward Backtest  (lookback={args.lookback}d, method={method})')
+    window = f'lookback={args.lookback}d' if args.lookback else 'no window'
+    print(f'\nManagement Walk-Forward Backtest  ({window}, method={method})')
     print(f'Strategies : {", ".join(strategies)}')
     print(f'Total data : {len(ret_df)} days  '
           f'({ret_df.index[0].date()} → {ret_df.index[-1].date()})')
@@ -331,9 +342,14 @@ def main():
     params = dict(builtin['params']) if builtin else {}
     if mod is not None and isinstance(getattr(mod, 'PARAMS', None), dict):
         params.update(mod.PARAMS)
+    # A method that declares `lookback` owns it: record the window that ACTUALLY
+    # ran, not the declared default. They differ whenever the caller passed
+    # --lookback.
+    if 'lookback' in params:
+        params['lookback'] = args.lookback
 
     result = {
-        'lookback':  args.lookback,
+        'lookback':  args.lookback,   # 0 = the method declares no window; all OOS
         'allocator': allocator,   # always explicit: a built-in name or a file's
         'members':   strategies,
         'params':    params,

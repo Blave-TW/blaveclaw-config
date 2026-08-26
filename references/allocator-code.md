@@ -6,8 +6,8 @@ one, and there are three kinds of name:
 
 | `--allocator` | what it is |
 |---|---|
-| `equal` | every strategy the same share. Built in, and the default for a **new** portfolio. |
-| `slope` | the slope/std optimiser inside `manager.py`. Built in. |
+| `equal` | every strategy the same share, no window. Built in, and the default for a **new** portfolio. |
+| `slope` | the slope/std optimiser inside `manager.py`, fitted on `lookback` days. Built in. |
 | anything else | the user's own `allocators/<name>/allocator.py` |
 | omitted | the method the live config was applied with — `equal` only when it has never been applied |
 
@@ -65,17 +65,21 @@ def allocate(returns, lookback):
 - `returns` — DataFrame of daily strategy returns, one column per strategy.
   From `management_backtest.py` it is exactly `lookback` rows; from `manager.py`
   it is the full history, so slice `returns[-lookback:]` if the method cares.
-- `lookback` — the walk-forward window, **supplied by the caller** as this
-  argument. It defines the out-of-sample protocol every method shares — the
-  page sets it once per run, next to 跑回測 — so it is **a reserved PARAMS
-  name, not one of yours**: declaring `lookback` (or `target_vol`) in `PARAMS`
-  raises at load time, because the manager scripts read those two as their own
-  flags and your file would never see the page's value. Read the window from
-  this argument. Neither built-in declares it either.
+- `lookback` — the window, in days, the method looks at. **If the method uses
+  history, it declares `lookback` in `PARAMS`**; that is what puts the field on
+  the workspace page and what the walk-forward holds out of sample. The value
+  also arrives as this argument — the scripts keep the two equal — so read
+  whichever is handier. A method that declares none is read as needing none
+  (the built-in `equal` is the example): the backtest then hands it an empty
+  window and treats every day as out of sample. A method that used history
+  without declaring it would be fitting on a window nobody can see or set —
+  do not.
 - `PARAMS` — everything else the method exposes. Edit the values **in the
   file**, exactly like a strategy's top-of-file constants. There is
   deliberately no `--param` CLI flag: params are code, versioned with the
-  method that uses them. **Values must be plain scalars** (int / float / bool /
+  method that uses them. `target_vol` is the one name a file must never
+  declare — loading raises — because it is the account's leverage target, not
+  a weighting input. **Values must be plain scalars** (int / float / bool /
   str): a list or dict is silently dropped from the workspace page's parameter
   form, so the user sees a method whose knob has vanished. A knob that is
   naturally a pair goes in as two scalar keys. And **validate the value inside
@@ -170,7 +174,7 @@ close to tautological for it — the benchmark is random *static* weights and
 equal weight is their centre, so ~50% is the expected answer, not a verdict.
 The number earns its meaning when a fitted method is measured against it.
 
-`management_backtest.py` needs more than `lookback` days of overlapping
+For a method that declares a window, `management_backtest.py` needs more than `lookback` days of overlapping
 strategy history (365 by default) — with less, it prints how many days it has
 and stops. That is the usual blocker for a new portfolio, not a bug.
 
@@ -225,7 +229,7 @@ from manager import portfolio_slope_std  # manager/ is on sys.path — see above
 
 DISPLAY_NAME = "斜率/波動(有上限)"
 DESCRIPTION  = "內建 slope/std 最佳化,但單一策略權重不超過上限"
-PARAMS       = {"max_weight": 0.30}   # 0.30 = 30%, a fraction — not 30
+PARAMS       = {"lookback": 365, "max_weight": 0.30}   # it fits on a window, so it says so; 0.30 = 30%, not 30
 
 
 def allocate(returns, lookback):
@@ -253,7 +257,7 @@ def allocate(returns, lookback):
         raise ValueError(f"max_weight {cap} × {n} strategies < 1 "
                          f"(cap must be >= {floor})")
 
-    matrix      = returns.values      # portfolio_slope_std slices to `lookback`
+    matrix      = returns.values      # portfolio_slope_std slices to `lookback` — the declared window
     objective   = lambda w: -portfolio_slope_std(w, matrix, lookback)
     constraints = [{"type": "eq", "fun": lambda w: w.sum() - 1}]
     bounds      = [(0.0, cap)] * n

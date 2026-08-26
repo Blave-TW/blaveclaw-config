@@ -27,11 +27,14 @@ DISPLAY_NAME = "反波動加權"
 DESCRIPTION = "波動越大的策略給越小的權重"
 
 # This method's own knobs. Edit the values here — they are NOT command-line
-# flags, same as a strategy's top-of-file constants. `lookback` and
-# `target_vol` are RESERVED and must not appear here (loading raises): the
-# first is the walk-forward window passed in by the caller, the second is
-# portfolio leverage and no weighting input at all.
-PARAMS = {"floor_vol": 0.001}
+# flags, same as a strategy's top-of-file constants. The rule for `lookback`:
+# if the method looks at history, it declares the window it looks at — that
+# is what puts the field on the workspace page, and what the walk-forward
+# holds out. A method that declares none is read as needing none (equal weight
+# is the built-in example), and the backtest then treats every day as out of
+# sample. `target_vol` is the one name that must never appear here (loading
+# raises): it is the account's leverage target, not a weighting input.
+PARAMS = {"lookback": 365, "floor_vol": 0.001}
 
 
 def allocate(returns, lookback):
@@ -40,7 +43,8 @@ def allocate(returns, lookback):
              In the walk-forward backtest this is exactly `lookback` rows; from
              manager.py it is the full history, so slice with returns[-lookback:]
              if your method cares.
-    lookback Walk-forward window in days.
+    lookback Walk-forward window in days — the same number as PARAMS["lookback"]
+             (the scripts keep the two in sync), so read whichever is handier.
 
     Return   {strategy_name: weight}. Weights must be >= 0; they are normalised
              to sum 1 for you, so returning raw scores is fine. Omitting a

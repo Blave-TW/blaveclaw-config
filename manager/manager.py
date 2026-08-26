@@ -43,7 +43,6 @@ from lib.pnl import load_all_stats
 from lib import allocator as allocator_lib
 
 # ── Config ────────────────────────────────────────────────────────────────────
-LOOKBACK   = 365   # days of history used for weight optimization
 TARGET_VOL = 0.30  # target annual volatility (used to compute leverage)
 NOTIFY     = False # send Telegram notification after update
 # ─────────────────────────────────────────────────────────────────────────────
@@ -152,7 +151,10 @@ BUILTIN_METHODS = {
     'slope': {
         'display_name': '斜率/波動',
         'description': '最大化組合權益曲線的斜率除以波動',
-        'params': {},
+        # It fits on this window, so it is this method's own knob. `equal`
+        # declares none — it does not look at history at all, and a knob that
+        # changes nothing has no business in the page's parameter form.
+        'params': {'lookback': 365},
     },
 }
 DEFAULT_METHOD = 'equal'
@@ -201,6 +203,36 @@ def default_target_vol():
     return pct / 100
 
 
+def _sync_lookback(args, declared, method=''):
+    """One number across `--lookback`, the method's PARAMS and allocate()'s
+    second argument, whichever end the caller came in from.
+
+    A method that declares `lookback` fits on that window and may read it
+    either way, so the two must agree with what gets reported: a window passed
+    on the command line wins and is written back into PARAMS; with no flag, the
+    declared window runs. A method that declares none has no window — 0, which
+    a walk-forward reads as "every day is out of sample" — because a method
+    that used history without saying so would be fitting on a window nobody
+    can see or set. That is the contract: use the window, declare the window.
+    """
+    if not isinstance(declared, dict) or 'lookback' not in declared:
+        if args.lookback is not None:
+            # Say so: a flag that vanishes without a word looks like it took.
+            print(f'--lookback {args.lookback} ignored: {method or "this method"} '
+                  f'declares no window, so it runs with none', file=sys.stderr)
+        args.lookback = 0
+        return
+    value = declared['lookback'] if args.lookback is None else args.lookback
+    # Both ends must agree, so both are held to the same rule: a whole number
+    # of days, at least one. A declared 180.0 or "200" would otherwise run on
+    # 365 while the method reads its own value — the report and the run apart.
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        _fail(f'{method or "the method"} lookback must be a positive integer of days, '
+              f'got {value!r} ({"from --lookback" if args.lookback is not None else "declared in PARAMS"})')
+    args.lookback = value
+    declared['lookback'] = value
+
+
 def _fail(msg, code=2):
     """Bad input: reason as the LAST stderr line, exit 2 (3 = not enough
     history) — the workspace page's command listener shows exactly that line."""
@@ -229,7 +261,7 @@ def _atomic_json(path, obj):
 
 def main():
     parser = argparse.ArgumentParser(description='Blave Agent Strategy Manager')
-    parser.add_argument('--lookback',   type=int,   default=LOOKBACK,   help=f'Lookback window in days (default {LOOKBACK})')
+    parser.add_argument('--lookback',   type=int,   default=None,   help="Window in days the method fits on (default: the method's own; a method that declares none runs with no window)")
     parser.add_argument('--target-vol', type=float, default=None, help=f"Target annual volatility for leverage (default: portfolio_config's target_vol_pct, else {TARGET_VOL})")
     parser.add_argument('--notify',     action='store_true',             default=NOTIFY, help='Send Telegram notification after update')
     parser.add_argument('--apply',      action='store_true', help='Write the new weights to portfolio_config.json (default: dry-run, file untouched)')
@@ -263,8 +295,7 @@ def main():
     except ValueError as e:
         _fail(f'--params-json is not valid JSON: {e}')
     if param_overrides and builtin:
-        _fail(f'built-in {allocator} takes no PARAMS (got {sorted(param_overrides)}); '
-              f'use --lookback / --target-vol')
+        _fail(f'built-in {allocator} takes no PARAMS (got {sorted(param_overrides)})')
 
     try:
         valid = load_all_stats(only=members)
@@ -288,6 +319,7 @@ def main():
     mod = None
     if builtin:
         method = f"built-in {builtin['display_name']}"
+        _sync_lookback(args, builtin['params'], method)
         weights = allocator_lib.clean(
             _BUILTIN_FNS[allocator](ret_df, args.lookback), list(ret_df.columns)
         )
@@ -301,6 +333,7 @@ def main():
         except (ValueError, TypeError) as e:
             _fail(str(e))
         method = getattr(mod, 'DISPLAY_NAME', allocator)
+        _sync_lookback(args, getattr(mod, 'PARAMS', None), method)
         weights = allocator_lib.clean(
             mod.allocate(ret_df, args.lookback), list(ret_df.columns)
         )
@@ -377,13 +410,17 @@ def main():
         params = dict(builtin['params']) if builtin else {}
         if mod is not None and isinstance(getattr(mod, 'PARAMS', None), dict):
             params.update(mod.PARAMS)
+        # A method that declares `lookback` owns it: record what actually ran,
+        # not the declared default.
+        if 'lookback' in params:
+            params['lookback'] = args.lookback
         proposal = {
             'members':        list(ret_df.columns),
             'allocator':      allocator,
-            # Top level, mirroring stats.json: the walk-forward window belongs
-            # to the RUN, not to the method, so it cannot live in `params` —
-            # no method declares it. The page compares it to decide whether a
-            # proposal is the one the current selection asked for.
+            # Top level, mirroring stats.json: the window that actually ran
+            # (0 = the method declares none), written for every method so the
+            # page always has one field to compare. `params` carries it too,
+            # but only for a method that declares it.
             'lookback':       args.lookback,
             'params':         params,
             'weights':        weights,
@@ -400,7 +437,8 @@ def main():
         _atomic_json(args.json, proposal)
 
     # Print summary
-    print(f'\nBlave Agent Strategy Manager  (lookback={args.lookback}d, method={method})')
+    window = f'lookback={args.lookback}d' if args.lookback else 'no window'
+    print(f'\nBlave Agent Strategy Manager  ({window}, method={method})')
     print(f'{"Strategy":<28} {"Indiv Score":>12} {"Weight":>8} {"Sharpe":>8} {"MDD%":>8} {"Symbol":<16}')
     print('-' * 86)
     for name in sorted(weights, key=lambda x: weights[x], reverse=True):
@@ -425,7 +463,7 @@ def main():
         try:
             from lib.notify import send_text
             action = 'Portfolio updated' if args.apply else 'Proposed weights (DRY RUN, config not modified)'
-            lines = [f'[Blave Agent Manager] {action} (lookback={args.lookback}d, method={method})']
+            lines = [f'[Blave Agent Manager] {action} ({window}, method={method})']
             for name, w in sorted(weights.items(), key=lambda x: x[1], reverse=True):
                 sharpe = valid[name].get('Sharpe Ratio') or 0.0
                 lines.append(f'  {name}: {w:.1%}  Sharpe {sharpe:.2f}')
