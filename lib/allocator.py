@@ -5,20 +5,36 @@ An allocator is one file, `allocators/<name>/allocator.py`, exposing:
     def allocate(returns, lookback) -> {strategy_name: weight}
 
 `returns` is a DataFrame of daily strategy returns (one column per strategy);
-`lookback` is the walk-forward window in days, supplied by the caller — it is
-NOT the method's own parameter. The method's own knobs live in a module-level
-`PARAMS` dict, edited in the file, exactly like a strategy's top-of-file
-constants (see `references/allocator-code.md`).
+`lookback` is the walk-forward window in days, supplied by the caller as
+`allocate()`'s second argument. A file must NOT declare `lookback` (or
+`target_vol`) in `PARAMS` — see RESERVED_PARAM_KEYS. The method's own knobs
+live in a module-level `PARAMS` dict, edited in the file, exactly like a
+strategy's top-of-file constants (see `references/allocator-code.md`).
+Neither built-in declares `lookback` either: it is the walk-forward window the
+page sets once for the run, not a knob belonging to any method.
 
-The built-in slope/std optimiser is not a file — `manager.py` uses its own
-`optimize_weights` when no allocator is named, so this module deliberately has
-no knowledge of it (importing `manager/manager.py` from `lib/` would need the
-same sys.path hack the scripts do, for no benefit).
+The two built-in methods are not files — `manager.py` holds them as functions
+and picks one by name (`equal`, the default for a new portfolio, or `slope`;
+omitting the flag keeps a live portfolio's own method), so this module
+deliberately has no knowledge of them beyond refusing to load a file under
+those names (importing `manager/manager.py` from `lib/` would need the same
+sys.path hack the scripts do, for no benefit).
 """
 import importlib.util
 import os
 
 ALLOCATORS_DIR = 'allocators'
+
+# Reserved: these name the built-in methods on `--allocator`, so a directory
+# with either name could never be reached — refuse it loudly at load time
+# rather than let the user believe their file is the one being traded.
+BUILTIN_ALLOCATORS = ('equal', 'slope')
+
+# PARAMS key names the caller owns: `lookback` is the walk-forward window and
+# `target_vol` scales portfolio leverage, both supplied by the manager scripts.
+# A file that declares either would have it read as the caller's flag and never
+# see the page's value in its own PARAMS — refuse the name instead.
+RESERVED_PARAM_KEYS = ('lookback', 'target_vol')
 
 
 def allocator_path(name):
@@ -31,6 +47,11 @@ def load(name):
     Raises rather than falling back: a typo'd allocator name must not silently
     trade on the built-in weights.
     """
+    if name in BUILTIN_ALLOCATORS:
+        raise ValueError(
+            f"'{name}' is a built-in method, not a file — the manager scripts "
+            f"handle it themselves. Rename allocators/{name}/ to something else."
+        )
     path = allocator_path(name)
     if not os.path.isfile(path):
         raise FileNotFoundError(
@@ -41,6 +62,16 @@ def load(name):
     spec.loader.exec_module(mod)
     if not callable(getattr(mod, 'allocate', None)):
         raise AttributeError(f"{path} defines no allocate(returns, lookback)")
+    declared = getattr(mod, 'PARAMS', None)
+    if isinstance(declared, dict):
+        clash = [k for k in RESERVED_PARAM_KEYS if k in declared]
+        if clash:
+            raise ValueError(
+                f"{path} declares reserved PARAMS {clash} — those are the "
+                f"caller's flags, not a method's own knobs. lookback arrives as "
+                f"allocate()'s second argument; target_vol is not a weighting "
+                f"input at all."
+            )
     return mod
 
 
@@ -102,7 +133,27 @@ def clean(raw, names):
     if total <= 0:
         raise ValueError('allocate() returned all-zero weights')
 
-    return {k: round(v / total, 4) for k, v in weights.items()}
+    # Quantise to whole basis points that add up to exactly 10000, rather than
+    # rounding each share on its own — three equal strategies would otherwise
+    # be 0.3333 each and the weights would not add up at all.
+    #
+    # The invariant is on the STORED weights, which is where it matters: they
+    # size real positions. The percentages a page or a message prints round
+    # again to fewer digits and need not visibly total 100.0 — that is ordinary
+    # display rounding, not a broken allocation.
+    #
+    # Largest-remainder: the leftover bps go to the shares that were cut
+    # hardest, so the correction is spread one bp at a time rather than dumped
+    # on a single strategy (which could push it past a cap it set itself).
+    order  = {k: i for i, k in enumerate(names)}
+    exact  = {k: v / total * 10000 for k, v in weights.items()}
+    bps    = {k: int(x) for k, x in exact.items()}          # floor; no negatives here
+    short  = 10000 - sum(bps.values())
+    if short:
+        ranked = sorted(names, key=lambda k: (bps[k] - exact[k], order[k]))
+        for k in ranked[:short]:
+            bps[k] += 1
+    return {k: bps[k] / 10000 for k in names}
 
 
 if __name__ == '__main__':
@@ -111,7 +162,20 @@ if __name__ == '__main__':
     # working, so this stays runnable rather than living in a scratch file.
     names = ['a', 'b', 'c']
 
-    assert clean({'a': 1, 'b': 1, 'c': 1}, names) == {'a': 0.3333, 'b': 0.3333, 'c': 0.3333}
+    # Weights are shown to the user as percentages; they must add to 100.0,
+    # so the invariant is on whole basis points, not on a float sum.
+    # The invariant: the stored weights add up to exactly 1, checked on the
+    # quantisation grid so float addition cannot mask a miss.
+    def _bps(w):
+        return sum(round(v * 10000) for v in w.values())
+
+    assert clean({'a': 1, 'b': 1, 'c': 1}, names) == {'a': 0.3334, 'b': 0.3333, 'c': 0.3333}
+    for n in range(1, 60):
+        many = [f's{i}' for i in range(n)]
+        assert _bps(clean({k: 1 for k in many}, many)) == 10000, f'equal weight, n={n}'
+    for raw in ({'a': 7, 'b': 2, 'c': 1}, {'a': 1, 'b': 2}, {'a': 1e-9, 'b': 1},
+                {'a': 1, 'b': 1, 'c': 1000000}, {'a': 1, 'b': 1e-12}):
+        assert _bps(clean(raw, names)) == 10000, f'{raw} did not sum to 100%'
     assert clean({'a': 3, 'b': 1}, names) == {'a': 0.75, 'b': 0.25, 'c': 0.0}, 'raw scores normalise; absent = 0'
 
     for bad, why in [
@@ -134,6 +198,14 @@ if __name__ == '__main__':
         pass
     else:
         raise AssertionError('load() did not raise on a missing allocator')
+
+    for reserved in BUILTIN_ALLOCATORS:
+        try:
+            load(reserved)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f'load() accepted the reserved name {reserved!r}')
 
     import types
     fake = types.SimpleNamespace(PARAMS={'k': 1, 'x': 2.0})

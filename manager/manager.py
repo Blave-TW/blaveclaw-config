@@ -1,9 +1,8 @@
 """
 Blave Agent Strategy Manager
 
-Finds portfolio weights w that maximize slope/std of the combined
-portfolio returns (R · w), where R is the strategy returns matrix.
-Updates manager/portfolio_config.json.
+Computes the portfolio weights w for the live reconciler and updates
+manager/portfolio_config.json.
 
 Usage:
     python3 manager/manager.py [--lookback 365] [--notify]
@@ -16,9 +15,16 @@ Usage:
 Default is DRY-RUN: weights are computed and printed but portfolio_config.json
 is NOT touched. Pass --apply only after the user has confirmed the new weights.
 
-The slope/std optimiser below is the DEFAULT weighting method, not the only
-one. `--allocator <name>` swaps in allocators/<name>/allocator.py instead —
-see references/allocator-code.md.
+Two built-in methods: `equal` (every strategy the same share) and `slope` (the
+slope/std optimiser below). `--allocator <name>` picks either, or swaps in
+allocators/<name>/allocator.py — see references/allocator-code.md.
+
+Omitting `--allocator` does NOT mean `equal`: a portfolio that has already been
+applied keeps the method it is live on (a config with a null or absent
+`allocator` predates `equal`, so it means `slope`). Only a portfolio that has
+never been applied falls to `equal` — which is the default for new portfolios
+because a method that re-fits weights every day has to beat leaving them alone,
+and the walk-forward gate is where it proves it.
 
 This command ONLY recomputes weights / leverage. It never changes
 account_value — that is the live position-sizing base (see lib/portfolio.py:
@@ -74,6 +80,18 @@ def individual_score(returns_arr, lookback):
     return float(ann_slope / std) if std > 0 else 0.0
 
 
+def equal_weights(ret_df, lookback):
+    """Every strategy the same share. The default method.
+
+    `lookback` is unused — that is the point: nothing is fitted, so there is
+    nothing to overfit. The walk-forward benchmark draws random static weights,
+    and equal weight sits at the centre of that cloud, which is why a
+    re-fitting method has to beat it to be worth its turnover.
+    """
+    # Raw scores; clean() normalises and quantises them for display.
+    return {name: 1.0 for name in ret_df.columns}
+
+
 def optimize_weights(ret_df, lookback):
     """Find w that maximizes slope/std of R·w.
 
@@ -115,6 +133,74 @@ def optimize_weights(ret_df, lookback):
     return {names[i]: round(float(w_opt[i]), 4) for i in range(n)}
 
 
+# The built-in methods, by the name `--allocator` selects them with. Reserved
+# in lib/allocator.py so a user file can never shadow one. equal is first
+# because it is the default: a fitted method must earn its turnover.
+#
+# Declared as a plain literal on purpose: the platform's reporter reads this
+# with ast.literal_eval to show the methods (and their params) in the workspace
+# page, exactly as it reads an allocator file's DISPLAY_NAME / PARAMS. It never
+# imports workspace code, so anything it must see has to be a literal.
+# Same contract as a user allocator: `params` is what the page offers, and a
+# method that needs no knob declares none.
+BUILTIN_METHODS = {
+    'equal': {
+        'display_name': '等權',
+        'description': '每檔策略給一樣的配置比例,不看歷史',
+        'params': {},
+    },
+    'slope': {
+        'display_name': '斜率/波動',
+        'description': '最大化組合權益曲線的斜率除以波動',
+        'params': {},
+    },
+}
+DEFAULT_METHOD = 'equal'
+
+_BUILTIN_FNS = {'equal': equal_weights, 'slope': optimize_weights}
+
+
+def default_allocator():
+    """The method to use when `--allocator` is omitted.
+
+    A portfolio that is ALREADY LIVE keeps the method it was applied with.
+    `equal` became the default after `slope` had been the only built-in, so
+    resolving a bare command to the new default would silently re-weight real
+    positions the next time someone re-ran the usual apply. An existing config
+    whose `allocator` is null or absent was applied by that older manager, i.e.
+    slope. Only a portfolio that has never been applied gets the new default.
+    """
+    try:
+        with open(CONFIG_PATH) as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return DEFAULT_METHOD
+    if not isinstance(cfg, dict) or not cfg.get('weights'):
+        return DEFAULT_METHOD
+    return cfg.get('allocator') or 'slope'
+
+
+def default_target_vol():
+    """`--target-vol` when omitted: the account's own setting, not the module
+    default. manager.py writes target_vol_pct into portfolio_config on --apply,
+    so taking the module default here would overwrite whatever the user set —
+    and the leverage in the proposal they act on would be computed at someone
+    else's target. The workspace page no longer offers this knob at all."""
+    try:
+        with open(CONFIG_PATH) as f:
+            cfg = json.load(f)
+        pct = float(cfg['target_vol_pct'])
+    except (OSError, ValueError, TypeError, KeyError):
+        return TARGET_VOL
+    # Out of range is not a reason to quietly substitute 30%: --apply writes
+    # this number back, so a config reading 0.5 would be re-written as 30 — a
+    # 60x change in leverage that nobody asked for and nothing reports.
+    if not 0.01 <= pct / 100 <= 5:
+        _fail(f"portfolio_config.json target_vol_pct is {pct}, outside 1–500% — "
+              f"fix it, or pass --target-vol explicitly")
+    return pct / 100
+
+
 def _fail(msg, code=2):
     """Bad input: reason as the LAST stderr line, exit 2 (3 = not enough
     history) — the workspace page's command listener shows exactly that line."""
@@ -144,12 +230,12 @@ def _atomic_json(path, obj):
 def main():
     parser = argparse.ArgumentParser(description='Blave Agent Strategy Manager')
     parser.add_argument('--lookback',   type=int,   default=LOOKBACK,   help=f'Lookback window in days (default {LOOKBACK})')
-    parser.add_argument('--target-vol', type=float, default=TARGET_VOL, help=f'Target annual volatility for leverage (default {TARGET_VOL})')
+    parser.add_argument('--target-vol', type=float, default=None, help=f"Target annual volatility for leverage (default: portfolio_config's target_vol_pct, else {TARGET_VOL})")
     parser.add_argument('--notify',     action='store_true',             default=NOTIFY, help='Send Telegram notification after update')
     parser.add_argument('--apply',      action='store_true', help='Write the new weights to portfolio_config.json (default: dry-run, file untouched)')
-    parser.add_argument('--allocator',  type=str, default=None, help='Weight with allocators/<name>/allocator.py instead of the built-in slope/std optimiser')
+    parser.add_argument('--allocator',  type=str, default=None, help=f"Weighting method: a built-in ({'/'.join(BUILTIN_METHODS)}) or allocators/<name>/allocator.py (default: the live config's method, else {DEFAULT_METHOD})")
     parser.add_argument('--members',    type=str, default=None, help='Comma-separated strategy names to include (default: every strategy with a backtest)')
-    parser.add_argument('--params-json', type=str, default=None, help="JSON object overriding the allocator's PARAMS (declared keys only; built-in takes none)")
+    parser.add_argument('--params-json', type=str, default=None, help="JSON object overriding the allocator's PARAMS (declared keys only; built-ins take none)")
     parser.add_argument('--json',       type=str, default=None, help='Also write the proposal as JSON to this path (written only on success)')
     args = parser.parse_args()
 
@@ -160,12 +246,24 @@ def main():
     members = [m.strip() for m in args.members.split(',') if m.strip()] if args.members else None
     if args.members is not None and not members:
         _fail('no members given')
+    # Omitting the flag means the default method, not "no method" — every
+    # record downstream (proposal, portfolio_config) names it explicitly, so a
+    # file never has to be read as "whatever the default was that day".
+    allocator = args.allocator or default_allocator()
+    builtin = BUILTIN_METHODS.get(allocator)
+    if builtin and os.path.isdir(os.path.join(allocator_lib.ALLOCATORS_DIR, allocator)):
+        _fail(f"'{allocator}' is a built-in method, so allocators/{allocator}/ can "
+              f"never run — rename that directory to something else, then re-apply "
+              f"with --allocator=<new name>: portfolio_config.json still points at "
+              f"'{allocator}' and a bare --apply would switch you to the built-in")
+    if args.target_vol is None:
+        args.target_vol = default_target_vol()
     try:
         param_overrides = json.loads(args.params_json) if args.params_json else {}
     except ValueError as e:
         _fail(f'--params-json is not valid JSON: {e}')
-    if param_overrides and not args.allocator:
-        _fail(f'built-in slope/std takes no PARAMS (got {sorted(param_overrides)}); '
+    if param_overrides and builtin:
+        _fail(f'built-in {allocator} takes no PARAMS (got {sorted(param_overrides)}); '
               f'use --lookback / --target-vol')
 
     try:
@@ -184,22 +282,28 @@ def main():
 
     ret_df = pd.DataFrame(series_map).sort_index().fillna(0)
 
-    # Portfolio weighting: the built-in slope/std optimiser, or a user allocator.
-    # A named allocator that fails to load raises — never silently fall back to
-    # the built-in, or a typo would quietly trade on different weights.
-    if args.allocator:
-        mod = allocator_lib.load(args.allocator)
+    # Portfolio weighting: a built-in method, or a user allocator. A named
+    # allocator that fails to load raises — never silently fall back to a
+    # built-in, or a typo would quietly trade on different weights.
+    mod = None
+    if builtin:
+        method = f"built-in {builtin['display_name']}"
+        weights = allocator_lib.clean(
+            _BUILTIN_FNS[allocator](ret_df, args.lookback), list(ret_df.columns)
+        )
+    else:
+        try:
+            mod = allocator_lib.load(allocator)
+        except (OSError, ValueError, TypeError, AttributeError, SyntaxError) as e:
+            _fail(str(e))
         try:
             allocator_lib.apply_params(mod, param_overrides)
         except (ValueError, TypeError) as e:
             _fail(str(e))
-        method = getattr(mod, 'DISPLAY_NAME', args.allocator)
+        method = getattr(mod, 'DISPLAY_NAME', allocator)
         weights = allocator_lib.clean(
             mod.allocate(ret_df, args.lookback), list(ret_df.columns)
         )
-    else:
-        method = 'built-in slope/std'
-        weights = optimize_weights(ret_df, args.lookback)
 
     # Individual scores for display
     scores = {
@@ -227,10 +331,12 @@ def main():
     cfg.setdefault('asset_specs', {})
 
     cfg['weights'] = weights
-    # Which method produced these weights. Nothing downstream reads it — it is
-    # there so the workspace (and the next person to look) can tell whether the
-    # live weights came from the built-in optimiser or a user allocator.
-    cfg['allocator'] = args.allocator
+    # Which method produced these weights. This is NOT decoration: it is the
+    # only input to default_allocator(), so a bare `manager.py --apply` re-runs
+    # whatever is recorded here. Editing this field changes the method a live
+    # portfolio falls back to. The workspace also reads it to pick the method
+    # shown when the page opens.
+    cfg['allocator'] = allocator
 
     # Portfolio volatility and Sharpe
     active_names = [k for k, v in weights.items() if v > 0]
@@ -264,12 +370,21 @@ def main():
         # The proposal the workspace page renders. Independent of --apply on
         # purpose: the page only ever asks for a dry-run, applying stays a
         # separate explicit step (agent chat / --apply).
-        params = {'lookback': args.lookback, 'target_vol': args.target_vol}
-        if args.allocator and isinstance(getattr(mod, 'PARAMS', None), dict):
+        # The params the page shows for this method: what it declares, with the
+        # caller's actual lookback substituted where the method declares one. A
+        # method that declares no knobs records none — the job the page sent and
+        # the result it reads back then compare equal.
+        params = dict(builtin['params']) if builtin else {}
+        if mod is not None and isinstance(getattr(mod, 'PARAMS', None), dict):
             params.update(mod.PARAMS)
         proposal = {
             'members':        list(ret_df.columns),
-            'allocator':      args.allocator,
+            'allocator':      allocator,
+            # Top level, mirroring stats.json: the walk-forward window belongs
+            # to the RUN, not to the method, so it cannot live in `params` —
+            # no method declares it. The page compares it to decide whether a
+            # proposal is the one the current selection asked for.
+            'lookback':       args.lookback,
             'params':         params,
             'weights':        weights,
             'sharpe':         round(port_sharpe, 4),

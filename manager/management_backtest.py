@@ -12,9 +12,10 @@ Usage:
     # outputs: manager/pnl.png + manager/stats.json
 
     python3 manager/management_backtest.py --allocator my_method
-    # walk-forwards allocators/my_method/allocator.py instead of the built-in
-    # optimiser; outputs default to allocators/my_method/ so each method keeps
-    # its own stats.json + pnl.png the way each strategy does.
+    # Weighting method: a built-in (equal, the default, or slope) or
+    # allocators/my_method/allocator.py. A user allocator's outputs default to
+    # allocators/my_method/ so each method keeps its own stats.json + pnl.png
+    # the way each strategy does; both built-ins share manager/.
 
     python3 manager/management_backtest.py --members a,b --progress manager/mgmt_progress.json
     # subset of strategies + a progress file the workspace page polls (what its
@@ -48,7 +49,8 @@ from lib.pnl import load_all_stats
 from lib import allocator as allocator_lib
 
 sys.path.insert(0, str(Path(__file__).parent))
-from manager import optimize_weights, _fail, _atomic_json
+from manager import (BUILTIN_METHODS, DEFAULT_METHOD, _BUILTIN_FNS, default_allocator,
+                     optimize_weights, _fail, _atomic_json)
 
 
 def rolling_managed_returns(ret_df: pd.DataFrame, lookback: int, allocate_fn=None,
@@ -57,9 +59,10 @@ def rolling_managed_returns(ret_df: pd.DataFrame, lookback: int, allocate_fn=Non
     Walk-forward: for each day i >= lookback, optimize weights on
     ret_df.iloc[i-lookback:i], then record ret_df.iloc[i] @ weights.
 
-    allocate_fn(window, lookback) -> {strategy: weight}; defaults to the
-    built-in slope/std optimiser. This is the whole plug point — everything
-    else here (the OOS loop, the random benchmark, the stats) is method-agnostic.
+    allocate_fn(window, lookback) -> {strategy: weight}; main() always supplies
+    one (built-in or user allocator) and the slope/std fallback here is for
+    direct callers. This is the whole plug point — everything else (the OOS
+    loop, the random benchmark, the stats) is method-agnostic.
 
     progress_cb(day, total) is called after every OOS day (see --progress).
 
@@ -190,13 +193,15 @@ def main():
     parser.add_argument('--random-n', type=int,   default=RANDOM_N,
                         help=f'Number of random benchmark portfolios (default {RANDOM_N})')
     parser.add_argument('--output',   type=str,   default=None,
-                        help=f'Output folder (default: {OUTPUT}, or allocators/<name> with --allocator)')
+                        help=f'Output folder (default: {OUTPUT}, or allocators/<name> for a user allocator)')
     parser.add_argument('--allocator', type=str,  default=None,
-                        help='Walk-forward allocators/<name>/allocator.py instead of the built-in optimiser')
+                        help=f"Weighting method: a built-in ({'/'.join(BUILTIN_METHODS)}) or "
+                             f"allocators/<name>/allocator.py (default: the live "
+                             f"config's method, else {DEFAULT_METHOD})")
     parser.add_argument('--members',  type=str,   default=None,
                         help='Comma-separated strategy names to include (default: every strategy with a backtest)')
     parser.add_argument('--params-json', type=str, default=None,
-                        help="JSON object overriding the allocator's PARAMS (declared keys only; built-in takes none)")
+                        help="JSON object overriding the allocator's PARAMS (declared keys only; built-ins take none)")
     parser.add_argument('--progress', type=str,   default=None,
                         help='Write {"day", "total", "ts"} here during the walk-forward (at most every 2s)')
     args = parser.parse_args()
@@ -208,12 +213,22 @@ def main():
     members = [m.strip() for m in args.members.split(',') if m.strip()] if args.members else None
     if args.members is not None and not members:
         _fail('no members given')
+    # Omitting the flag means the default method, not "no method" — stats.json
+    # names it explicitly so a result is never read as "whatever the default
+    # was the day it ran".
+    # Same default as manager.py — the two buttons on the page must evaluate
+    # and propose the SAME method, so a live portfolio's method wins here too.
+    allocator = args.allocator or default_allocator()
+    builtin = BUILTIN_METHODS.get(allocator)
+    if builtin and os.path.isdir(os.path.join(allocator_lib.ALLOCATORS_DIR, allocator)):
+        _fail(f"'{allocator}' is a built-in method, so allocators/{allocator}/ can "
+              f"never run — rename that directory to something else")
     try:
         param_overrides = json.loads(args.params_json) if args.params_json else {}
     except ValueError as e:
         _fail(f'--params-json is not valid JSON: {e}')
-    if param_overrides and not args.allocator:
-        _fail(f'built-in slope/std takes no PARAMS (got {sorted(param_overrides)}); use --lookback')
+    if param_overrides and builtin:
+        _fail(f'built-in {allocator} takes no PARAMS (got {sorted(param_overrides)}); use --lookback')
 
     try:
         valid = load_all_stats(only=members)
@@ -237,22 +252,28 @@ def main():
               f'(need at least {args.lookback + 1})', file=sys.stderr)
         sys.exit(3)
 
-    # Named allocator → walk-forward that file and keep its outputs next to it,
-    # so several methods can be compared without overwriting each other.
-    if args.allocator:
-        mod         = allocator_lib.load(args.allocator)
+    # A user allocator keeps its outputs next to the file, so several methods
+    # can be compared without overwriting each other. Both built-ins share
+    # manager/ — last run wins, and stats.json's `allocator` says which it was.
+    mod = None
+    names = list(ret_df.columns)
+    if builtin:
+        fn          = _BUILTIN_FNS[allocator]
+        method      = f"built-in {builtin['display_name']}"
+        allocate_fn = lambda window, lb: allocator_lib.clean(fn(window, lb), names)
+        output      = args.output or OUTPUT
+    else:
+        try:
+            mod = allocator_lib.load(allocator)
+        except (OSError, ValueError, TypeError, AttributeError, SyntaxError) as e:
+            _fail(str(e))
         try:
             allocator_lib.apply_params(mod, param_overrides)
         except (ValueError, TypeError) as e:
             _fail(str(e))
-        method      = getattr(mod, 'DISPLAY_NAME', args.allocator)
-        names       = list(ret_df.columns)
+        method      = getattr(mod, 'DISPLAY_NAME', allocator)
         allocate_fn = lambda window, lb: allocator_lib.clean(mod.allocate(window, lb), names)
-        output      = args.output or os.path.join(allocator_lib.ALLOCATORS_DIR, args.allocator)
-    else:
-        method      = 'built-in slope/std'
-        allocate_fn = None
-        output      = args.output or OUTPUT
+        output      = args.output or os.path.join(allocator_lib.ALLOCATORS_DIR, allocator)
 
     strategies = list(ret_df.columns)
     print(f'\nManagement Walk-Forward Backtest  (lookback={args.lookback}d, method={method})')
@@ -303,13 +324,17 @@ def main():
 
     band = _cum_band(managed_ret, bench_rets)
     managed_cum, p5, p50, p95 = band
-    params = {'lookback': args.lookback}
-    if args.allocator and isinstance(getattr(mod, 'PARAMS', None), dict):
+    # The params the page shows for this method: what it declares, with the
+    # caller's actual lookback substituted where the method declares one. A
+    # method that declares no knobs records none — the job the page sent and
+    # the result it reads back then compare equal.
+    params = dict(builtin['params']) if builtin else {}
+    if mod is not None and isinstance(getattr(mod, 'PARAMS', None), dict):
         params.update(mod.PARAMS)
 
     result = {
         'lookback':  args.lookback,
-        'allocator': args.allocator,   # None = built-in slope/std
+        'allocator': allocator,   # always explicit: a built-in name or a file's
         'members':   strategies,
         'params':    params,
         'computed_at': int(time.time()),

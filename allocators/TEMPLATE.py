@@ -1,7 +1,9 @@
 """Allocator template — copy to allocators/<name>/allocator.py and edit.
 
 An allocator decides HOW MUCH of the portfolio each strategy gets. It is the
-pluggable alternative to the built-in slope/std optimiser in manager/manager.py.
+pluggable alternative to the built-in methods in manager/manager.py (`equal`
+and `slope`) — **those two names are reserved**, so never call your directory
+`allocators/equal/` or `allocators/slope/`; it would never be reached.
 
     cp allocators/TEMPLATE.py allocators/my_method/allocator.py
 
@@ -11,21 +13,25 @@ Then validate and use it:
     python3 manager/manager.py --allocator my_method               # dry-run weights
     python3 manager/manager.py --allocator my_method --apply       # write portfolio_config.json
 
-As shipped this template is equal weight — it runs as-is, so a copy is a
-working allocator before you change anything.
+As shipped this template is inverse-volatility weighting — it runs as-is, so a
+copy is a working allocator before you change anything. It is deliberately NOT
+equal weight: that is already the built-in `equal`, and a copy of it would just
+put a second 等權 in the method picker.
 
 Full contract: references/allocator-code.md
 """
 
 # Human-facing name + one line you could read months later and still remember
 # what this does. Same convention as a strategy's DISPLAY_NAME / DESCRIPTION.
-DISPLAY_NAME = "等權"
-DESCRIPTION = "每檔策略給一樣的權重"
+DISPLAY_NAME = "反波動加權"
+DESCRIPTION = "波動越大的策略給越小的權重"
 
 # This method's own knobs. Edit the values here — they are NOT command-line
-# flags, same as a strategy's top-of-file constants. `lookback` is not one of
-# them: it is the walk-forward window and is passed in by the caller.
-PARAMS = {}
+# flags, same as a strategy's top-of-file constants. `lookback` and
+# `target_vol` are RESERVED and must not appear here (loading raises): the
+# first is the walk-forward window passed in by the caller, the second is
+# portfolio leverage and no weighting input at all.
+PARAMS = {"floor_vol": 0.001}
 
 
 def allocate(returns, lookback):
@@ -41,5 +47,8 @@ def allocate(returns, lookback):
              strategy means zero weight. Raising is better than returning
              something you are unsure of — a wrong weight sizes a live position.
     """
-    names = list(returns.columns)
-    return {name: 1.0 for name in names}
+    window = returns[-lookback:]
+    # Raw scores are fine — clean() normalises them to sum 1 for you. The floor
+    # keeps a flat stretch of returns from dividing by zero.
+    return {name: 1.0 / max(float(window[name].std()), PARAMS["floor_vol"])
+            for name in window.columns}

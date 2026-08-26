@@ -27,21 +27,23 @@ When the user asks to backtest the portfolio / combined strategies, use THIS scr
 
 ## manager.py
 
-Reads all `strategies/*/stats.json` (daily_returns). Maximizes `slope/std` of the combined portfolio equity curve (365-day lookback). Writes optimal weights + leverage to `manager/portfolio_config.json` — **only with `--apply`**.
+Reads all `strategies/*/stats.json` (daily_returns) and computes portfolio weights with the chosen method — by default `equal`, every strategy the same share. Writes weights + leverage to `manager/portfolio_config.json` — **only with `--apply`**.
 
 ```
-python3 manager/manager.py [--lookback 365] [--target-vol 0.30]            # dry-run
-python3 manager/manager.py [--lookback 365] [--target-vol 0.30] --apply    # write config
+python3 manager/manager.py --members a,b,c --allocator equal            # dry-run
+python3 manager/manager.py --members a,b,c --allocator equal --apply    # write config
 ```
 
-`--target-vol`: sets target annual volatility; computes `leverage = target_vol / ann_vol`
+`--target-vol`: sets target annual volatility; computes `leverage = target_vol / ann_vol`. **Omit it and the account's own `target_vol_pct` is used** — passing a value overwrites that setting on `--apply`, so only pass one when the user asked to change it.
 
-`--allocator <name>`: weight with `allocators/<name>/allocator.py` instead of the built-in slope/std optimiser. `management_backtest.py` takes the same flag and writes its output to `allocators/<name>/` so each method keeps its own `stats.json` + `pnl.png`. Contract, validation rules, and the create → backtest → dry-run → apply workflow: **`references/allocator-code.md`**. The `--apply` confirmation rule below applies identically to allocator runs.
+**Name the method explicitly on `--apply`.** Omitting `--allocator` resolves to the method the live config was applied with (a config with no `allocator`, or a null one, means `slope` — it predates `equal`); only a portfolio that has never been applied falls to the default. That keeps a bare re-run from silently re-weighting live positions, but the command reads clearer when the method is spelled out.
+
+`--allocator <name>`: the weighting method — a built-in (`equal`, the default when the flag is omitted, or `slope`) or `allocators/<name>/allocator.py`. `management_backtest.py` takes the same flag and writes its output to `allocators/<name>/` so each method keeps its own `stats.json` + `pnl.png`. Contract, validation rules, and the create → backtest → dry-run → apply workflow: **`references/allocator-code.md`**. The `--apply` confirmation rule below applies identically to allocator runs.
 
 Flags both scripts share (these are what the workspace's 投資組合 page drives; the agent can use them too):
 
 - `--members a,b,c` — restrict to those strategies (directory names under `strategies/`). Unknown name → exit 2, nothing written.
-- `--params-json '{"k": v}'` — override an allocator's `PARAMS` for this run (declared keys only; the built-in method takes none — its knobs are `--lookback` / `--target-vol`).
+- `--params-json '{"k": v}'` — override an allocator's `PARAMS` for this run (declared keys only). Neither built-in declares any: `lookback` and `target_vol` are the caller's flags, not a method's knobs — `lookback` is the walk-forward window the page sets once per run, and `--target-vol` scales leverage and is no longer offered on the page at all.
 - `manager.py --json PATH` — also write the dry-run proposal as JSON (weights, sharpe, leverage, `history_days`…). `management_backtest.py --progress PATH` — write `{day, total}` during the walk-forward. `stats.json` additionally carries `members`, `params`, `managed_cum` and `random_benchmark.band` (per-day p5/p50/p95 cumulative %).
 - Exit codes: 2 = bad input (reason is the last stderr line); `management_backtest.py` exits 3 when the union of member history is not longer than `--lookback`.
 

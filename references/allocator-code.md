@@ -1,9 +1,26 @@
 # Allocator Code Structure
 
-An **allocator** decides how much of the portfolio each strategy gets. The
-slope/std optimiser inside `manager/manager.py` is the *default* one, not the
-only one — a user with their own weighting idea writes it as a file and both
-`manager.py` and `management_backtest.py` use it via `--allocator <name>`.
+An **allocator** decides how much of the portfolio each strategy gets.
+`--allocator <name>` on both `manager.py` and `management_backtest.py` picks
+one, and there are three kinds of name:
+
+| `--allocator` | what it is |
+|---|---|
+| `equal` | every strategy the same share. Built in, and the default for a **new** portfolio. |
+| `slope` | the slope/std optimiser inside `manager.py`. Built in. |
+| anything else | the user's own `allocators/<name>/allocator.py` |
+| omitted | the method the live config was applied with — `equal` only when it has never been applied |
+
+**Omitting the flag is not the same as asking for `equal`.** A portfolio that
+is already trading keeps its method: a config whose `allocator` is null or
+absent predates `equal`, so it means `slope`. That is what stops a routine
+re-run of the usual apply from silently re-weighting live positions. Name the
+method on `--apply` anyway — the command reads clearer for the next person.
+
+Equal weight is the default because re-fitting weights every day has to *earn*
+its turnover: the walk-forward benchmark draws random static portfolios and
+equal weight sits at the centre of that cloud, so a fitted method that cannot
+beat it is costing the user money for nothing.
 
 Strategies answer *when to be in*. Allocators answer *how much*. Same shape:
 one directory per name, user-owned code, its own backtest output.
@@ -22,6 +39,10 @@ allocators/
 `allocators/*` is gitignored except `TEMPLATE.py`, same as `strategies/`.
 Never put an allocator in `manager/` — the only new file that directory takes
 is a custom executor (see `manager.md`).
+
+**`equal` and `slope` are reserved** — they name the two built-in methods, so
+a directory called either could never be reached. `lib/allocator.py` refuses to
+load one rather than let the user believe their file is what trades.
 
 **The directory name must match `[A-Za-z0-9_-]{1,64}`** — ASCII letters,
 digits, `_` and `-`, nothing else. A name with a space or a Chinese character
@@ -44,9 +65,13 @@ def allocate(returns, lookback):
 - `returns` — DataFrame of daily strategy returns, one column per strategy.
   From `management_backtest.py` it is exactly `lookback` rows; from `manager.py`
   it is the full history, so slice `returns[-lookback:]` if the method cares.
-- `lookback` — the walk-forward window, **supplied by the caller**. It is not
-  one of the method's parameters; it defines the out-of-sample protocol both
-  callers share.
+- `lookback` — the walk-forward window, **supplied by the caller** as this
+  argument. It defines the out-of-sample protocol every method shares — the
+  page sets it once per run, next to 跑回測 — so it is **a reserved PARAMS
+  name, not one of yours**: declaring `lookback` (or `target_vol`) in `PARAMS`
+  raises at load time, because the manager scripts read those two as their own
+  flags and your file would never see the page's value. Read the window from
+  this argument. Neither built-in declares it either.
 - `PARAMS` — everything else the method exposes. Edit the values **in the
   file**, exactly like a strategy's top-of-file constants. There is
   deliberately no `--param` CLI flag: params are code, versioned with the
@@ -63,11 +88,18 @@ Return value goes through `clean()` before anything uses it:
 
 | Input | Result |
 |---|---|
-| raw scores (any positive scale) | normalised to sum 1 — returning unnormalised is fine |
+| raw scores (any positive scale) | normalised to sum **exactly** 1, quantised to whole basis points — returning unnormalised is fine |
 | a strategy omitted | weight 0 |
 | a negative weight | **ValueError** |
 | a name that is not a live strategy | **ValueError** |
 | NaN, all-zero, non-dict | **ValueError** |
+
+Weights come back on a 0.01% grid that adds up to exactly 1 (largest
+remainder), so a returned share can move by up to one basis point — worth
+knowing if your method enforces a ceiling of its own, since the strategy that
+was rounded down hardest is the one that gets the leftover. The percentages a
+page or a Telegram message prints round again to fewer digits and need not
+visibly total 100.0; the stored weights, which are what size positions, do.
 
 Negatives are rejected rather than clipped because they fail silently
 downstream, not loudly: `manager.py` derives leverage from the volatility of
@@ -133,6 +165,11 @@ python3 manager/manager.py --members a,b,c --allocator my_method --apply
 the weights, so it is always visible which method produced the live weights.
 Nothing downstream reads that field; it is there for the user and the workspace.
 
+Reading an equal-weight walk-forward: "beats N% of random portfolios" is
+close to tautological for it — the benchmark is random *static* weights and
+equal weight is their centre, so ~50% is the expected answer, not a verdict.
+The number earns its meaning when a fitted method is measured against it.
+
 `management_backtest.py` needs more than `lookback` days of overlapping
 strategy history (365 by default) — with less, it prints how many days it has
 and stops. That is the usual blocker for a new portfolio, not a bug.
@@ -149,8 +186,10 @@ hour. Everything it needs is already in `returns`.
 ## Never edit the built-in
 
 **`manager/manager.py` and `manager/management_backtest.py` are off limits.**
-A new weighting idea — including "the built-in, but with X" — is always a new
-`allocators/<name>/allocator.py`. No exceptions.
+A new weighting idea — including "a built-in, but with X" — is always a new
+`allocators/<name>/allocator.py`. No exceptions. That covers both built-ins:
+neither `equal` nor `slope` is yours to edit, and "equal weight but capped" or
+"slope but with a floor" are new files like anything else.
 
 Editing the built-in looks cheaper and is not:
 
@@ -161,11 +200,11 @@ Editing the built-in looks cheaper and is not:
 - **It gets merged away.** Both scripts are tracked files; the next
   `blaveclaw-config` update compares them file by file against the reference
   clone, and a local edit is at the mercy of that merge.
-- **It changes the default for everything.** The built-in is the one method
-  every portfolio falls back to; a variant nobody asked for should not live
-  inside it.
+- **It changes the default for everything.** `equal` is what every portfolio
+  falls back to when no method is named; a variant nobody asked for should not
+  live inside it.
 
-An allocator can reuse the built-in's parts instead of copying them. Both
+An allocator can reuse a built-in's parts instead of copying them. Both
 callers put `manager/` on `sys.path` before loading your file, so
 `from manager import portfolio_slope_std` (the objective) or `optimize_weights`
 (the whole optimiser) imports — the same line `management_backtest.py` uses.
