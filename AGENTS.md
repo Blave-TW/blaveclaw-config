@@ -189,7 +189,7 @@ Three rules to always remember:
 2. **`manager.py` is dry-run by default** — show proposed weights first, only `--apply` after user confirms
 3. **Order library → reconciler is one atomic task** — wire `reconciler.py` in the same session as `lib/order_*.py`
 
-Custom weighting → `allocators/<name>/allocator.py` + `--allocator` (`references/allocator-code.md`) — **always a new allocator file, never an edit to `manager/manager.py`**, even for "the built-in but with X"; custom execution shape → `manager/executors/<name>.py` (`references/lib.md` › *Custom executors*). Execution style (市價/TWAP) is set from the web 下單設定 — never hand-wire TWAP into the reconciler.
+Custom weighting → `allocators/<name>/allocator.py` + `--allocator` (`references/allocator-code.md`) — **always a new allocator file, never an edit to `manager/manager.py` or `manager/management_backtest.py`**, even for "the built-in but with X"; custom execution shape → `manager/executors/<name>.py` (`references/lib.md` › *Custom executors*). Execution style (市價/TWAP) is set from the web 下單設定 — never hand-wire TWAP into the reconciler.
 
 ## Broker Onboarding
 

@@ -7,7 +7,13 @@
 - `manager/reconciler.py` — position reconciler (polling loop)
 - `manager/portfolio_config.json` — gitignored; written by manager.py; also contains `"exchanges"` dict (see below)
 
-**CRITICAL — never create files or subdirectories inside `manager/`, and never edit the scripts in it.** All output (portfolio_config.json, pnl.png, stats.json) is written by the scripts themselves. Never create a `manager/manager/` or any nested folder — it breaks path resolution in all three scripts. Never delete any file in `manager/` when removing strategies. A new weighting method — including a variant of the built-in optimiser — is a new `allocators/<name>/allocator.py`, never an edit to `manager.py` / `management_backtest.py` (`references/allocator-code.md` › *Never edit the built-in*).
+**CRITICAL — `manager/` holds platform scripts and their own output.** All output (portfolio_config.json, pnl.png, stats.json) is written by the scripts themselves. Never create a `manager/manager/` or any other nested folder — it breaks path resolution in all three scripts. Never delete any file in `manager/` when removing strategies.
+
+What may be added and edited in here is a closed list:
+
+- **`manager/executors/<name>.py`** — a custom execution style, the only new file this directory takes (`references/lib.md` › *Custom executors*; the loader in `lib/execute.py` reads exactly that path).
+- **`manager/reconciler.py`** — hand-wired venue plumbing, and only that: `get_positions()` / `place_order()` for a venue without an official lib (see *reconciler.py* below and `references/lib.md`). Official venues are auto-wired — do not touch it for them.
+- **`manager/manager.py` and `manager/management_backtest.py` — never.** A new weighting method, including a variant of the built-in optimiser, is a new `allocators/<name>/allocator.py` (`references/allocator-code.md` › *Never edit the built-in*).
 
 ## management_backtest.py
 

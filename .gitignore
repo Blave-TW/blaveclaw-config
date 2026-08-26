@@ -9,6 +9,7 @@ strategies/*
 !strategies/TEMPLATE_C.py
 allocators/*
 !allocators/TEMPLATE.py
+manager/executors/
 manager/portfolio_config.json
 manager/orders.jsonl
 manager/last_reconcile.json
