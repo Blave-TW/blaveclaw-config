@@ -107,6 +107,73 @@ per out-of-sample day — a few thousand calls for a year — so anything that
 fetches data or fits a heavy model per call turns a one-minute backtest into an
 hour. Everything it needs is already in `returns`.
 
-Do not reimplement the built-in method. If the user wants "the built-in but
-with a weight cap", that is a change to `optimize_weights`' bounds, not a new
-file.
+## Never edit the built-in
+
+**`manager/manager.py` and `manager/management_backtest.py` are off limits.**
+A new weighting idea — including "the built-in, but with X" — is always a new
+`allocators/<name>/allocator.py`. No exceptions.
+
+Editing the built-in looks cheaper and is not:
+
+- **The workspace page can't see it.** Its method dropdown lists exactly the
+  `allocators/<name>/` directories the machine reports. A new flag on
+  `manager.py` is invisible there, and the page also refuses to pass extra
+  params to the built-in — so the user can only reach it by typing a command.
+- **It gets merged away.** Both scripts are tracked files; the next
+  `blaveclaw-config` update compares them file by file against the reference
+  clone, and a local edit is at the mercy of that merge.
+- **It changes the default for everything.** The built-in is the one method
+  every portfolio falls back to; a variant nobody asked for should not live
+  inside it.
+
+An allocator can reuse the built-in's parts instead of copying them. Both
+callers put `manager/` on `sys.path` before loading your file, so
+`from manager import portfolio_slope_std` (the objective) or `optimize_weights`
+(the whole optimiser) imports — the same line `management_backtest.py` uses.
+It is `from manager import ...`, never `from manager.manager import ...`:
+`manager/` has no `__init__.py`, so the name resolves to the *module*
+`manager/manager.py`, not to a package.
+
+Worked example — the built-in slope/std with a ceiling on any one strategy:
+
+```python
+"""Built-in slope/std, with a ceiling on any single strategy's weight."""
+import numpy as np
+from scipy.optimize import minimize
+
+from manager import portfolio_slope_std  # manager/ is on sys.path — see above
+
+DISPLAY_NAME = "斜率/波動(有上限)"
+DESCRIPTION  = "內建 slope/std 最佳化,但單一策略權重不超過上限"
+PARAMS       = {"max_weight": 0.30}
+
+
+def allocate(returns, lookback):
+    names = list(returns.columns)
+    n     = len(names)
+    cap   = float(PARAMS["max_weight"])
+    # A cap below 1/n makes sum(w) = 1 impossible — raise instead of letting
+    # SLSQP return weights that do not sum to 1 (a wrong live position size).
+    if cap * n < 1.0:
+        raise ValueError(f"max_weight {cap} × {n} strategies < 1 "
+                         f"(cap must be >= {1.0 / n:.4f})")
+
+    matrix      = returns.values      # portfolio_slope_std slices to `lookback`
+    objective   = lambda w: -portfolio_slope_std(w, matrix, lookback)
+    constraints = [{"type": "eq", "fun": lambda w: w.sum() - 1}]
+    bounds      = [(0.0, cap)] * n
+
+    best, best_score = None, np.inf
+    starts = [np.ones(n) / n] + [np.random.dirichlet(np.ones(n)) for _ in range(10)]
+    for w0 in starts:
+        res = minimize(objective, w0, method="SLSQP", bounds=bounds,
+                       constraints=constraints, options={"ftol": 1e-9, "maxiter": 1000})
+        if res.success and res.fun < best_score:
+            best, best_score = res, res.fun
+
+    w = np.ones(n) / n if best is None else np.clip(best.x, 0.0, cap)
+    return {names[i]: float(w[i]) for i in range(n)}
+```
+
+Because the cap is a `PARAMS` key, the workspace page shows it as an editable
+parameter — which a flag on `manager.py` could never be.

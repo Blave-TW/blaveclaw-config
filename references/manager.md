@@ -7,7 +7,7 @@
 - `manager/reconciler.py` — position reconciler (polling loop)
 - `manager/portfolio_config.json` — gitignored; written by manager.py; also contains `"exchanges"` dict (see below)
 
-**CRITICAL — never create files or subdirectories inside `manager/`.** All output (portfolio_config.json, pnl.png, stats.json) is written by the scripts themselves. Never create a `manager/manager/` or any nested folder — it breaks path resolution in all three scripts. Never delete any file in `manager/` when removing strategies.
+**CRITICAL — never create files or subdirectories inside `manager/`, and never edit the scripts in it.** All output (portfolio_config.json, pnl.png, stats.json) is written by the scripts themselves. Never create a `manager/manager/` or any nested folder — it breaks path resolution in all three scripts. Never delete any file in `manager/` when removing strategies. A new weighting method — including a variant of the built-in optimiser — is a new `allocators/<name>/allocator.py`, never an edit to `manager.py` / `management_backtest.py` (`references/allocator-code.md` › *Never edit the built-in*).
 
 ## management_backtest.py
 
