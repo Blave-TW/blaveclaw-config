@@ -44,6 +44,7 @@ from lib import allocator as allocator_lib
 
 # ── Config ────────────────────────────────────────────────────────────────────
 TARGET_VOL = 0.30  # target annual volatility (used to compute leverage)
+VOL_WINDOW = 90    # trailing days for realized portfolio vol (leverage denominator)
 NOTIFY     = False # send Telegram notification after update
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -371,14 +372,19 @@ def main():
     # shown when the page opens.
     cfg['allocator'] = allocator
 
-    # Portfolio volatility and Sharpe
+    # Portfolio volatility and Sharpe. Vol uses only the trailing VOL_WINDOW
+    # days: it feeds the leverage suggestion (target_vol / port_vol), and
+    # volatility clusters — the full sample would let a regime from years ago
+    # dilute what leverage is safe today.
     active_names = [k for k, v in weights.items() if v > 0]
+    vol_ret_df   = ret_df.tail(VOL_WINDOW)
+    vol_days     = int(len(vol_ret_df))
     if len(active_names) >= 2:
         w_active = np.array([weights[k] for k in active_names])
-        cov      = ret_df[active_names].cov() * 365
+        cov      = vol_ret_df[active_names].cov() * 365
         port_vol = float(np.sqrt(w_active @ cov.values @ w_active)) * 100
     elif len(active_names) == 1:
-        port_vol = float(ret_df[active_names[0]].std() * np.sqrt(365)) * 100
+        port_vol = float(vol_ret_df[active_names[0]].std() * np.sqrt(365)) * 100
     else:
         port_vol = 0.0
 
@@ -426,6 +432,9 @@ def main():
             'weights':        weights,
             'sharpe':         round(port_sharpe, 4),
             'ann_vol_pct':    round(port_vol, 2),
+            # Days the vol above was actually computed over: min(VOL_WINDOW,
+            # data length). history_days below stays the full data span.
+            'vol_window_days': vol_days,
             'target_vol_pct': round(args.target_vol * 100, 1),
             'leverage':       leverage,
             'slope_std':      round(port_score, 4),

@@ -34,7 +34,7 @@ python3 manager/manager.py --members a,b,c --allocator equal            # dry-ru
 python3 manager/manager.py --members a,b,c --allocator equal --apply    # write config
 ```
 
-`--target-vol`: sets target annual volatility; computes `leverage = target_vol / ann_vol`. **Omit it and the account's own `target_vol_pct` is used** — passing a value overwrites that setting on `--apply`, so only pass one when the user asked to change it.
+`--target-vol`: sets target annual volatility; computes `leverage = target_vol / ann_vol`, where `ann_vol` is realized over the **trailing 90 days only** (`VOL_WINDOW`) — volatility clusters, so a regime from years back must not dilute what leverage is safe today. Sharpe and the walk-forward still use the full history; the proposal reports the days actually used as `vol_window_days`. **Omit it and the account's own `target_vol_pct` is used** — passing a value overwrites that setting on `--apply`, so only pass one when the user asked to change it.
 
 **Name the method explicitly on `--apply`.** Omitting `--allocator` resolves to the method the live config was applied with (a config with no `allocator`, or a null one, means `slope` — it predates `equal`); only a portfolio that has never been applied falls to the default. That keeps a bare re-run from silently re-weighting live positions, but the command reads clearer when the method is spelled out.
 
