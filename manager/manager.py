@@ -46,9 +46,49 @@ from lib import allocator as allocator_lib
 TARGET_VOL = 0.30  # target annual volatility (used to compute leverage)
 VOL_WINDOW = 90    # trailing days for realized portfolio vol (leverage denominator)
 NOTIFY     = False # send Telegram notification after update
+# What a day costs on a leg that has no data at all — before a strategy's first
+# backtest day, or after its last. Annualized; see build_returns().
+ABSENT_FILL_ANNUAL = -0.02
 # ─────────────────────────────────────────────────────────────────────────────
 
 CONFIG_PATH = Path(__file__).parent / 'portfolio_config.json'
+
+
+def build_returns(valid):
+    """Two aligned daily-return matrices from load_all_stats() output.
+
+    Returns (fit_df, real_df) — same index, same columns, differing only on the
+    days a strategy has NO DATA: before its first backtest day, or after its
+    last. `fit_df` charges those days ABSENT_FILL_ANNUAL; `real_df` puts 0
+    there.
+
+    Why the two differ. A weighting method that maximises a RATIO (the built-in
+    slope/std, and most sensible methods) is scale-invariant: an absent leg
+    contributes no return and no variance, so its weight divides the numerator
+    and the denominator alike and cancels out. The method is then genuinely
+    indifferent to how much it hands a strategy that did not exist yet — the
+    objective is flat across the whole simplex and the optimiser stops wherever
+    it started, which is how a walk-forward ends up allocating to strategies
+    with no history and re-drawing that allocation every day. A small negative
+    fill breaks the tie toward the legs that are actually live, and it is a
+    handicap that decays on its own: it shrinks as real days fill the window,
+    so a young strategy still earns weight, it just has to be worth its keep.
+
+    The fill never reaches the money. `real_df` is what the portfolio actually
+    returned, and a strategy that did not exist cannot have lost anything —
+    charging the walk-forward's random benchmark for holding one would flatter
+    the managed result it is supposed to be a benchmark for.
+
+    A non-trading day is NOT an absent day: lib/pnl resamples every strategy to
+    calendar days and writes an explicit 0, so a weekend or a market holiday
+    arrives here as a real zero and is never filled. A NaN means no data.
+    """
+    series_map = {}
+    for name, data in valid.items():
+        dates = pd.to_datetime(data['daily_dates'])
+        series_map[name] = pd.Series(data['daily_returns'], index=dates, dtype=float)
+    raw = pd.DataFrame(series_map).sort_index()
+    return raw.fillna(ABSENT_FILL_ANNUAL / 365.0), raw.fillna(0.0)
 
 
 def portfolio_slope_std(w, ret_matrix, lookback):
@@ -305,14 +345,10 @@ def main():
     if not valid:
         _fail('No strategies with daily_returns found. Run backtests first.')
 
-    # Build aligned daily returns matrix
-    series_map = {}
-    for name, data in valid.items():
-        dates = pd.to_datetime(data['daily_dates'])
-        rets  = pd.Series(data['daily_returns'], index=dates, dtype=float)
-        series_map[name] = rets
-
-    ret_df = pd.DataFrame(series_map).sort_index().fillna(0)
+    # Build aligned daily returns matrices. The method fits on fit_df (absent
+    # days charged); everything reported — scores, vol, Sharpe, the achieved
+    # slope/std — is measured on ret_df, what the money actually did.
+    fit_df, ret_df = build_returns(valid)
 
     # Portfolio weighting: a built-in method, or a user allocator. A named
     # allocator that fails to load raises — never silently fall back to a
@@ -322,7 +358,7 @@ def main():
         method = f"built-in {builtin['display_name']}"
         _sync_lookback(args, builtin['params'], method)
         weights = allocator_lib.clean(
-            _BUILTIN_FNS[allocator](ret_df, args.lookback), list(ret_df.columns)
+            _BUILTIN_FNS[allocator](fit_df, args.lookback), list(ret_df.columns)
         )
     else:
         try:
@@ -336,7 +372,7 @@ def main():
         method = getattr(mod, 'DISPLAY_NAME', allocator)
         _sync_lookback(args, getattr(mod, 'PARAMS', None), method)
         weights = allocator_lib.clean(
-            mod.allocate(ret_df, args.lookback), list(ret_df.columns)
+            mod.allocate(fit_df, args.lookback), list(ret_df.columns)
         )
 
     # Individual scores for display
@@ -388,6 +424,20 @@ def main():
     else:
         port_vol = 0.0
 
+    # Vol is the leverage denominator, and a leg with no data in the window
+    # looks risk-free: it contributes no variance, so port_vol comes out too
+    # low and target_vol/port_vol too high. Concentrating on a strategy whose
+    # backtest has gone stale is the bad case — say so rather than let a
+    # position size come out of a number nobody checked.
+    absent_mask  = (fit_df != ret_df).tail(VOL_WINDOW)
+    stale_active = {n: int(absent_mask[n].sum()) for n in active_names
+                    if absent_mask[n].any()}
+    if stale_active:
+        detail = ', '.join(f'{n} {d}/{vol_days}d' for n, d in sorted(stale_active.items()))
+        print(f'WARNING: no data inside the {vol_days}-day volatility window for '
+              f'{detail} — re-run those backtests before sizing on the leverage below',
+              file=sys.stderr)
+
     port_ret_series = ret_df.values @ w_arr
     port_std = port_ret_series.std()
     port_sharpe = float(port_ret_series.mean() / port_std * np.sqrt(365)) if port_std > 0 else 0.0
@@ -428,6 +478,12 @@ def main():
             # page always has one field to compare. `params` carries it too,
             # but only for a method that declares it.
             'lookback':       args.lookback,
+            # The assumption the weights were fitted under, so a proposal is
+            # never read as assumption-free. Top level, not in `params`:
+            # `params` is the method's own declared knobs — a built-in takes
+            # none at all and an allocator rejects any key it did not declare —
+            # so a fixed cost that no method chooses does not belong there.
+            'absent_fill_annual_pct': round(ABSENT_FILL_ANNUAL * 100, 4),
             'params':         params,
             'weights':        weights,
             'sharpe':         round(port_sharpe, 4),
@@ -448,6 +504,13 @@ def main():
     # Print summary
     window = f'lookback={args.lookback}d' if args.lookback else 'no window'
     print(f'\nBlave Agent Strategy Manager  ({window}, method={method})')
+    # Per strategy, so the count is days and the reader can see WHICH member is
+    # short of history — the one the method may have just weighted to zero.
+    absent_by = {n: int(d) for n, d in (fit_df != ret_df).sum().items() if d}
+    if absent_by:
+        detail = ', '.join(f'{n} {d}d' for n, d in sorted(absent_by.items()))
+        print(f'Days with no data      : {detail}  '
+              f'(charged at {ABSENT_FILL_ANNUAL:+.1%}/yr while fitting, 0 above)')
     print(f'{"Strategy":<28} {"Indiv Score":>12} {"Weight":>8} {"Sharpe":>8} {"MDD%":>8} {"Symbol":<16}')
     print('-' * 86)
     for name in sorted(weights, key=lambda x: weights[x], reverse=True):

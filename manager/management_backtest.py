@@ -49,19 +49,25 @@ from lib import allocator as allocator_lib
 
 sys.path.insert(0, str(Path(__file__).parent))
 from manager import (BUILTIN_METHODS, DEFAULT_METHOD, _BUILTIN_FNS, default_allocator,
-                     _sync_lookback, optimize_weights, _fail, _atomic_json)
+                     _sync_lookback, optimize_weights, _fail, _atomic_json,
+                     build_returns, ABSENT_FILL_ANNUAL)
 
 
 def rolling_managed_returns(ret_df: pd.DataFrame, lookback: int, allocate_fn=None,
-                            progress_cb=None):
+                            progress_cb=None, real_df: pd.DataFrame = None):
     """
     Walk-forward: for each day i >= lookback, optimize weights on
-    ret_df.iloc[i-lookback:i], then record ret_df.iloc[i] @ weights.
+    ret_df.iloc[i-lookback:i], then record real_df.iloc[i] @ weights.
 
     allocate_fn(window, lookback) -> {strategy: weight}; main() always supplies
     one (built-in or user allocator) and the slope/std fallback here is for
     direct callers. This is the whole plug point — everything else (the OOS
     loop, the random benchmark, the stats) is method-agnostic.
+
+    `ret_df` is what the method FITS on and `real_df` is what the portfolio
+    EARNS (build_returns() makes the pair; they differ only on days a strategy
+    had no data). Defaulting real_df to ret_df keeps a direct caller that
+    passes one frame doing exactly what it did before.
 
     progress_cb(day, total) is called after every OOS day (see --progress).
 
@@ -70,7 +76,8 @@ def rolling_managed_returns(ret_df: pd.DataFrame, lookback: int, allocate_fn=Non
         weights_history: pd.DataFrame of shape (OOS days, strategies)
     """
     allocate_fn = allocate_fn or optimize_weights
-    values     = ret_df.values
+    real_df    = ret_df if real_df is None else real_df
+    values     = real_df.values
     dates      = ret_df.index
     names      = list(ret_df.columns)
     n_total    = len(ret_df)
@@ -238,13 +245,9 @@ def main():
     if not valid:
         _fail('No strategies with daily_returns found. Run backtests first.')
 
-    series_map = {}
-    for name, data in valid.items():
-        dates = pd.to_datetime(data['daily_dates'])
-        rets  = pd.Series(data['daily_returns'], index=dates, dtype=float)
-        series_map[name] = rets
-
-    ret_df = pd.DataFrame(series_map).sort_index().fillna(0)
+    # fit_df is what the method sees, ret_df is what the money did — they
+    # differ only on days a strategy had no data (see build_returns).
+    fit_df, ret_df = build_returns(valid)
 
     # A user allocator keeps its outputs next to the file, so several methods
     # can be compared without overwriting each other. Both built-ins share
@@ -293,6 +296,15 @@ def main():
           f'({ret_df.index[0].date()} → {ret_df.index[-1].date()})')
     print(f'OOS period : {len(ret_df) - args.lookback} days  '
           f'({ret_df.index[args.lookback].date()} → {ret_df.index[-1].date()})')
+    # Per strategy, so the count is days (a matrix-wide count would exceed the
+    # history whenever two members are short at once) and the reader can see
+    # WHICH member is short — the one the method may weight to zero.
+    absent_by = {n: int(d) for n, d in (fit_df != ret_df).sum().items() if d}
+    absent = int((fit_df != ret_df).any(axis=1).sum())
+    if absent_by:
+        detail = ', '.join(f'{n} {d}d' for n, d in sorted(absent_by.items()))
+        print(f'No-data days: {detail} — charged at {ABSENT_FILL_ANNUAL:+.1%}/yr while '
+              f'fitting; the returns below still count them as 0')
     print(f'Running walk-forward optimization... (this may take a moment)')
 
     progress_cb = None
@@ -310,7 +322,7 @@ def main():
                           # reporter has the file open — never abort the run over it
 
     managed_ret, weights_history = rolling_managed_returns(
-        ret_df, args.lookback, allocate_fn, progress_cb=progress_cb)
+        fit_df, args.lookback, allocate_fn, progress_cb=progress_cb, real_df=ret_df)
     oos_index = managed_ret.index
 
     print(f'Running random benchmark (n={args.random_n})...')
@@ -350,6 +362,14 @@ def main():
 
     result = {
         'lookback':  args.lookback,   # 0 = the method declares no window; all OOS
+        # What a no-data day cost the method while fitting, so a result is
+        # never read as assumption-free. Top level, not in `params`: `params`
+        # is the method's own declared knobs — a built-in takes none at all and
+        # an allocator rejects any key it did not declare — so a fixed cost
+        # that no method chooses does not belong there.
+        'absent_fill_annual_pct': round(ABSENT_FILL_ANNUAL * 100, 4),
+        # Days on which SOME member had no data, not member-days.
+        'absent_days': absent,
         'allocator': allocator,   # always explicit: a built-in name or a file's
         'members':   strategies,
         'params':    params,
