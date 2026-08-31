@@ -32,6 +32,7 @@ fit, real = build_returns(valid)
 
 assert list(fit.index.strftime('%Y-%m-%d')) == ['2020-01-01', '2020-01-02', '2020-01-03',
                                                 '2020-01-04', '2020-01-05']
+assert fit.index.equals(real.index), 'the two frames must stay aligned'
 assert list(fit.columns) == list(real.columns), 'the two frames must stay aligned'
 
 # Absent days: charged while fitting, zero in the money.
@@ -69,5 +70,20 @@ assert seen['w'].loc['2020-01-01', 'young'] == PAD, 'the method must see the cha
 # Defaulting real_df keeps a direct caller doing what it did before.
 managed_one, _ = rolling_managed_returns(real, 4, lambda window, lb: dict(w))
 assert abs(managed_one.iloc[0] - expected) < 1e-12
+
+# The random comparison is evaluated on the overlap only: a day some member has
+# no data must never enter it (outside the overlap the benchmark would hold a
+# strategy that did not exist). Mirrors main()'s eval_mask exactly.
+spans = {n: (pd.to_datetime(d['daily_dates'][0]), pd.to_datetime(d['daily_dates'][-1]))
+         for n, d in valid.items()}
+overlap_start = max(s[0] for s in spans.values())
+overlap_end   = min(s[1] for s in spans.values())
+oos_index  = fit.index[1:]                      # any walk-forward tail
+eval_mask  = (oos_index >= overlap_start) & (oos_index <= overlap_end)
+eval_index = oos_index[eval_mask]
+assert list(eval_index.strftime('%Y-%m-%d')) == ['2020-01-03', '2020-01-04'], (
+    'overlap must exclude days before young starts AND after old goes stale')
+assert (fit.loc[eval_index] == real.loc[eval_index]).all().all(), (
+    'no charged (absent) day may enter the evaluated period')
 
 print('manager/check_absent_fill.py OK')

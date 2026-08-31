@@ -24,9 +24,11 @@ Usage:
 Exit codes: 2 = bad input (unknown strategy / PARAMS key / JSON), 3 = not
 enough history for the method's window. The reason is the last stderr line.
 
-This is the gate for using ANY weighting method live: it answers "does this
-method beat randomly-drawn weights out of sample", which a single in-sample
-weight calculation cannot.
+The walk-forward answers "how would this weighting method have traded out of
+sample" — something a single in-sample weight calculation cannot. The random
+comparison it reports is a REFERENCE figure evaluated only on the overlap
+where every member has data, not a pass/fail gate: measured on real data it
+moves by tens of points when the period shifts.
 """
 # ── Config ────────────────────────────────────────────────────────────────────
 RANDOM_N  = 1000  # number of random portfolios for benchmark comparison
@@ -132,18 +134,24 @@ def _total_return(ret_arr: np.ndarray) -> float:
 
 
 def _cum_band(managed_ret: pd.Series, bench_rets: np.ndarray):
-    """Cumulative-return curves as fractions: managed (T,), and the random
-    portfolios' per-day p5 / p50 / p95 (each (T,)). Shared by the png and the
-    stats.json `band` the workspace page draws."""
+    """Cumulative-return curves as fractions: managed (T,) over the FULL OOS,
+    and the random portfolios' per-day p5 / p50 / p95 (each (T_eval,)) over the
+    bench slice it is given — the caller passes the overlap-period slice, so
+    the band compounds from the overlap start, not from days when some member
+    did not exist. Shared by the png and the stats.json `band` the workspace
+    page draws."""
     managed_cum = np.cumprod(1 + managed_ret.values) - 1
-    bench_cum = np.cumprod(1 + bench_rets, axis=1) - 1  # (n, T)
+    if bench_rets.shape[1] == 0:
+        empty = np.array([])
+        return managed_cum, empty, empty, empty
+    bench_cum = np.cumprod(1 + bench_rets, axis=1) - 1  # (n, T_eval)
     p5  = np.percentile(bench_cum, 5,  axis=0)
     p50 = np.percentile(bench_cum, 50, axis=0)
     p95 = np.percentile(bench_cum, 95, axis=0)
     return managed_cum, p5, p50, p95
 
 
-def _plot(managed_ret: pd.Series, band,
+def _plot(managed_ret: pd.Series, band, band_dates: pd.DatetimeIndex,
           weights_history: pd.DataFrame, output_path: str):
     dates = managed_ret.index
 
@@ -156,10 +164,15 @@ def _plot(managed_ret: pd.Series, band,
     fig.suptitle('Management Walk-Forward Backtest', fontsize=12)
 
     # ── Panel 1: cumulative return ──
+    # The random band only spans band_dates (the days every member has data) —
+    # outside it there is no fair comparison, so nothing is drawn there.
     ax1 = axes[0]
-    ax1.fill_between(dates, p5 * 100, p95 * 100,
-                     alpha=0.2, color='#888888', label='Random p5–p95')
-    ax1.plot(dates, p50 * 100, color='#888888', lw=1, linestyle='--', label='Random median')
+    if len(band_dates):
+        ax1.fill_between(band_dates, p5 * 100, p95 * 100,
+                         alpha=0.2, color='#888888', label='Random p5–p95 (all members live)')
+        ax1.plot(band_dates, p50 * 100, color='#888888', lw=1, linestyle='--', label='Random median')
+        if band_dates[0] != dates[0]:
+            ax1.axvline(band_dates[0], color='#888888', lw=0.8, ls=':')
     ax1.plot(dates, managed_cum * 100, color='#2ecc71', lw=1.5, label='Managed')
     ax1.axhline(0, color='#888', lw=0.5, ls='--')
     ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda y, _: f'{y:.0f}%'))
@@ -249,6 +262,15 @@ def main():
     # differ only on days a strategy had no data (see build_returns).
     fit_df, ret_df = build_returns(valid)
 
+    # Per-member data span, and the overlap where EVERY member has data. The
+    # random comparison below runs only inside the overlap: outside it the
+    # benchmark would be forced to hold members that did not exist yet, which
+    # biases the verdict in whichever direction the fill happens to point.
+    spans = {n: (pd.to_datetime(d['daily_dates'][0]), pd.to_datetime(d['daily_dates'][-1]))
+             for n, d in valid.items()}
+    overlap_start = max(s[0] for s in spans.values())
+    overlap_end   = min(s[1] for s in spans.values())
+
     # A user allocator keeps its outputs next to the file, so several methods
     # can be compared without overwriting each other. Both built-ins share
     # manager/ — last run wins, and stats.json's `allocator` says which it was.
@@ -328,24 +350,47 @@ def main():
     print(f'Running random benchmark (n={args.random_n})...')
     bench_rets = random_benchmark(ret_df, oos_index, n=args.random_n)
 
+    # Managed stats describe the WHOLE walk-forward; the random comparison is
+    # evaluated only on the overlap (all members live) — a reference figure,
+    # not a pass/fail verdict. It moves a lot with the period you look at.
     m_ret   = managed_ret.values
     m_total = _total_return(m_ret)
     m_sharpe = _sharpe(m_ret)
     m_mdd   = _max_drawdown(m_ret)
 
-    bench_totals  = np.array([_total_return(bench_rets[i]) for i in range(args.random_n)])
-    bench_sharpes = np.array([_sharpe(bench_rets[i])       for i in range(args.random_n)])
-    managed_beats_pct = float((bench_sharpes < m_sharpe).mean() * 100)
+    eval_mask  = (oos_index >= overlap_start) & (oos_index <= overlap_end)
+    eval_index = oos_index[eval_mask]
+    eval_days  = int(eval_mask.sum())
+    if eval_days:
+        m_eval        = m_ret[eval_mask]
+        bench_eval    = bench_rets[:, eval_mask]
+        m_eval_sharpe = _sharpe(m_eval)
+        bench_totals  = np.array([_total_return(bench_eval[i]) for i in range(args.random_n)])
+        bench_sharpes = np.array([_sharpe(bench_eval[i])       for i in range(args.random_n)])
+        managed_beats_pct = float((bench_sharpes < m_eval_sharpe).mean() * 100)
+    else:
+        bench_eval = bench_rets[:, :0]
+        m_eval_sharpe = None
+        bench_totals = bench_sharpes = np.array([])
+        managed_beats_pct = None
 
     print(f'\n{"":─<60}')
     print(f'  Managed   Return: {m_total:+.1f}%  Sharpe: {m_sharpe:.2f}  MDD: {m_mdd:.1f}%')
-    print(f'  Random    Sharpe  median={np.median(bench_sharpes):.2f}  '
-          f'p5={np.percentile(bench_sharpes, 5):.2f}  '
-          f'p95={np.percentile(bench_sharpes, 95):.2f}')
-    print(f'  Managed beats {managed_beats_pct:.1f}% of {args.random_n} random portfolios on Sharpe')
+    if eval_days:
+        print(f'  Random comparison on the {eval_days} days every member has data '
+              f'({eval_index[0].date()} → {eval_index[-1].date()}):')
+        print(f'    Managed Sharpe {m_eval_sharpe:.2f}  vs random '
+              f'median={np.median(bench_sharpes):.2f}  '
+              f'p5={np.percentile(bench_sharpes, 5):.2f}  '
+              f'p95={np.percentile(bench_sharpes, 95):.2f}')
+        print(f'    Beats {managed_beats_pct:.1f}% of {args.random_n} random portfolios on Sharpe '
+              f'(reference — this number moves a lot with the period)')
+    else:
+        print('  Random comparison skipped — no day inside the walk-forward has '
+              'data for every member')
     print(f'{"":─<60}')
 
-    band = _cum_band(managed_ret, bench_rets)
+    band = _cum_band(managed_ret, bench_eval)
     managed_cum, p5, p50, p95 = band
     # The params the page shows for this method: what it declares, with the
     # caller's actual lookback substituted where the method declares one. A
@@ -376,22 +421,37 @@ def main():
         'computed_at': int(time.time()),
         'start':    oos_index[0].strftime('%Y-%m-%d'),
         'end':      oos_index[-1].strftime('%Y-%m-%d'),
+        # Each member's own backtest span, and the overlap where every member
+        # has data — the ONLY period the random comparison below is run on.
+        'member_spans': {n: [s[0].strftime('%Y-%m-%d'), s[1].strftime('%Y-%m-%d')]
+                         for n, s in spans.items()},
+        'overlap': {
+            'start': overlap_start.strftime('%Y-%m-%d') if eval_days else None,
+            'end':   overlap_end.strftime('%Y-%m-%d')   if eval_days else None,
+            'eval_days': eval_days,
+        },
         'managed': {
             'total_return_%': round(m_total, 4),
             'sharpe':         round(m_sharpe, 4),
             'max_drawdown_%': round(m_mdd, 4),
         },
+        # Reference comparison, not a verdict — evaluated on the overlap only,
+        # and it moves a lot with the period. All None / empty when no OOS day
+        # has every member live.
         'random_benchmark': {
             'n':                          args.random_n,
-            'median_sharpe':              round(float(np.median(bench_sharpes)),           4),
-            'p5_sharpe':                  round(float(np.percentile(bench_sharpes, 5)),    4),
-            'p95_sharpe':                 round(float(np.percentile(bench_sharpes, 95)),   4),
-            'managed_beats_pct_sharpe':   round(managed_beats_pct,                         2),
-            'median_total_return_%':      round(float(np.median(bench_totals)),             4),
-            'p5_total_return_%':          round(float(np.percentile(bench_totals, 5)),      4),
-            'p95_total_return_%':         round(float(np.percentile(bench_totals, 95)),     4),
+            'sharpe_eval':                None if m_eval_sharpe is None else round(m_eval_sharpe, 4),
+            'median_sharpe':              round(float(np.median(bench_sharpes)),           4) if eval_days else None,
+            'p5_sharpe':                  round(float(np.percentile(bench_sharpes, 5)),    4) if eval_days else None,
+            'p95_sharpe':                 round(float(np.percentile(bench_sharpes, 95)),   4) if eval_days else None,
+            'managed_beats_pct_sharpe':   round(managed_beats_pct,                         2) if eval_days else None,
+            'median_total_return_%':      round(float(np.median(bench_totals)),             4) if eval_days else None,
+            'p5_total_return_%':          round(float(np.percentile(bench_totals, 5)),      4) if eval_days else None,
+            'p95_total_return_%':         round(float(np.percentile(bench_totals, 95)),     4) if eval_days else None,
             # per-day cumulative return % of the random portfolios — the band
-            # behind the managed curve (same numbers as pnl.png panel 1)
+            # behind the managed curve (same numbers as pnl.png panel 1).
+            # Spans ONLY the overlap: align it at `band_start` in daily_dates.
+            'band_start': eval_index[0].strftime('%Y-%m-%d') if eval_days else None,
             'band': {
                 'p5':  [round(float(v) * 100, 4) for v in p5],
                 'p50': [round(float(v) * 100, 4) for v in p50],
@@ -415,7 +475,7 @@ def main():
     # that the reporter would read as a finished backtest.
     _atomic_json(json_path, result)
 
-    _plot(managed_ret, band, weights_history, png_path)
+    _plot(managed_ret, band, eval_index, weights_history, png_path)
 
     print(f'\n  Output: {output}/')
     print(f'          ├── stats.json')
