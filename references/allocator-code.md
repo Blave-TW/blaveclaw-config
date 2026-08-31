@@ -65,18 +65,26 @@ def allocate(returns, lookback):
 - `returns` — DataFrame of daily strategy returns, one column per strategy.
   From `management_backtest.py` it is exactly `lookback` rows; from `manager.py`
   it is the full history, so slice `returns[-lookback:]` if the method cares.
-  Members rarely share one span, so the index is the union of their dates. A
-  day a strategy had **no data at all** — before its first backtest day, or
-  after its last — carries `ABSENT_FILL_ANNUAL / 365` (a small negative), not
-  zero. Zero would make an absent leg free: a method that maximises a ratio is
-  scale-invariant, so weight handed to a strategy that did not exist yet
-  cancels out of the objective, and the method ends up allocating at random.
-  The charge decays on its own as real days fill the window, so a young
-  strategy still earns weight. **It never reaches the reported returns** — the
-  walk-forward's PnL and its random benchmark count an absent day as 0, since a
-  strategy that did not exist cannot have lost anything. A non-trading day is
-  not absent: every strategy is resampled to calendar days with an explicit 0,
-  so a weekend or a market holiday arrives as a real zero and is never filled.
+  **The two scripts hand you different windows, and only one of them can
+  contain a day a strategy had no data:**
+  - `management_backtest.py` clips its whole run to the **overlap** — the days
+    every member has data — so the window is always all-real. Outside the
+    overlap the absent members earn nothing while still holding their share of
+    the book, and the method has nothing to size them on, so a number measured
+    there says more about which member is oldest than about the method.
+  - `manager.py` proposes weights from the **last `lookback` days of the union**
+    and cannot clip: a member that joined 60 days ago still has to be sized
+    today. A day a strategy had **no data at all** — before its first backtest
+    day, or after its last — carries `ABSENT_FILL_ANNUAL / 365` (a small
+    negative), not zero. Zero would make an absent leg free: a method that
+    maximises a ratio is scale-invariant, so weight handed to a strategy that
+    did not exist yet cancels out of the objective, and the method ends up
+    allocating at random. The charge decays on its own as real days fill the
+    window, so a young strategy still earns weight.
+
+  A non-trading day is not absent: every strategy is resampled to calendar days
+  with an explicit 0, so a weekend or a market holiday arrives as a real zero
+  and is never filled.
   **The charge protects a ratio, not a variance denominator.** An absent
   stretch is a constant, so it still contributes no variance — a method that
   weights by `1 / std` (the TEMPLATE does) sees a near-zero denominator on an
@@ -84,7 +92,8 @@ def allocate(returns, lookback):
   the fill and the fill does not cure it: a method with volatility underneath
   has to drop the absent columns itself, e.g.
   `window.columns[window[c].std() > 0]` or by checking against the member's own
-  first and last date.
+  first and last date. The backtest will not show you this — its window is
+  clipped — but the live proposal will.
 - `lookback` — the window, in days, the method looks at. **If the method uses
   history, it declares `lookback` in `PARAMS`**; that is what puts the field on
   the workspace page and what the walk-forward holds out of sample. The value

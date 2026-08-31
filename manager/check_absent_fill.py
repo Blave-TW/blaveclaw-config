@@ -71,19 +71,30 @@ assert seen['w'].loc['2020-01-01', 'young'] == PAD, 'the method must see the cha
 managed_one, _ = rolling_managed_returns(real, 4, lambda window, lb: dict(w))
 assert abs(managed_one.iloc[0] - expected) < 1e-12
 
-# The random comparison is evaluated on the overlap only: a day some member has
-# no data must never enter it (outside the overlap the benchmark would hold a
-# strategy that did not exist). Mirrors main()'s eval_mask exactly.
+# management_backtest.py clips its whole run to the overlap, and then hands the
+# walk-forward ONE frame. That is only sound if the fill never fires inside the
+# clip — so check the bounds pick the right days and the two frames agree there.
+# Mirrors main()'s clip exactly.
 spans = {n: (pd.to_datetime(d['daily_dates'][0]), pd.to_datetime(d['daily_dates'][-1]))
          for n, d in valid.items()}
 overlap_start = max(s[0] for s in spans.values())
 overlap_end   = min(s[1] for s in spans.values())
-oos_index  = fit.index[1:]                      # any walk-forward tail
-eval_mask  = (oos_index >= overlap_start) & (oos_index <= overlap_end)
-eval_index = oos_index[eval_mask]
-assert list(eval_index.strftime('%Y-%m-%d')) == ['2020-01-03', '2020-01-04'], (
-    'overlap must exclude days before young starts AND after old goes stale')
-assert (fit.loc[eval_index] == real.loc[eval_index]).all().all(), (
-    'no charged (absent) day may enter the evaluated period')
+clipped = real.loc[overlap_start:overlap_end]
+assert list(clipped.index.strftime('%Y-%m-%d')) == ['2020-01-03', '2020-01-04'], (
+    'the clip must exclude days before young starts AND after old goes stale')
+assert fit.loc[overlap_start:overlap_end].equals(clipped), (
+    'no charged (absent) day may survive the clip')
+
+# A HOLE — a day missing inside a member's own first→last range — is the one
+# way the fill can fire inside the clip, and main() must refuse it by name
+# rather than fit on it. Mirrors main()'s `holes` expression exactly.
+holey = dict(valid)
+holey['gappy'] = {'daily_dates':   ['2020-01-02', '2020-01-04'],   # 01-03 missing
+                  'daily_returns': [0.01, 0.01]}
+hfit, hreal = build_returns(holey)
+hclip = (hfit.loc['2020-01-03':'2020-01-04'] != hreal.loc['2020-01-03':'2020-01-04'])
+holes = {n: int(d) for n, d in hclip.sum().items() if d}
+assert holes == {'gappy': 1}, (
+    f'hole detection must name the gappy member and only it, got {holes}')
 
 print('manager/check_absent_fill.py OK')
