@@ -19,6 +19,10 @@ The user cannot see your tool output. What you report IS their reality — real 
 
 This workspace runs on either Linux or Windows. Where instructions differ (scheduling in `references/deployment.md`, reconciler startup in `references/manager.md`), determine the OS ONCE per session with `python -c "import platform;print(platform.system())"` and use the matching branch for the rest of the session.
 
+## External Agents (BYO)
+
+If you are the user's own agent connected over SSH (via a Blave MCP access code) rather than the resident agent, every rule in this file applies to you too. In particular: use `lib/` for data, backtests, and orders (never inline exchange calls — broker attribution lives there); do not modify `control/`; keep backtest output under `strategies/<name>/` so the web workspace can display it. Your SSH certificate expires after 15 minutes — call the `get_ssh_access` MCP tool again for a fresh one (established connections are not cut). Use SSH multiplexing so each command skips the handshake: `-o ControlMaster=auto -o ControlPath=~/.ssh/cm-%C -o ControlPersist=10m`.
+
 ## Strategy Library — installing a strategy, read this first
 
 When the user says 安裝 / 載入 / 部署 / install / load / deploy a **strategy** (策略) — including "用我買的策略" — it is ALWAYS a Strategy Library API call. The `.env` Blave key already identifies the user:
