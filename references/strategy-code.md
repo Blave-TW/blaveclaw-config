@@ -487,15 +487,16 @@ Let `compute_signals` do per-rebalance ranking using only the lookback window av
 
 ---
 
-## END Modes and WARMUP (Type A and C)
+## END and WARMUP (Type A and C)
 
-**END modes — three valid states:**
-
-| Context | END value |
-|---|---|
-| `strategy.py` backtest (normal) | Fixed past date, e.g. `"2026-05-21"` (roughly one week ago) — **never a dynamic expression**. Guarantees cache hits on every re-run. |
-| `manager/manager.py` weight optimisation | Temporarily set `END = None` so the optimiser sees latest data. Restore the fixed date afterwards. |
-| Live mode | `END = None` |
+**`END = None`, always** — backtest, weight optimisation, and live all fetch to the
+latest data. There is no cache-hit reason to pin a date: the monthly-delta cache (used
+by nearly every fetcher — see lib/data.py for the one exact-range exception) keeps
+past months cached and only re-fetches the current month. A pinned END is a production
+bug — nothing on the live path overrides END, so a deployed strategy freezes its
+signals at that date forever. `lib/quality_check.py` flags any non-None END as
+CRITICAL and the runner refuses to backtest the file. Never write a dynamic expression
+for END either — `None` already means "latest".
 
 **WARMUP** (optional config) — number of bars to trim from the start of the backtest (warm-up period where indicators are not yet stable). Set to the sum of all rolling windows used. Runner automatically trims if present.
 

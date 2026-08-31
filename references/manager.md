@@ -283,7 +283,7 @@ built into `flatten()` itself instead.
 
 ## Additional Rules
 
-**Before running `manager/manager.py` for weight optimisation:** temporarily set `END = None` in every strategy file so the optimiser uses the latest data. After the run, restore each strategy's fixed past date (roughly one week ago) for normal cache-backed backtests.
+**Before running `manager/manager.py` for weight optimisation:** strategy files always keep `END = None` (see strategy-code.md › END and WARMUP), so there is nothing to edit — but re-run any member whose backtest is stale first, or the optimiser fits on an outdated tail.
 
 **Deleting a strategy:** delete only its own directory (e.g. `strategies/btc_kd_long/`). Never touch `manager/`.
 

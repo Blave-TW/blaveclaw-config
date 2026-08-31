@@ -13,7 +13,7 @@ MODE          = "backtest"
 STRATEGY_NAME = "twstock_momentum"
 INTERVAL      = "1d"
 START         = "2015-01-01"
-END           = "2026-06-09"
+END           = None
 FEE           = 0.005          # ~0.3% 證交稅 + 手續費
 
 MOM_WINDOW     = 120           # 動能回望窗格（交易日）

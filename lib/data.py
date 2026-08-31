@@ -2676,9 +2676,9 @@ def fetch_stock_futures_batch_daily(futures_ids, start, end, headers):
     contract month x trading_session), so the monthly cache's dedup-by-date would
     silently collapse those down to one row per day. An exact-range cache avoids
     that at the cost of not supporting incremental "extend to today" delta fetches —
-    fine for backtests, which per the END-modes convention re-run with a fixed
-    START/END anyway (re-run with the same START/END to get a cache hit; live mode
-    with END=None always re-fetches).
+    with END=None (the standard config, END is never pinned) the resolved end date
+    moves daily, so the first run each day re-fetches the full range; later runs the
+    same day hit the cache.
 
     Same fields as fetch_twfutures_daily: date, futures_id, contract_date,
     open, max, min, close, spread, spread_per, volume, settlement_price,

@@ -1,8 +1,9 @@
 """
 Static quality analysis for Type A / Type C strategy files — catches a broken or
 unfilled compute_signals() contract, backtest fee-drag gaming (FEE=0), a
-TAIFEX futures strategy missing the mandatory txf_settlement_mask, and an
-indicator-driven Type A strategy without a PLOT_SERIES declaration, before a
+TAIFEX futures strategy missing the mandatory txf_settlement_mask, an
+indicator-driven Type A strategy without a PLOT_SERIES declaration, and a
+pinned END date (which freezes a deployed strategy's signals forever), before a
 strategy is submitted to the marketplace or run after being purchased.
 
 Usage:
@@ -34,6 +35,7 @@ def check(filepath: str) -> list[dict]:
     findings = (
         _check_fee(tree) + _check_compute_signals(tree)
         + _check_txf_settlement_mask(tree) + _check_plot_series(tree)
+        + _check_end(tree)
     )
     return sorted(findings, key=lambda f: f["line"])
 
@@ -58,6 +60,57 @@ def plot_series_findings(filepath: str) -> list[dict]:
     """PLOT_SERIES check only — the runner's non-blocking backtest hint."""
     tree = _parse_for_runner(filepath)
     return _check_plot_series(tree) if tree is not None else []
+
+
+def end_pinned_findings(filepath: str) -> list[dict]:
+    """Pinned-END check only — the runner's blocking backtest guard."""
+    tree = _parse_for_runner(filepath)
+    return _check_end(tree) if tree is not None else []
+
+
+# ── Pinned END check ────────────────────────────────────────────────────────────
+
+def _check_end(tree: ast.AST) -> list[dict]:
+    # Module level only (tree.body, not ast.walk): a local END inside a helper
+    # is not the config constant and must not trip the guard. Only the LAST
+    # module-level assignment is judged — it is the value that takes effect.
+    last = None  # (lineno, value node) of the last module-level END assignment
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        for target in targets:
+            names = target.elts if isinstance(target, ast.Tuple) else [target]
+            for i, name in enumerate(names):
+                if not (isinstance(name, ast.Name) and name.id == "END"):
+                    continue
+                v = value
+                # `START, END = "2022-01-01", "2026-05-21"` — pick END's element;
+                # a tuple target fed by a non-tuple (e.g. a call) keeps the whole
+                # expression and fails the constant test below, as it should.
+                if (isinstance(target, ast.Tuple) and isinstance(value, ast.Tuple)
+                        and len(value.elts) == len(target.elts)):
+                    v = value.elts[i]
+                last = (node.lineno, v)
+    if last is None:
+        return []
+    lineno, v = last
+    if isinstance(v, ast.Constant) and v.value is None:
+        return []
+    # CRITICAL for a date and for any expression alike: nothing on the live
+    # path (lib/runner.py, the schedulers) ever overrides END, so a pinned
+    # date freezes a deployed strategy's signals at that date forever — and a
+    # computed END can hide the same pin.
+    return [_c(
+        lineno,
+        "END is not None — nothing on the live path overrides END, so a "
+        "deployed strategy freezes its signals at that date forever. Set "
+        "END = None; nearly every fetcher uses a monthly-delta cache, so "
+        "backtests still only re-fetch the current month.",
+    )]
 
 
 # ── FEE=0 gaming check ──────────────────────────────────────────────────────────

@@ -13,7 +13,7 @@ STRATEGY_NAME = "tw2317_broker_zscore"
 SYMBOL        = "2317"
 INTERVAL      = "1d"
 START         = "2022-01-01"
-END           = "2026-05-21"
+END           = None
 FEE           = 0.003
 
 WINDOW     = 5

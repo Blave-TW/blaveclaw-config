@@ -333,6 +333,23 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
                 + '\n❌ Backtest refused — apply txf_settlement_mask, then re-run.'
             )
 
+        # Pinned-END enforcement — nothing on the live path overrides END, so a
+        # fixed date freezes a deployed strategy's signals at that date forever.
+        # Refusing the backtest closes the deployment funnel (the deploy ritual
+        # starts with one); live/cron runs are NOT blocked, same fleet-ops
+        # reasoning as above.
+        try:
+            from lib.quality_check import end_pinned_findings
+        except ImportError:
+            logging.warning("lib/quality_check.py is stale — pinned-END guard skipped")
+            end_pinned_findings = None
+        problems = end_pinned_findings(config['__file__']) if end_pinned_findings else []
+        if problems:
+            raise SystemExit(
+                '\n'.join(f"❌ Line {p['line']}: {p['msg']}" for p in problems)
+                + '\n❌ Backtest refused — set END = None, then re-run.'
+            )
+
     env  = dotenv_values()
     hdrs = {'api-key': env.get('blave_api_key', ''), 'secret-key': env.get('blave_secret_key', '')}
 

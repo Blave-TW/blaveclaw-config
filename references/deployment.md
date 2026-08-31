@@ -122,7 +122,7 @@ schtasks /create /tn "blaveclaw-strategy-<name>" /tr "cmd /c cd /d %BLAVECLAW_HO
 (Linux still goes through `run_strategy.sh` for the same crash-safety reason as always; Windows Type B has no equivalent wrapper yet — same pre-existing gap this whole mechanism didn't set out to fix — so a Type B crash on Windows is silent. Flag this to the user if they're deploying Type B live on Windows.)
 
 ## Live vs Backtest
-Live trading uses the SAME script as backtest — only `MODE` changes. Keep `START` the same long date range as backtest so the website report shows full history. Always keep `END = None` for live — setting it to a specific date will cap data fetch at that date and break live operation.
+Live trading uses the SAME script as backtest — only `MODE` changes. Keep `START` the same long date range as backtest so the website report shows full history. `END` is always `None` (backtest and live alike) — a pinned date caps the data fetch and freezes a deployed strategy's signals at that date, and quality_check flags it as CRITICAL.
 
 ## State Initialisation (First Live Run)
 On the first live cron tick there is no `state.json` yet. The runner initialises state from the last signal: `signals.ffill().fillna(0).iloc[-1]`. This correctly reflects the current intended position without replaying history.
