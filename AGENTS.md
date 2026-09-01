@@ -112,7 +112,7 @@ Import from `lib/` — never write these functions inline. Full function signatu
 
 Key rules:
 - **"MCPT" always means Monte Carlo Permutation Test, never an asset ticker.** Call `lib.validation.mcpt`/`plot_mcpt` (signature in `references/lib.md`) — never hand-roll a substitute (e.g. a bootstrap/resample of realized returns): that answers a different question and produces no p-value, which is the whole point of MCPT.
-- All data fetching: `lib/data.py`; execution logic: `lib/execute.py`; param scan: `lib/param_scan.py`; notifications: `lib/notify.py`
+- All data fetching: `lib/data.py`; execution logic: `lib/execute.py`; param scan: `lib/param_scan.py`; notifications: `lib/notify.py`; workspace reports: `lib/report.py`
 - **Pairing check — only when the run actually notifies via Telegram:** if a strategy sends Telegram messages, check pairing first (see `references/strategy-code.md`) and stop if unpaired. A web-workspace user may never connect Telegram — never block a backtest or a data question on pairing.
 - New reusable logic goes in `lib/` first (e.g. `lib/order_binance.py`), then import in strategy
 - `get_positions()` symbols are canonical dashless uppercase (`BTCUSDT`, never `BTC-USDT`) — normalize both sides before comparing, or the match silently fails as "no position" (see `references/lib.md`)
@@ -125,6 +125,16 @@ Key rules:
 **Never confuse looking at an image with sending it.** Using `read` on a chart file only feeds it to your own vision — the user never receives it. Only report "sent"/"傳送" after the send actually ran; if it wasn't called, call it before replying.
 
 Always call `lib.chart_style.apply()` before plotting — never matplotlib defaults. All chart text must be in English — Chinese characters render as garbled boxes. `tight_layout()` does not accept `hspace`/`wspace` on this matplotlib version. See `references/charts.md` for style + code examples.
+
+## Reports
+
+A report is a document the web workspace renders in its sidebar — KPI rows, charts, tables and prose from structured data. It is the right surface for anything the user will read again later (a performance review, a morning briefing, a research write-up); chat is for the answer, a report is for the record. Produce one by dropping JSON in `workspace/reports/<id>.json` — `lib/report.py` (`write_report`, `status`) writes it correctly. Contract, block types and limits: `references/reports.md`.
+
+- **When a report request arrives (web "+" panel or chat), restate the schedule you parsed from it — cadence, time, weekday/date, timezone — before you start.** A mis-parse is invisible once it is a cron line; now is the only moment the user can catch it.
+- **The periodic performance report (daily / weekly) is produced automatically by the runtime** — never schedule a second one of your own. What you write are the ad-hoc reports the user asked for.
+- The platform pushes its own summary notification once a report is stored — do NOT send a Telegram message about the same report on top of it.
+- Same two rules as any recurring notification: send one sample first and let the user confirm the format before scheduling it, and scheduled runs are signal-only (nothing happened → no report).
+- **Writing the JSON finishes the job** — the runtime's 2-minute timer uploads it, so say the report is produced and will appear in the sidebar shortly, and reply straight away. Do NOT poll `status()` or wait for `sent`. `status(id)` is for afterwards, when something looks wrong (the user never saw it): a refused report sits in `reports/failed/` with the reason (naming the exact field) in `reports/upload_errors.log` and never arrives by itself.
 
 ## Shell Commands
 
@@ -209,10 +219,12 @@ Weighting method → `--allocator`: built-in `equal` (default for a new portfoli
 
 ## Model Switching
 
-CRITICAL: Follow `references/models.md` EXACTLY — never state a model has switched
-before completing all 5 steps (fetch /v1/models → write config → verify id →
-tell user → restart gateway). Never use a memorized/guessed model id (e.g.
-"claude-sonnet-4") — model ids change over time; always fetch fresh.
+CRITICAL: Follow `references/models.md` EXACTLY — the procedure is runtime-dependent
+(old BlaveClaw: edit openclaw.json + restart gateway; Blave Agent: run the injected
+set_model command, no restart, applies next message). Never state a model has switched
+before completing every step for THIS machine's runtime, and never use a
+memorized/guessed model id (e.g. "claude-sonnet-4") — model ids change over time;
+always fetch fresh from /v1/models.
 
 ## Updating Workspace Files (Config + Skill)
 

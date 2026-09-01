@@ -10,7 +10,7 @@ Fresh installs are handled automatically by the provisioning script — no manua
 
 Tell your agent:
 
-> Clone https://github.com/Blave-TW/blaveclaw-config to /tmp/oc-config and use it as **reference** to update the workspace at /root/.openclaw/workspace. For each file below, compare the repo version with the local version and apply only what is missing or outdated — do not blindly overwrite.
+> Clone https://github.com/Blave-TW/blaveclaw-config to /tmp/oc-config and use it as **reference** to update this machine's live workspace — `$BLAVECLAW_HOME/workspace`, i.e. the workspace you are running in (`/root/.openclaw/workspace` on old BlaveClaw machines, `/opt/blave-agent/workspace` on Blave Agent machines; resolution per `references/deployment.md`). For each file below, compare the repo version with the local version and apply only what is missing or outdated — do not blindly overwrite.
 >
 > - `AGENTS.md`, `CLAUDE.md` — replace wholesale (these are config, not user-edited)
 > - `references/` — for each file, check if a local version exists; if it does, read both and patch in anything missing; if it does not, copy it in
@@ -28,7 +28,7 @@ Tell your agent:
 - `CLAUDE.md` — Claude Code context (points to AGENTS.md)
 - `strategies/TEMPLATE_A.py` — base template for all Type A strategies
 - `strategies/TEMPLATE_C.py` — base template for all Type C portfolio strategies
-- `lib/` — shared library (runner, data, execute, pnl, portfolio, strategy, analysis, param_scan, validation, notify)
+- `lib/` — shared library (runner, data, execute, pnl, portfolio, strategy, analysis, param_scan, validation, notify, report)
 - `lib/account_TEMPLATE.py` — template for exchange account libraries (copy to `lib/account_{exchange}.py`)
 - `manager/` — portfolio management system (optimizer, reconciler)
 - `examples/` — reference strategy implementations

@@ -16,7 +16,10 @@ Data model (all under state/, which the nightly config sync never overwrites):
 
 Cron (add ONCE — see references/deployment.md):
   */30 * * * * cd $BLAVECLAW_HOME/workspace && python3 manager/healthcheck.py
-  ($BLAVECLAW_HOME defaults to /root/.openclaw if unset)
+  (when unset, $BLAVECLAW_HOME's default is runtime-dependent — /root/.openclaw on old
+  BlaveClaw machines, /opt/blave-agent on Blave Agent machines; resolve it per
+  references/deployment.md. This script itself only uses workspace-relative paths and
+  lib/notify.py's own resolution, so only the cron entry's cd needs the resolved value.)
 
 Self-healing: any `run_strategy.sh <name>` OR `wait_for_bar.py <name>` entry
 found in crontab is auto-registered, so strategies deployed before this

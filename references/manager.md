@@ -326,7 +326,7 @@ systemctl is-active blave-agent-reconciler.service
 ```
 tmux new-session -d -s reconciler 'cd $BLAVECLAW_HOME/workspace && bash manager/start_reconciler.sh'
 ```
-(resolve `$BLAVECLAW_HOME` first — same env var as `references/deployment.md`'s cron entries; defaults to `/root/.openclaw` if unset)
+(resolve `$BLAVECLAW_HOME` first — same env var as `references/deployment.md`'s cron entries; when unset the default is runtime-dependent — `/root/.openclaw` on old BlaveClaw machines, `/opt/blave-agent` on Blave Agent machines — resolve it per that doc's layout signal, never assume one path)
 To check status: `tmux attach -t reconciler`. To stop: `tmux kill-session -t reconciler`.
 Note: the systemd unit deliberately has no `[Install]` section — the reconciler must
 NOT auto-start on reboot; the user re-enables trading explicitly after a reboot.

@@ -10,6 +10,12 @@ from urllib.parse import urlparse, parse_qs
 
 # BLAVECLAW_HOME, not OPENCLAW_HOME — the openclaw product itself reads
 # OPENCLAW_HOME as a home-directory override, so reusing that name breaks it.
+#
+# Single-branch /root/.openclaw fallback is deliberate — unlike lib/notify.py this
+# service is only ever installed and started by the OLD openclaw provisioning
+# (api/openclaw/lightsail.py systemd unit / install_windows.ps1 NSSM service, which
+# sets BLAVECLAW_HOME on Windows); the Blave Agent runtime never runs it, so no
+# /opt/blave-agent branch belongs here.
 BLAVECLAW_HOME = os.environ.get("BLAVECLAW_HOME") or (
     r"C:\openclaw" if platform.system() == "Windows" else "/root/.openclaw"
 )

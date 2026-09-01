@@ -377,12 +377,22 @@ Run this at session start, before any strategy run or notification:
 
 ```python
 import json, os, platform
-# Same BLAVECLAW_HOME resolution as lib/notify.py — don't hardcode /root/.openclaw,
-# some runtimes set this env var to a different path.
-blaveclaw_home = os.environ.get("BLAVECLAW_HOME") or (
-    r"C:\openclaw" if platform.system() == "Windows" else "/root/.openclaw"
-)
-allow_path = os.path.join(blaveclaw_home, "credentials", "telegram-default-allowFrom.json")
+# Same BLAVECLAW_HOME resolution as lib/notify.py — the unset-default is
+# runtime-dependent, never a single hardcoded path: old BlaveClaw machines use
+# /root/.openclaw, the Blave Agent runtime uses /opt/blave-agent (detected by
+# its openclaw.json FILE existing — not just the directory, or a half-provisioned
+# machine passes falsely). A wrong home doesn't error here: paired just reads
+# False on a machine that IS paired.
+def _blaveclaw_home():
+    if os.environ.get("BLAVECLAW_HOME"):
+        return os.environ["BLAVECLAW_HOME"]
+    if platform.system() == "Windows":
+        return r"C:\openclaw"
+    if os.path.isfile("/opt/blave-agent/openclaw.json"):
+        return "/opt/blave-agent"
+    return "/root/.openclaw"
+
+allow_path = os.path.join(_blaveclaw_home(), "credentials", "telegram-default-allowFrom.json")
 paired = (
     os.path.exists(allow_path)
     and bool(json.load(open(allow_path)).get("allowFrom"))
