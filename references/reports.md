@@ -10,6 +10,10 @@ The platform pushes a short summary notification once the report is stored, so t
 report reaches the user even when this machine is asleep — never send your own
 Telegram message about a report as well, that duplicates every alert.
 
+§1–§6 are the **format** contract; **§7 is the content bar** — what a report has to
+actually say to be worth reading. A report can satisfy every rule in §1–§6 and still
+be worthless, so read §7 before you write the prose.
+
 ## 1. How to publish — the drop directory
 
 Write the report to `workspace/reports/<id>.json`. That is the whole contract: no
@@ -308,3 +312,79 @@ transient failure. Same status code, different channel, opposite handling.
    is left as `text` so it stays neutral.
 9. Every `image` block carries `file` **or** `sha256`, never both; a `file` exists in
    `reports/<id>.files/` and was written before the report JSON.
+
+## 7. Content standards — the report has to say something
+
+Everything above is format. A report can pass all of it — valid blocks, honest numbers,
+every measurement basis footnoted — and still be a dashboard printed as prose: each
+bullet reading "indicator X moved from A to B, which means C", where C is the same
+number said again in words. This section is the bar for what goes **inside** the blocks.
+
+**Scope — read off the envelope `type`.** Not every report carries a view, and forcing
+one into a report that shouldn't have it is its own failure.
+
+| `type` | What applies |
+|---|---|
+| `research`, `morning` | **All six rules.** These exist to answer "what do you think, and why". |
+| `performance` | **Rules 5 and 6 only** (plus rule 2 on any sentence that explains *why* a number moved — stating the number itself is the point of the report and needs no thesis). A performance report is a state snapshot: numbers, attribution, what changed since last time. Do **not** invent an investment view to fill a section; the clean snapshot is the correct output. (The runtime writes the official daily/weekly ones itself, §1 — yours are ad-hoc extras.) |
+
+### 1. One falsifiable claim, carried by the `lead`
+
+The `text` block with `variant: "lead"` (§3) states **one claim that could have turned out
+wrong** — a sentence that would read differently on a different day.
+
+- **Filler:** "Sentiment is neutral-to-bullish; be careful chasing the move." True on almost
+  any day. It describes the dashboard instead of reading it.
+- **A claim:** "The bid is rotating from spot into leverage, and leverage is not crowded yet —
+  so right now the risk of a pullback is smaller than the risk of missing the move."
+
+The test is whether **a competent reader could disagree with the sentence**. If nobody could,
+it is not a claim. Everything else in the report then supports it, qualifies it, or attacks it.
+
+### 2. Every number is a cause or a comparison — the swap test
+
+A figure earns its sentence only by driving a conclusion or by standing against something
+(a prior period, a peer, a threshold, an expectation). To check a sentence you just wrote:
+**swap the number for a plausibly different value. If the conclusion still stands, the number
+was decoration and the sentence is restatement.**
+
+- **Fails:** "Directional alpha is 0.18 against a 7-day mean of 0.12 — neutral-to-bullish, not
+  yet euphoric." Put 0.05 in and the same words still get written.
+- **Passes:** "Funding is positive across the board but tiny (BTC +0.0085%) — long positioning
+  without crowded leverage." At +0.09% the sentence has to say the opposite.
+
+### 3. Answer "so what"
+
+Every section closes on the consequence for the reader: what it means for exposure, for
+timing, or for which decision changes. A paragraph that ends on the observation is half a
+paragraph. If you cannot name a consequence, the section is probably not worth a section.
+
+### 4. Write the other side — mandatory
+
+State **what would break the claim**: which indicator, in which direction, past roughly what
+level, means the view in the `lead` is wrong and should be dropped. Name the level, not the
+mood ("if funding goes above ~+0.05% per 8h the crowded-leverage read replaces this one", not
+"if leverage gets extreme"). A `callout` with `tone: "warning"` is a good home for it.
+
+This is the rule that adds the most depth, and it only works if you go looking for hostile
+evidence **before** you write, not after. **If every figure in the report supports the thesis,
+you selected the figures** — go back and pull the ones that argue against it.
+
+### 5. No sentence that is true on any day
+
+"Watch out for a pullback", "keep monitoring", "stay cautious", "the outlook remains
+uncertain", "pay close attention to" — these carry no information and cost the reader's trust
+in the sentences around them. Delete each one, or replace it with the threshold that would
+make it actionable (rule 4).
+
+### 6. Insufficient data is an answer — never manufacture conviction
+
+Rules 1–5 raise the bar for the **argument**, never for how sure you sound. When the data on
+hand does not support a judgment, the correct output is to say so — "the data is not sufficient
+to judge X" — plus what would be needed to judge it. That is a complete answer and a report may
+contain several.
+
+Never invent a mechanism to explain a number you have not verified, never present an inference
+as an observation, and never firm up a hedge to make the report read stronger. A confident
+sentence with nothing under it is a worse failure than a shallow one: the shallow report wastes
+the reader's time, the fabricated one loses them money. Every figure stays real or labelled.
