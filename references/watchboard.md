@@ -46,7 +46,7 @@ convenience.
 ```python
 from lib.watch import add_widget, update_widget, remove_widget, write_data, status
 
-add_widget(id, type, title, *, symbol=None, symbols=None, interval=None,
+add_widget(id, type, title, *, symbol=None, symbols=None, interval=None, venue=None,
            block_type=None, refresh_cron=None, refresh_human=None, script=None, w=None, h=None)
 update_widget(id, *, title=None, props=None, refresh_cron=None, refresh_human=None, script=None)
 remove_widget(id)
@@ -55,7 +55,7 @@ status(op_file_or_widget_id)                  # pending | sent | failed: <reason
 ```
 
 Every check is done up front and raises `ValueError` with the rule that was broken —
-catalogue type, kind/type binding, symbol shape, watchlist size, interval, block type,
+catalogue type, kind/type binding, symbol shape, venue, watchlist size, interval, block type,
 cron grammar, minimum size, title length, id shape, a machine id already taken by a
 scheduled report. Fix the call; nothing was written.
 
@@ -81,18 +81,25 @@ scheduled report. Fix the call; nothing was written.
 
 | type | kind | min w×h | props | what it shows |
 |---|---|---|---|---|
-| `price` | stream | 2×2 (default 4×2) | none | last price, change vs. previous close / settlement, day high-low, timestamp; futures show the session |
-| `kline` | stream | 4×3 | `interval`: `1m` `5m` `15m` `60m` `1d` | candlestick chart; history from the platform, the forming bar from ticks |
+| `price` | stream | 2×2 (default 4×2) | none | last price, change vs. previous close / settlement (crypto: previous UTC day's close), day high-low, timestamp; futures show the session. Taiwan symbols, or crypto with `venue="binance"` |
+| `kline` | stream | 4×3 (default 6×3) | `interval`: `1m` `5m` `15m` `60m` `1d` | candlestick chart; history from the platform, the forming bar from ticks (Taiwan) or the Binance kline stream (crypto with `venue="binance"`) |
 | `book` | stream | 2×3 | none | 5-level order book — **`TXF` / `MXF` only** |
 | `watchlist` | stream | 3×2 | none; `symbols` 1–20 | table of symbol, last, change %, time |
-| `block` | machine | 2×2 | `block_type` | one report block, drawn by the report renderer from your `write_data` payload |
+| `block` | machine | 2×2; chart-like `block_type` 4×3 | `block_type` | one report block, drawn by the report renderer from your `write_data` payload. Chart-like = `line_chart` `drawdown` `heatmap` `bar_chart` `histogram` `box` `scatter` `image` (min and default 4×3); `kpi_row` `metric_table` `table` `text` `quote` `code` `callout` stay 2×2 |
 
 - **Ids**: `[A-Za-z0-9_-]{1,32}`, unique on the board, yours to pick. A machine widget's id is
   also its `report_jobs/` directory, so it must be a slug `[a-z0-9][a-z0-9-]{0,31}`.
 - **Symbols** (stream): a stock id (4–8 letters/digits, e.g. `2330`, `00878`), the index
   `TAIEX`, or the futures `TXF` / `MXF`. `TMF` is not streamed — use `MXF` for the price.
-- **Sizes**: 12-column grid, `w` 1–12, `h` 1–12, at least the type's minimum; omit `w`/`h` for the
-  minimum. Position is never yours: the platform places new tiles, the user moves them.
+- **Crypto** (`price` / `kline` only): add `venue="binance"` and give `symbol` as a Binance USD-M
+  perpetual — `BTC`, `BTCUSDT` or `BTC/USDT` all work; it is written uppercased with `/` removed and
+  the api normalises from there. `lib/watch.py` checks the shape only (3–20 letters/digits, one
+  optional `/`), never a list of what Binance trades. Each crypto widget is its own connection in
+  the browser, so keep to **at most 6 crypto widgets on a board**. `venue` on `book` / `watchlist` /
+  `block` is refused — those are Taiwan-only or machine widgets.
+- **Sizes**: 12-column grid, `w` 1–12, `h` 1–12, at least the type's minimum (for a `block`, the
+  minimum follows its `block_type`); omit `w`/`h` for the minimum. Position is never yours: the
+  platform places new tiles, the user moves them.
 - **Board limits** (the api refuses beyond them): 24 widgets, 20 distinct stream symbols across
   the board, 12 machine widgets. `title` 1–40 characters.
 - **`block_type`**: any content block from `references/reports.md` §3 — `kpi_row`, `line_chart`,
@@ -109,6 +116,10 @@ scheduled report. Fix the call; nothing was written.
 Which to pick: a number that should move as the market moves → stream widget, always. A
 number that comes from **your** computation (exposure, a signal, a scan) → machine widget on
 the slowest cadence that still answers the question.
+
+**For a crypto K-line use the `kline` widget with `venue="binance"`, never a `block` +
+`line_chart` drawn by a script.** The live candles come from the platform's Binance stream; a
+script cannot refresh faster than once a minute and would draw a line, not candles.
 
 ## 3. Machine widget scripts
 
@@ -150,7 +161,10 @@ with `{"type": "image", "file": "fig.png", "alt": "..."}` — the same sidecar r
 
 Changing an existing widget: `update_widget(id, title=..., refresh_cron=..., refresh_human=...)`
 sends the op **and** rewrites `job.json` on this machine; `update_widget(id, script=...)`
-only rewrites `run.py` (no op — the next run uses it). `remove_widget(id)` sends the op and
+only rewrites `run.py` (no op — the next run uses it). `update_widget(id, props={"block_type": ...})`
+to a chart-like type is not size-checked on this machine (there is no view of the board): if the
+tile is smaller than 4×3 the api refuses the op and `status` shows `failed` — ask the user to
+resize the tile first, then send the update again. `remove_widget(id)` sends the op and
 deletes the widget's job directory, the data file and its sidecar, so nothing is left to upload
 for a tile that no longer exists. A widget id and a scheduled report never share
 `report_jobs/<id>/`: `add_widget` refuses an id that is already a report, and `remove_widget`
@@ -183,6 +197,21 @@ add_widget("txf-k5", "kline", "台指期 5 分 K", symbol="TXF", interval="5m", 
 
 Two ops, no job directory, nothing to schedule — the browser subscribes to the quote stream
 itself. Tell the user both tiles are on the board and can be dragged into place.
+
+### BTC hourly candles (stream, crypto — no script)
+
+```python
+from lib.watch import add_widget
+
+add_widget("btc-1h", "kline", "BTC 1H", symbol="BTC", venue="binance", interval="60m")   # 6×3 by default
+```
+
+One op with `"source": {"kind": "stream", "venue": "binance", "symbol": "BTC"}`; the api resolves
+it to the `BTCUSDT` perpetual and the tile draws live candles from the Binance stream, updating by
+the second. This is the whole answer to "give me a BTC chart" — do **not** write a script that
+fetches klines through `lib.data` and publishes a `line_chart` block: that is a machine widget
+refreshing at most once a minute, and it draws a line, not candles. Same for a crypto price:
+`add_widget("btc", "price", "BTC", symbol="BTC", venue="binance")`.
 
 ### A `kpi_row` exposure widget refreshed every 5 minutes (machine)
 

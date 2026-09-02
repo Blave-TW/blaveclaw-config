@@ -24,6 +24,7 @@ Usage:
 
     add_widget("txf", "price", "台指期", symbol="TXF")                  # stream widget
     add_widget("tsmc-k", "kline", "2330 1 分 K", symbol="2330", interval="1m")
+    add_widget("btc-1h", "kline", "BTC 1H", symbol="BTC", venue="binance", interval="60m")  # crypto
     add_widget("risk", "block", "持倉風險",                              # machine widget
                block_type="kpi_row", refresh_cron="*/5 * * * *",
                refresh_human="每 5 分鐘", script=script_text)
@@ -65,15 +66,22 @@ _ID_RE = re.compile(r"[A-Za-z0-9_-]{1,32}")
 _MACHINE_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 _OP_FILE_RE = re.compile(r"[0-9]{13}-(add|update|remove)\.json")
 _STOCK_RE = re.compile(r"[A-Za-z0-9]{4,8}")
+# Crypto (venue="binance"): a Binance USD-M perpetual written as `BTC`, `BTCUSDT`, `BTC/USDT`
+# or `BTC-USDT`. Only the shape is checked (after uppercasing); the api normalises the symbol
+# and is the one that knows what Binance trades — no list is kept here.
+_CRYPTO_RE = re.compile(r"[A-Z0-9]+(?:[/-][A-Z0-9]+)?")
 _FILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}")
 _SHA_RE = re.compile(r"[0-9a-f]{64}")
 
 INDEX_SYMBOLS = ("TAIEX",)
 FUTURES_SYMBOLS = ("TXF", "MXF")
 INTERVALS = ("1m", "5m", "15m", "60m", "1d")
+VENUES = ("binance",)
+CRYPTO_TYPES = ("price", "kline")       # the only widgets that take a venue (contract §3.1)
 WATCHLIST_MAX = 20
 
-# type -> (kind, min w, min h)
+# type -> (kind, min w, min h). A block widget's minimum depends on its block_type:
+# chart-like blocks need 4×3 (CHART_BLOCKS), the rest keep the 2×2 here (contract §3).
 CATALOGUE = {
     "price": ("stream", 2, 2),
     "kline": ("stream", 4, 3),
@@ -81,6 +89,9 @@ CATALOGUE = {
     "watchlist": ("stream", 3, 2),
     "block": ("machine", 2, 2),
 }
+CHART_BLOCKS = ("line_chart", "drawdown", "heatmap", "bar_chart", "histogram", "box",
+                "scatter", "image")
+CHART_MIN_W, CHART_MIN_H = 4, 3
 
 # Report block types a machine widget may declare / send. `meta` and `footnote` are
 # report structure (head and tail of a document), `divider` draws nothing — none of
@@ -132,19 +143,46 @@ def _check_symbol(symbol, type):
                      f"{' / '.join(INDEX_SYMBOLS)} or {' / '.join(FUTURES_SYMBOLS)}")
 
 
-# Default sizes when the caller gives none: the type's minimum, except price —
-# at 1440 wide with the chat pane open the canvas is ~750px (12 cols ≈ 62px), and
-# a 3-col price card truncates its title, so it defaults to 4 (contract §3).
-_DEFAULT_W = {"price": 4}
+def _check_venue(venue, type):
+    if venue not in VENUES:
+        raise ValueError(f"venue {venue!r} must be one of {', '.join(VENUES)}")
+    if type not in CRYPTO_TYPES:
+        raise ValueError(f"venue is only for {' / '.join(CRYPTO_TYPES)} widgets (crypto, "
+                         f"contract §3.1); {type} takes Taiwan symbols only")
+    return venue
 
 
-def _check_grid(type, w, h):
+def _check_crypto_symbol(symbol):
+    """Shape only: uppercased, letters/digits with one optional `/` or `-`, 3–20 characters
+    once the separator is gone. Returns the symbol as given, uppercased, separator removed
+    (`btc/usdt` -> `BTCUSDT`, `BTC` stays `BTC`); the api normalises from there."""
+    if not isinstance(symbol, str) or not symbol:
+        raise ValueError("symbol must be a non-empty string")
+    up = symbol.upper()
+    bare = up.replace("/", "").replace("-", "")
+    if not _CRYPTO_RE.fullmatch(up) or not 3 <= len(bare) <= 20:
+        raise ValueError(f"crypto symbol {symbol!r} must be 3–20 letters/digits with an optional "
+                         "'/' (BTC, BTCUSDT, BTC/USDT)")
+    return bare
+
+
+# Default sizes when the caller gives none: the type's minimum, except price and
+# kline (contract §3) — at 1440 wide with the chat pane open the canvas is ~750px
+# (12 cols ≈ 62px), a 3-col price card truncates its title, so price defaults to 4;
+# kline defaults to 6 so the candles have room to read.
+_DEFAULT_W = {"price": 4, "kline": 6}
+
+
+def _check_grid(type, w, h, block_type=None):
     kind, min_w, min_h = CATALOGUE[type]
+    label = type
+    if block_type in CHART_BLOCKS:
+        min_w, min_h, label = CHART_MIN_W, CHART_MIN_H, f"{block_type} block"
     w = _DEFAULT_W.get(type, min_w) if w is None else w
     h = min_h if h is None else h
     for name, v, lo in (("w", w, min_w), ("h", h, min_h)):
         if not isinstance(v, int) or isinstance(v, bool) or not lo <= v <= 12:
-            raise ValueError(f"{name} for a {type} widget must be an int in {lo}–12, got {v!r}")
+            raise ValueError(f"{name} for a {label} widget must be an int in {lo}–12, got {v!r}")
     return {"w": w, "h": h}
 
 
@@ -260,7 +298,7 @@ def _register_watch_job(id, title, refresh, block_type, script):
 
 # ─── public api ───────────────────────────────────────────────────────────────
 
-def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None,
+def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None, venue=None,
                block_type=None, refresh_cron=None, refresh_human=None, script=None,
                w=None, h=None):
     """Add one widget to the board. Returns the op file path.
@@ -271,9 +309,15 @@ def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None,
     type          `price` / `kline` / `book` / `watchlist` (stream) or `block` (machine).
     title         1–40 chars, the tile header.
     symbol        stream, all but watchlist: a stock id (4–8 letters/digits), `TAIEX`,
-                  `TXF` or `MXF`; `book` accepts only `TXF` / `MXF`.
-    symbols       watchlist: 1–20 symbols (same shapes as `symbol`).
+                  `TXF` or `MXF`; `book` accepts only `TXF` / `MXF`. With venue="binance"
+                  a Binance USD-M perpetual — `BTC`, `BTCUSDT` or `BTC/USDT` — written
+                  as given, uppercased, `/` and `-` removed; the api normalises the rest.
+    symbols       watchlist: 1–20 symbols (same shapes as `symbol`; Taiwan only).
     interval      kline: `1m` / `5m` / `15m` / `60m` / `1d`.
+    venue         price / kline only: `"binance"` makes `symbol` a crypto symbol (contract
+                  §3.1; refused on book / watchlist / block). A crypto K-line is always
+                  this widget, never a block + line_chart drawn by a script — the live
+                  candles come from the platform stream.
     block_type    machine: the report block the script will send (see BLOCK_TYPES).
     refresh_cron  machine: 5-field cron, this machine's local time; `*/1 * * * *` is
                   the densest schedule there is — no seconds field. Only the grammar is
@@ -286,15 +330,16 @@ def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None,
     script        machine: the full text of `report_jobs/<id>/run.py`. It runs like a
                   scheduled strategy (cwd = workspace, no `BLAVE_*`, no token, no LLM)
                   and publishes by calling `write_data(id, block)`.
-    w, h          initial size in grid units; default = the type's minimum (price: 4×2). Position is
-                  the user's — the platform appends the tile to the bottom row.
+    w, h          initial size in grid units; default = the type's minimum (price: 4×2,
+                  kline: 6×3; a block is 2×2, or 4×3 when its block_type is chart-like —
+                  see CHART_BLOCKS). Position is the user's — the platform appends the
+                  tile to the bottom row.
     """
     if type not in CATALOGUE:
         raise ValueError(f"type {type!r} is not one of {', '.join(CATALOGUE)}")
     kind = CATALOGUE[type][0]
     _check_id(id, machine=(kind == "machine"))
     _check_title(title)
-    grid = _check_grid(type, w, h)
     props = {}
 
     if kind == "stream":
@@ -302,6 +347,8 @@ def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None,
                         ("refresh_human", refresh_human), ("script", script)):
             if v is not None:
                 raise ValueError(f"{name} is for machine widgets; {type} is a stream widget")
+        if venue is not None:
+            _check_venue(venue, type)
         if type == "watchlist":
             if symbol is not None:
                 raise ValueError("watchlist takes symbols=[...], not symbol=")
@@ -314,13 +361,17 @@ def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None,
         else:
             if symbols is not None:
                 raise ValueError(f"{type} takes symbol=..., not symbols=")
-            source = {"kind": "stream", "symbol": _check_symbol(symbol, type)}
+            if venue is None:
+                source = {"kind": "stream", "symbol": _check_symbol(symbol, type)}
+            else:
+                source = {"kind": "stream", "venue": venue, "symbol": _check_crypto_symbol(symbol)}
         if type == "kline":
             props["interval"] = _check_interval(interval)
         elif interval is not None:
             raise ValueError(f"interval is only for kline widgets, not {type}")
     else:
-        for name, v in (("symbol", symbol), ("symbols", symbols), ("interval", interval)):
+        for name, v in (("symbol", symbol), ("symbols", symbols), ("interval", interval),
+                        ("venue", venue)):
             if v is not None:
                 raise ValueError(f"{name} is for stream widgets; block is a machine widget")
         props["block_type"] = _check_block_type(block_type)
@@ -332,6 +383,7 @@ def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None,
             raise ValueError(f"report_jobs/{id}/ is a scheduled report, not a widget — "
                              "pick another id (or remove_schedule it first if the user asks)")
         source = {"kind": "machine", "refresh": refresh}
+    grid = _check_grid(type, w, h, props.get("block_type"))    # block minimum depends on block_type
 
     widget = {"id": id, "type": type, "title": title, "grid": grid, "source": source,
               "props": props, "created_by": "agent", "updated_at": int(time.time())}
@@ -352,6 +404,11 @@ def update_widget(id, *, title=None, props=None, refresh_cron=None, refresh_huma
     update op does not carry it. `props` is a dict of the type's props (`interval` for
     kline, `block_type` for block); for a machine widget the local `report_jobs/<id>/`
     registration is rewritten to match, through the same `register_schedule` path.
+
+    Changing a block's `block_type` to a chart-like one (CHART_BLOCKS, minimum 4×3) is
+    not size-checked here — this machine has no view of the board. If the tile is
+    currently smaller the api refuses the op (400, shows as `failed`); ask the user to
+    resize the tile first, then send the update again.
     """
     _check_id(id)
     job = _read_watch_job(id)                 # present = machine widget on this machine
