@@ -231,7 +231,11 @@ Dead zones now behave correctly: a long is **held** through `(sell_th, buy_th)` 
 
 The loop is pure (no I/O) and runs on a daily series in milliseconds — fast enough for `scan_grid`'s repeated calls.
 
-**Scanning any pair — the flow is always `scan_grid → find_plateau → write_scan → plot_heatmap`** (`write_scan` feeds the web 穩健參數 tab; details and the two web prompts in `references/lib.md` › *Parameter scan workflow*).
+**Scanning any pair — the flow is always `scan_grid → find_plateau → (on_edge → extend_axis → scan_grid → find_plateau, once) → write_scan → plot_heatmap`** (`write_scan` feeds the web 穩健參數 tab; details and the two web prompts in `references/lib.md` › *Parameter scan workflow*).
+
+**Grid size — three principles** (Pardo's plateau-search practice / industry convention): **10–20 values per axis** (the `nice_grid` / `percentile_thresholds` defaults: ≈ 15 → 100–400 combos, ≤ 10 s for any strategy — scan time is linear in combos × bars, 40×40 on two years of 5-min bars is ~45 s); **the step must have trading meaning** (whole bars for windows, a threshold move a trader would notice — a finer step makes neighbours differ by noise and the plateau's neighbourhood mean degenerate into a single cell); **coarse first, then fine** (zoom a second scan into the plateau's neighbourhood only if it needs resolving). 40 per axis is the hard cap.
+
+**Plateau on a grid border → extend that side once, rescan, then `write_scan`.** A border cell's neighbourhood is truncated and the real optimum may lie outside the range. After `find_plateau`, `on_edge(best_idx, grid.shape)` lists the borders hit (`(axis, side)`); `extend_axis(vals, side)` adds 5 cells beyond that end at the same step (int axes stay int, never past 40; `floor=1` for bar counts). Rerun `scan_grid → find_plateau` on the extended axes and write that grid. **One extension only** — it is the same scan and the same iteration under the Iteration Brakes; a plateau still on the border after it is reported as such.
 
 **Scanning four thresholds — scan each side independently, two heatmaps.**
 
@@ -247,7 +251,7 @@ The loop is pure (no I/O) and runs on a daily series in milliseconds — fast en
 from lib.param_scan import nice_grid, nice_step
 zs     = df['indicator'].dropna()
 LO, HI = np.percentile(zs, [2, 98])                              # data-driven span
-step   = nice_step(HI - LO, 9)                                   # one nice step for both axes
+step   = nice_step(HI - LO, 15)                                  # one nice step for both axes (~15 cells across the span)
 buy_vals  = nice_grid(0.2, HI, current=s.BUY_TH,  step=step)    # entry on the signal side
 sell_vals = nice_grid(LO,  HI, current=s.SELL_TH, step=step)    # exit: full range, BOTH sides
 ```
@@ -297,7 +301,7 @@ After combining, the only hard checks are the per-side ones — `BUY_TH > SELL_T
 
 1. **Round 1 — the two most likely sensitive constants**, everything else pinned at the values `strategy.py` holds now. Thresholds first (entry/exit levels move the Sharpe most), then window lengths, then the rest. Every constant must be a `compute_signals` kwarg so the pinned ones are just passed through. `find_plateau` → pin that pair at its plateau.
 2. **Round 2 — the next pair** (or, with three constants, the remaining one paired with the most sensitive one from round 1), thresholds pinned at the round-1 plateau. `find_plateau` → done.
-3. **Stop after two rounds.** Each round is one iteration under `AGENTS.md` › *Iteration Brakes*; do not re-scan round 1 with the round-2 windows, do not add a third pair. Report both plateaus and let the user choose.
+3. **Stop after two rounds.** Each round is one iteration under `AGENTS.md` › *Iteration Brakes*; do not re-scan round 1 with the round-2 windows, do not add a third pair. Report both plateaus and let the user choose. The border extension (`on_edge → extend_axis → rescan`, once) applies to **round 1 only** — it stays inside that iteration and is what `scan.json` gets; round 2 is the last iteration and never extends.
 
 Every round gets its own `plot_heatmap` PNG (`heatmap.png`, `heatmap_round2.png` — they reach the user through the workspace chat / Telegram). **`write_scan` is called once, for the round-1 pair only.** Reason: the web's adopt prompt only changes the two constants in `scan.json`, and round 1 is the only grid computed with every *other* constant at the file's current value — so its `current` mark is honest and 「把 ENTRY_Z 改成 …」 lands on a cell that was actually scanned. Round 2 was computed with the thresholds pinned at the plateau, not the file's values; writing it would mark a current cell whose Sharpe was never measured under the file's constants. The round-2 recommendation goes in the conversation. Long/short threshold pairs that decouple by turning the other side off (previous section) are a separate case — two independent 2D scans, write the side you recommend.
 

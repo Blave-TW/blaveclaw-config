@@ -1,6 +1,7 @@
 """Minimal check for lib/param_scan.write_scan + lib/validation.write_mcpt_to_stats —
 no network, no api. nice_grid / percentile_thresholds must put the strategy's current
-constant on a nice-step lattice (the web marks "you are here" only for an on-grid current).
+constant on a nice-step lattice (the web marks "you are here" only for an on-grid current);
+default axes are ~15 cells; on_edge / extend_axis grow a border-plateau axis once, ≤ 40.
 A fake 5×9 Sharpe grid (NaN cells, a sharp isolated peak that is NOT
 the plateau) goes through find_plateau → write_scan; asserts the scan.json contract the
 web 穩健參數 tab reads (keys, shapes, NaN → null, peak ≠ plateau, current on/off grid).
@@ -11,7 +12,8 @@ import json, math, os, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import pandas as pd
-from lib.param_scan import find_plateau, write_scan, _locate, nice_grid, nice_step, percentile_thresholds, SCAN_MAX_AXIS
+from lib.param_scan import (find_plateau, write_scan, _locate, nice_grid, nice_step, percentile_thresholds,
+                            on_edge, extend_axis, SCAN_MAX_AXIS, GRID_N, EDGE_EXTEND)
 import lib.validation as V
 
 fails = 0
@@ -124,6 +126,57 @@ check(e[-1] >= p95 and x[0] <= p5 and e[0] <= (p5 + p95) / 2 <= x[-1] and len(e)
 check(all(isinstance(v, float) for v in e + x) and _locate(0.5, e) is not None and _locate(0.0, x) is not None, "軸值原生 float,_locate 找得到目前值")
 e0, x0 = percentile_thresholds(ser, 9)
 check(0.0 in e0 and 0.0 in x0, "沒傳 current → 兩軸錨在 0")
+
+# ── 預設格數:每軸目標 15(取整後 11–21),percentile 切半後每側 ≈ 9 ──────────────
+check(GRID_N == 15 and EDGE_EXTEND == 5, "GRID_N=15、EDGE_EXTEND=5")
+for lo, hi, cur, integ in ((0.065, 1.979, 0.5, False), (-1.849, 0.065, 0.0, False), (0, 1, 0.5, False),
+                           (0.5, 3.0, 1.686, False), (3, 15, 5, True), (0, 100, 50, True), (5, 200, 20, True), (20, 120, 60, True)):
+    g = nice_grid(lo, hi, current=cur, integer=integ)
+    check(11 <= len(g) <= 21, f"預設 n → {len(g)} 格 (lo={lo}, hi={hi}, integer={integ})")
+e15, x15 = percentile_thresholds(ser, current=(0.5, 0.0))
+check(7 <= len(x15) <= 13 and len(e15) <= 21 and math.isclose(e15[1] - e15[0], x15[1] - x15[0]), f"percentile_thresholds 預設 n_parts=17 → 每側約 9 格 ({len(e15)}×{len(x15)})、同步長")
+check(len(e15) * len(x15) <= 400, "預設兩軸乘積 ≤ 400 組合")
+
+# ── on_edge / extend_axis:穩健點在邊緣就往那側延伸 ───────────────────────────
+check(on_edge((2, 4), (5, 9)) == [], "on_edge 內部 → 空")
+check(on_edge((0, 4), (5, 9)) == [(0, 'lo')] and on_edge((4, 4), (5, 9)) == [(0, 'hi')], "on_edge 列軸上/下邊")
+check(on_edge((2, 0), (5, 9)) == [(1, 'lo')] and on_edge((2, 8), (5, 9)) == [(1, 'hi')], "on_edge 欄軸左/右邊")
+check(on_edge((0, 8), (5, 9)) == [(0, 'lo'), (1, 'hi')], "on_edge 角落 → 兩筆")
+check(isinstance(on_edge(best_idx, grid.shape), list), "on_edge 直接吃 find_plateau 的 best_idx(numpy int)與 grid.shape")
+try:
+    on_edge((5, 0), (5, 9)); check(False, "on_edge 索引出界要 raise")
+except ValueError:
+    check(True, "on_edge 索引出界要 raise")
+fx = [0.5, 0.75, 1.0, 1.25]
+check(extend_axis(fx, 'hi') == [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5], f"extend_axis hi 加 5 格、步長不變 → {extend_axis(fx, 'hi')}")
+check(extend_axis(fx, 'lo') == [-0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0, 1.25], f"extend_axis lo 往下加 5 格 → {extend_axis(fx, 'lo')}")
+check(extend_axis(fx, 'hi', 2) == fx + [1.5, 1.75], "extend_axis k 可指定")
+gi = extend_axis([5, 15, 25], 'hi')
+check(gi == [5, 15, 25, 35, 45, 55, 65, 75] and all(type(v) is int for v in gi), f"整數軸延伸輸出 int、步長 10 → {gi}")
+gi = extend_axis(range(5, 35, 10), 'lo', floor=1)
+check(gi == [5, 15, 25], f"floor=1:往下延伸全是負數就全丟、軸不變 → {gi}")
+gi = extend_axis([20, 30, 40], 'lo', floor=1)
+check(gi == [10, 20, 30, 40], f"floor=1 只丟 < 1 的格 → {gi}")
+g38 = extend_axis(list(range(38)), 'hi')
+check(len(g38) == SCAN_MAX_AXIS and g38[-1] == 39, f"延伸不超過 {SCAN_MAX_AXIS}(38+5 → {len(g38)})")
+check(extend_axis(list(range(40)), 'lo') == list(range(40)), "已 40 格 → 原樣回傳")
+g0 = nice_grid(0.065, 1.979, current=0.5)
+check(0.5 in extend_axis(g0, 'lo') and _locate(0.5, extend_axis(g0, 'hi')) is not None, "延伸後目前值仍在格上")
+for bad, why in (([0.5], "只有 1 格"), ([0.5, 0.7, 1.0], "步長不一致"), ([1.0, 0.5], "遞減")):
+    try:
+        extend_axis(bad, 'hi'); check(False, f"extend_axis {why} 要 raise")
+    except ValueError:
+        check(True, f"extend_axis {why} 要 raise")
+try:
+    extend_axis(fx, 'up'); check(False, "extend_axis side 非 lo/hi 要 raise")
+except ValueError:
+    check(True, "extend_axis side 非 lo/hi 要 raise")
+# 邊緣 → 延伸 → 重掃 → write_scan 整段走一遍(用假 grid 模擬重掃結果)
+row_e = extend_axis(row_vals, 'hi'); grid_e = np.full((len(row_e), 9), 0.4); grid_e[6:9, 2:6] = 1.5
+b_e, n_e, *_ = find_plateau(grid_e, row_e, col_vals)
+write_scan(grid_e, row_e, col_vals, n_e, b_e, d3, "ENTRY_TH", "EXIT_TH", 0.0005, None, None, current=(0.8, 0.2))
+doc_e = json.load(open(os.path.join(d3, "scan.json")))
+check(doc_e["row_vals"] == [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4] and doc_e["current"]["i"] == 3, f"延伸軸寫進 scan.json、current 仍標得到 → {doc_e['row_vals']}")
 for bad_cur, why in (((True, 0.3), "current 含 bool"), ((float("nan"), 0.3), "current 含 NaN")):
     try:
         write_scan(grid, row_vals, col_vals, nbr_mean, best_idx, d3, "A", "B", 0.0, None, None, current=bad_cur); check(False, f"{why} 要 raise")

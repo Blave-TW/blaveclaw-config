@@ -2,10 +2,16 @@
 Utilities for 2D parameter scanning and plateau detection.
 
 Usage:
-    from lib.param_scan import nice_grid, percentile_thresholds, scan_grid, find_plateau, write_scan, plot_heatmap
+    from lib.param_scan import nice_grid, percentile_thresholds, scan_grid, find_plateau, on_edge, extend_axis, write_scan, plot_heatmap
 
 Canonical scan flow: nice_grid / percentile_thresholds (axes anchored on the current
-constants) → scan_grid → find_plateau → write_scan → plot_heatmap
+constants) → scan_grid → find_plateau → (on_edge → extend_axis → scan_grid → find_plateau,
+once) → write_scan → plot_heatmap
+
+Grid size: every axis targets ~15 cells (GRID_N; ≈ 11–21 after nice-step rounding), i.e.
+100–400 combos — ≤ 10 s for any strategy (scan time is linear in combos × bars; 40×40 on
+two years of 5-min bars is ~45 s). A finer step has no trading meaning, and the 3×3
+neighbourhood mean degenerates into a single cell when neighbours differ by noise only.
 """
 
 import json
@@ -22,6 +28,14 @@ from matplotlib.patches import Rectangle
 # axis is refused there and the web 穩健參數 tab stays blank, so refuse it here first
 # (write_scan) and never build one (nice_grid coarsens its step instead).
 SCAN_MAX_AXIS = 40
+
+# Default target cells per axis (nice_grid n / percentile_thresholds n_parts derive from it).
+# 15 → 100–400 combos per grid, ≤ 10 s for any strategy; finer steps have no trading meaning
+# and turn the plateau's neighbourhood mean into a single-cell pick. 40 stays the hard cap.
+GRID_N = 15
+
+# Cells added on the edge side when the plateau lands on a grid border (one extension only).
+EDGE_EXTEND = 5
 
 
 def _nice_candidates(integer=False):
@@ -54,7 +68,7 @@ def _coarser(step, integer=False):
     return int(round(nxt)) if integer else float(nxt)
 
 
-def nice_grid(lo, hi, n=9, current=0.0, integer=False, step=None, max_axis=SCAN_MAX_AXIS):
+def nice_grid(lo, hi, n=GRID_N, current=0.0, integer=False, step=None, max_axis=SCAN_MAX_AXIS):
     """
     Build one scan axis whose cells are `current + k*step` (k integer) — so the
     strategy's current value is ALWAYS a grid cell and every neighbour sits a clean
@@ -68,9 +82,13 @@ def nice_grid(lo, hi, n=9, current=0.0, integer=False, step=None, max_axis=SCAN_
     ----------
     lo, hi   : range the axis must cover (typically the indicator's p5 / p95, or the
                current value ± a sensible span). `current` is always covered too.
-    n        : target number of cells — the step is (hi-lo)/(n-1) rounded to the nearest
-               {1, 2, 2.5, 5}×10^k. Actual length differs a little (nice step + the
-               ends rounded outward, at most one extra cell each side).
+    n        : target number of cells (default GRID_N = 15 → ≈ 11–21 after rounding) —
+               the step is (hi-lo)/(n-1) rounded to the nearest {1, 2, 2.5, 5}×10^k.
+               Actual length differs a little (nice step + the ends rounded outward, at
+               most one extra cell each side). 10–20 cells per axis is the sweet spot:
+               100–400 combos, ≤ 10 s for any strategy, and every neighbour is a step
+               that means something in trading terms — a finer grid only makes the
+               plateau's neighbourhood mean collapse into a single cell.
     current  : the constant the strategy file holds RIGHT NOW (anchor). Default 0.
     integer  : True for bar-count parameters (SMA period, hold bars): step ≥ 1, int cells.
     step     : override the step (still anchored on current; must be a nice number).
@@ -100,7 +118,7 @@ def nice_grid(lo, hi, n=9, current=0.0, integer=False, step=None, max_axis=SCAN_
     return [round(float(current + k * step), 10) for k in range(k_lo, k_hi + 1)]
 
 
-def percentile_thresholds(series, n_parts=9, current=None):
+def percentile_thresholds(series, n_parts=17, current=None):
     """
     Threshold-pair scan axes from an indicator's distribution, on a nice grid anchored
     at the strategy's current constants.
@@ -109,13 +127,15 @@ def percentile_thresholds(series, n_parts=9, current=None):
     (p95-p5)/(n_parts-1) rounded to {1, 2, 2.5, 5}×10^k, each anchored so the current
     ENTRY / EXIT value is a cell (see nice_grid — the web cannot mark an off-grid current).
 
-    Example (n_parts=9, p5=0.065, p95=1.979, current=(0.5, 0.0)):
-        step 0.25 → entry_vals [0.5, 0.75, …, 2.0], exit_vals [0.0, 0.25, …, 1.25]
+    Example (n_parts=17, p5=0.065, p95=1.979, current=(0.5, 0.0)):
+        step 0.1 → entry_vals [0.5, 0.6, …, 2.0] (current 0.5 < mid, so the axis
+        stretches down to cover it), exit_vals [0.0, 0.1, …, 1.1]
 
     Parameters
     ----------
     series   : pd.Series — indicator values (NaNs ignored)
-    n_parts  : int — target cells across p5..p95 (default 9 → ~n/2 per axis)
+    n_parts  : int — target cells across p5..p95 (default 17 → each half ≈ 9 cells, so
+               the pair is ~100 combos; see GRID_N for why not finer)
     current  : (ENTRY, EXIT) the strategy file holds now — pass `(s.ENTRY_TH, s.EXIT_TH)`.
                None → both anchored at 0 (legacy callers; only right if 0 is on the lattice
                you want).
@@ -297,6 +317,82 @@ def find_plateau(grid, row_vals=None, col_vals=None, window=1):
     best_col    = col_vals[best_idx[1]] if col_vals is not None else None
     best_sharpe = float(nbr_mean[best_idx])
     return best_idx, nbr_mean, best_row, best_col, best_sharpe
+
+
+def on_edge(best_idx, shape):
+    """
+    Which grid borders the plateau cell sits on — a plateau on a border was only
+    measured on a truncated neighbourhood and the real optimum may lie outside the
+    scanned range, so the axis is extended on that side and scanned once more.
+
+    Parameters
+    ----------
+    best_idx : (i, j) from find_plateau
+    shape    : grid.shape — (len(row_vals), len(col_vals))
+
+    Returns
+    -------
+    list of (axis, side): axis 0 = rows (row_vals), 1 = cols (col_vals);
+    side 'lo' = first cell, 'hi' = last cell. Empty list (falsy) when the plateau is
+    interior; a corner returns two entries.
+
+        for axis, side in on_edge(best_idx, grid.shape):
+            ...extend row_vals (axis 0) or col_vals (axis 1) with extend_axis(vals, side)
+    """
+    edges = []
+    for axis in (0, 1):
+        k, n = int(best_idx[axis]), int(shape[axis])
+        if not 0 <= k < n:
+            raise ValueError(f"on_edge: best_idx {tuple(best_idx)} is off a grid of shape {tuple(shape)}")
+        if k == 0:
+            edges.append((axis, 'lo'))
+        if k == n - 1:
+            edges.append((axis, 'hi'))
+    return edges
+
+
+def extend_axis(vals, side, k=EDGE_EXTEND, floor=None, max_axis=SCAN_MAX_AXIS):
+    """
+    Add k cells beyond one end of a nice_grid axis, at the axis's own step, so the
+    lattice (and the current cell on it) stays intact. Used ONCE after find_plateau
+    when on_edge says the plateau is on that border; the extended axis then goes
+    through scan_grid → find_plateau → write_scan again. Never extend twice — the
+    rescan counts as the same iteration under AGENTS.md › Iteration Brakes.
+
+    Parameters
+    ----------
+    vals     : ascending, uniform-step axis (nice_grid / percentile_thresholds output;
+               a plain range() works too)
+    side     : 'lo' → prepend below vals[0]; 'hi' → append above vals[-1]
+    k        : cells to add (default EDGE_EXTEND = 5); clipped so the axis never exceeds
+               max_axis (api cap 40) — at 40 the axis comes back unchanged
+    floor    : optional lower bound; cells below it are dropped (bar counts: floor=1,
+               so a 'lo' extension never asks for a negative window)
+    max_axis : api cap on the axis length
+
+    Returns
+    -------
+    list — same element type as vals (int axis stays int), ascending, step unchanged
+    """
+    vals = list(vals)
+    if len(vals) < 2:
+        raise ValueError(f"extend_axis: need at least 2 cells to infer the step, got {vals}")
+    if side not in ('lo', 'hi'):
+        raise ValueError(f"extend_axis: side must be 'lo' or 'hi', got {side!r}")
+    integer = all(isinstance(v, (int, np.integer)) and not isinstance(v, (bool, np.bool_)) for v in vals)
+    diffs   = np.diff(np.asarray(vals, dtype=float))
+    step    = float(diffs[0])
+    if step <= 0 or not np.allclose(diffs, step, rtol=1e-6, atol=1e-12):
+        raise ValueError(f"extend_axis: axis must be ascending with one uniform step, got {vals}")
+    k = max(0, min(int(k), max_axis - len(vals)))
+    if side == 'lo':
+        new = [vals[0] - m * step for m in range(k, 0, -1)]
+    else:
+        new = [vals[-1] + m * step for m in range(1, k + 1)]
+    new = [int(round(v)) for v in new] if integer else [round(float(v), 10) for v in new]
+    if floor is not None:
+        new = [v for v in new if v >= floor]
+    return new + vals if side == 'lo' else vals + new
 
 
 def _grid_json(a):

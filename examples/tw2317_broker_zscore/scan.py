@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import numpy as np
 from dotenv import dotenv_values
-from lib.param_scan import nice_grid, nice_step, scan_grid, find_plateau, write_scan, plot_heatmap
+from lib.param_scan import nice_grid, nice_step, scan_grid, find_plateau, on_edge, extend_axis, write_scan, plot_heatmap
 import strategy as s
 
 env  = dotenv_values()
@@ -48,23 +48,39 @@ print(f"z-score 分佈 (n={len(z):,}): p5={p5:.2f}  median={z.median():.2f}  p95
 
 # One nice step for both axes; each axis is anchored on the constant strategy.py holds
 # now, so the current cell is always on the grid (the web marks it) and every
-# neighbour is a clean multiple of the step away.
-step       = nice_step(p95 - p5, 13)
+# neighbour is a clean multiple of the step away. 17 across p5–p95 → each half ≈ 9
+# cells, ~100 combos (same default as percentile_thresholds; finer has no trading
+# meaning and the neighbourhood mean degenerates into a single cell).
+step       = nice_step(p95 - p5, 17)
 entry_vals = nice_grid(p5, 0.0, current=s.ENTRY_Z, step=step)   # entry: p5 … 0
 exit_vals  = nice_grid(0.0, p95, current=s.EXIT_Z,  step=step)   # exit:  0 … p95
 print(f"step={step}  ENTRY_Z 候選 ({len(entry_vals)}): {entry_vals}")
 print(f"          EXIT_Z  候選 ({len(exit_vals)}): {exit_vals}\n")
 
-t1 = time.time()
-grid1 = scan_grid(
-    base_df, s.compute_signals, entry_vals, exit_vals,
-    row_param='entry_z', col_param='exit_z',        # window / zscore_win stay at defaults = file values
-    fee=s.FEE, warmup=s.WARMUP,
-    valid_fn=lambda entry, exit_: entry < exit_,
-)
-print(f"round 1 掃描耗時: {time.time()-t1:.1f}s")
+def scan1(entry_vals, exit_vals):
+    t1 = time.time()
+    grid = scan_grid(
+        base_df, s.compute_signals, entry_vals, exit_vals,
+        row_param='entry_z', col_param='exit_z',        # window / zscore_win stay at defaults = file values
+        fee=s.FEE, warmup=s.WARMUP,
+        valid_fn=lambda entry, exit_: entry < exit_,
+    )
+    print(f"round 1 掃描 {len(entry_vals)}×{len(exit_vals)} 組合,耗時 {time.time()-t1:.1f}s")
+    return grid, find_plateau(grid, entry_vals, exit_vals)
 
-best1, nbr1, best_entry, best_exit, sharpe1 = find_plateau(grid1, entry_vals, exit_vals)
+grid1, (best1, nbr1, best_entry, best_exit, sharpe1) = scan1(entry_vals, exit_vals)
+
+# Plateau on a grid border → extend that axis 5 cells on that side (same step) and
+# rescan ONCE — still round 1, still one iteration. Round 1 only: round 2 is the
+# second and last iteration, so it never extends.
+edges = on_edge(best1, grid1.shape)
+for axis, side in edges:
+    if axis == 0:
+        entry_vals = extend_axis(entry_vals, side)
+    else:
+        exit_vals  = extend_axis(exit_vals, side)
+if edges and len(entry_vals) * len(exit_vals) > grid1.size:
+    grid1, (best1, nbr1, best_entry, best_exit, sharpe1) = scan1(entry_vals, exit_vals)
 print(f"round 1 穩健參數: ENTRY_Z={best_entry}, EXIT_Z={best_exit}  "
       f"鄰域 Sharpe={sharpe1:.3f}  單格 Sharpe={grid1[best1]:.3f}")
 
