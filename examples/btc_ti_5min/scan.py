@@ -42,6 +42,8 @@ for axis, side in edges:
         exit_vals  = extend_axis(exit_vals, side)
 if edges and len(entry_vals) * len(exit_vals) > grid.size:   # 真的長大了才重掃(撞到 40 上限或 floor 就不重掃)
     grid, (best_idx, nbr_mean, best_entry, best_exit, best_sharpe) = scan(entry_vals, exit_vals)
+if on_edge(best_idx, grid.shape):   # 延伸(或延伸不了)後仍在邊緣 → 不再自己擴,交給用戶決定
+    print("⚠️ 穩健點仍在網格邊緣,真正的最佳區可能在掃描範圍外——回報用戶,請用戶決定是否擴大範圍")
 
 print(f"穩健參數: ENTRY_TH={best_entry}, EXIT_TH={best_exit}  鄰域 Sharpe={best_sharpe:.3f}  單格 Sharpe={grid[best_idx]:.3f}")
 

@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from dotenv import dotenv_values
 from lib.data import fetch_kline
-from lib.param_scan import scan_grid, find_plateau, on_edge, extend_axis, write_scan, plot_heatmap
+from lib.param_scan import nice_grid, scan_grid, find_plateau, on_edge, extend_axis, write_scan, plot_heatmap
 import strategy as s
 
 env  = dotenv_values()
@@ -18,9 +18,10 @@ print(f"資料載入: {time.time()-t0:.1f}s  ({len(base_df):,} bars)\n")
 
 # ── 掃描範圍 ──────────────────────────────────────────────────────────────────
 # 每軸 10 格、步長是有交易意義的 K 棒數(10 / 20 根),100 組合幾秒掃完;
-# 步長再細,相鄰格只差雜訊、鄰域平均就退化成單格。
-fast_vals = list(range(5,  105, 10))   # 5, 15, 25, ..., 95
-slow_vals = list(range(20, 220, 20))   # 20, 40, 60, ..., 200
+# 步長再細,相鄰格只差雜訊、鄰域平均就退化成單格。nice_grid 錨在檔案目前的常數,
+# 目前值一定是格點(web 才標得出「你在這裡」);integer=True 輸出整數 K 棒數。
+fast_vals = nice_grid(5,  95,  n=10, current=s.SMA_FAST, integer=True)   # 5, 15, 25, ..., 95
+slow_vals = nice_grid(20, 200, n=10, current=s.SMA_SLOW, integer=True)   # 20, 40, 60, ..., 200
 
 # ── 參數掃描 ──────────────────────────────────────────────────────────────────
 def scan(fast_vals, slow_vals):
@@ -46,6 +47,8 @@ for axis, side in edges:
         slow_vals = extend_axis(slow_vals, side, floor=1)
 if edges and len(fast_vals) * len(slow_vals) > grid.size:   # 真的長大了才重掃(撞到 40 上限或 floor 就不重掃)
     grid, (best_idx, nbr_mean, best_fast, best_slow, best_sharpe) = scan(fast_vals, slow_vals)
+if on_edge(best_idx, grid.shape):   # 延伸(或延伸不了)後仍在邊緣 → 不再自己擴,交給用戶決定
+    print("⚠️ 穩健點仍在網格邊緣,真正的最佳區可能在掃描範圍外——回報用戶,請用戶決定是否擴大範圍")
 
 print(f"穩健參數: SMA_FAST={best_fast}, SMA_SLOW={best_slow}  鄰域 Sharpe={best_sharpe:.3f}  單格 Sharpe={grid[best_idx]:.3f}")
 

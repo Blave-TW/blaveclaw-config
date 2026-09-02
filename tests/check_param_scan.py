@@ -5,7 +5,8 @@ default axes are ~15 cells; on_edge / extend_axis grow a border-plateau axis onc
 A fake 5×9 Sharpe grid (NaN cells, a sharp isolated peak that is NOT
 the plateau) goes through find_plateau → write_scan; asserts the scan.json contract the
 web 穩健參數 tab reads (keys, shapes, NaN → null, peak ≠ plateau, current on/off grid).
-Then a stub stats.json takes the MCPT merge and must keep every other field.
+Then a stub stats.json takes the MCPT merge and must keep every other field (the runner's
+carry-over of those keys across live ticks is covered by tests/check_mcpt_auto.py).
 Run: cd blaveclaw-config && .venv/bin/python tests/check_param_scan.py
 """
 import json, math, os, sys, tempfile
@@ -187,7 +188,30 @@ try:
 except ValueError:
     check(True, "row_vals 含 NaN 要 raise")
 write_scan(grid, [0.1 * k for k in (5, 6, 7, 8, 9)], col_vals, nbr_mean, best_idx, d3, "A", "B", 0.0, None, None)
-check(json.load(open(os.path.join(d3, "scan.json")))["row_vals"] == [0.5, 0.6, 0.7, 0.8, 0.9], "軸值 round(6) 去掉浮點雜訊")
+check(json.load(open(os.path.join(d3, "scan.json")))["row_vals"] == [0.5, 0.6, 0.7, 0.8, 0.9], "軸值 round(10) 去掉浮點雜訊")
+
+# ── 小數位統一:nice_grid / write_scan / _locate 都是 round(10),細步長的目前值標得到 ──────
+fine = nice_grid(0.0001, 0.0002, current=0.00012345, step=0.00001)
+check(0.00012345 in fine and len(fine) == 12, f"步長 1e-5 的軸含 current=0.00012345 → {fine}")
+g_f = np.full((len(fine), 9), 0.4); b_f, n_f, *_ = find_plateau(g_f, fine, col_vals)
+write_scan(g_f, fine, col_vals, n_f, b_f, d3, "TH", "EXIT_TH", 0.0005, None, None, current=(0.00012345, 0.2))
+doc_f = json.load(open(os.path.join(d3, "scan.json")))
+check(doc_f["row_vals"] == fine and doc_f["current"]["i"] == fine.index(0.00012345) and doc_f["current"]["j"] == 1,
+      f"current=0.00012345 經 write_scan 仍標得到(round(6) 會把它磨成 0.000123 而找不到)→ {doc_f['current']}")
+check(_locate(0.00012345, fine) == fine.index(0.00012345) and _locate(0.1 + 0.2, [0.1, 0.2, 0.3]) == 2, "_locate 比對前同樣 round(10):0.1+0.2 命中 0.3")
+g_z = nice_grid(-0.5, 0.5, current=0.25, step=0.25)
+check(g_z == [-0.5, -0.25, 0.0, 0.25, 0.5] and "-0.0" not in str(g_z) and all(math.copysign(1, v) > 0 for v in g_z if v == 0),
+      f"nice_grid 不輸出 -0.0 → {g_z}")
+try:
+    nice_grid(3, 15, current=5, integer=True, step=2.5); check(False, "整數軸 step=2.5 要 raise(不可截斷成 2)")
+except ValueError:
+    check(True, "整數軸 step=2.5 要 raise(不可截斷成 2)")
+check(nice_grid(3, 15, current=5, integer=True, step=2.0) == [3, 5, 7, 9, 11, 13, 15], "整數軸 step=2.0(整數值 float)可接受")
+check(on_edge((0, 2), (1, 5)) == [] and on_edge((0, 0), (1, 5)) == [(1, 'lo')] and on_edge((0, 4), (1, 5)) == [(1, 'hi')],
+      "1×N 網格:長度 1 的軸略過、另一軸照判")
+check(on_edge((0, 0), (1, 1)) == [], "1×1 網格 → 空")
+g_1n = np.array([[0.4, 0.5, 1.2, 1.3, 1.1]]); b_1n, n_1n, *_ = find_plateau(g_1n, [7], col_vals[:5])
+check(on_edge(b_1n, g_1n.shape) in ([], [(1, 'hi')]) and all(ax == 1 for ax, _ in on_edge(b_1n, g_1n.shape)), f"1×5 grid find_plateau → on_edge 不炸、只報欄軸 → {on_edge(b_1n, g_1n.shape)}")
 
 # ── MCPT merge into stats.json ────────────────────────────────────────────────
 V._REPO_ROOT = tmp
@@ -227,18 +251,4 @@ g_inf = grid.copy(); g_inf[0, 1] = np.inf
 write_scan(g_inf, row_vals, col_vals, nbr_mean, best_idx, tmp, "ENTRY_TH", "EXIT_TH", 0.0005, None, None)
 check(json.load(open(path))["grid"][0][1] is None and "Infinity" not in open(path).read(), "inf 格 → null,檔內無 Infinity")
 
-# ── runner carry-over: live tick keeps MCPT + Generated At, backtest drops / restamps ──
-import lib.runner as R
-json.dump({**after, "Generated At": 1_700_000_000}, open(os.path.join(sdir, "stats.json"), "w"))
-check(R._carry_over(sdir, "live") == {"MCPT p-value": 0.0345, "MCPT Permutations": 2000, "Generated At": 1_700_000_000}, "live 重寫 → 帶過 MCPT 兩 key + Generated At")
-check(R._carry_over(sdir, "backtest") == {}, "backtest 重寫 → 全丟(舊 p 值對新參數無效,Generated At 重蓋)")
-check(R._carry_over(os.path.join(tmp, "strategies", "nope"), "live") == {}, "舊檔不存在 → 當缺席、不致命")
-bad = os.path.join(tmp, "strategies", "broken"); os.makedirs(bad); open(os.path.join(bad, "stats.json"), "w").write("{half-written")
-check(R._carry_over(bad, "live") == {}, "舊檔壞掉 → 當缺席、不致命")
-json.dump({"Sharpe Ratio": 1.0}, open(os.path.join(bad, "stats.json"), "w"))
-check(R._carry_over(bad, "live") == {}, "舊檔沒有可帶 key → 空 dict,不帶其他欄位")
-check(R.GENERATED_AT_KEY == "Generated At", "Generated At key 名固定")
-src = open(os.path.join(os.path.dirname(R.__file__), "runner.py")).read()
-check(src.count("stats.update(_carry_over(out_dir, mode))") == 1 and src.count("carried = _carry_over(out_dir, mode)") == 1
-      and src.count("setdefault(GENERATED_AT_KEY, int(time.time()))") == 2, "Type A 與 Type C 兩處寫出都接了 _carry_over + Generated At 補戳")
 print("all checks passed" if not fails else f"FAILED: {fails}"); sys.exit(1 if fails else 0)

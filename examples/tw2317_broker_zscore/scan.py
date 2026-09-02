@@ -81,6 +81,8 @@ for axis, side in edges:
         exit_vals  = extend_axis(exit_vals, side)
 if edges and len(entry_vals) * len(exit_vals) > grid1.size:
     grid1, (best1, nbr1, best_entry, best_exit, sharpe1) = scan1(entry_vals, exit_vals)
+if on_edge(best1, grid1.shape):   # still on a border after the one extension → report, never extend again
+    print("⚠️ 穩健點仍在網格邊緣,真正的最佳區可能在掃描範圍外——回報用戶,請用戶決定是否擴大範圍")
 print(f"round 1 穩健參數: ENTRY_Z={best_entry}, EXIT_Z={best_exit}  "
       f"鄰域 Sharpe={sharpe1:.3f}  單格 Sharpe={grid1[best1]:.3f}")
 

@@ -51,6 +51,18 @@ MCPT_KEYS = ('MCPT p-value', 'MCPT Permutations', 'MCPT Distribution')
 # fleet VM is roughly 3–6× slower, so 2000 stays well inside the 30 s budget for a backtest
 # — and matches the n the manual flow has always used, so p-values stay comparable.
 MCPT_N_DEFAULT = 2000
+# Runtime budget for the automatic MCPT, in bars × permutations: 200k bars × n=2000 (the
+# 5min / 2-year case above, 3.5 s on M5, ≈ 10–20 s on the fleet). Fleet measurement: 1min
+# bars over two years (1.05M bars) at n=2000 took 55–110 s — over the 30 s budget — so n is
+# scaled down to budget // bars (never below MCPT_N_MIN, never above MCPT_N_MAX whatever
+# MCPT_N says) and a warning names the original and effective n.
+MCPT_BUDGET = 4e8
+MCPT_N_MIN  = 200
+MCPT_N_MAX  = 20000
+# Fixed seed for the automatic MCPT's permutations: the same backtest gives the same
+# p-value on every run (a live tick carries it over, a re-run must not silently move it).
+# Passed as a private RNG to mcpt() so the global numpy seed is untouched.
+MCPT_SEED = 42
 # Flat epoch-seconds key stamping when the stats were produced by an explicit backtest.
 # The web compares scan.json's generated_at against it: a scan older than the last
 # backtest means the parameters may have moved, so scan.current is shown as unknown.
@@ -80,16 +92,50 @@ def _carry_over(out_dir, mode):
         return {}
 
 
+def _write_stats(out_dir, stats):
+    """stats.json via tmp + os.replace (same pattern as lib.param_scan.write_scan): a live
+    tick rewrites the file every bar, and a reader that lands mid-write — the reporter's
+    upload, or _carry_over on the next tick — would otherwise see a truncated file and
+    drop the MCPT / Generated At keys for good."""
+    path = Path(out_dir) / 'stats.json'
+    tmp  = path.with_name('stats.json.tmp')
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(stats, f, indent=2)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _mcpt_n_effective(n_perm, bars):
+    """Permutation count actually run: MCPT_N (or the default) scaled down to fit
+    MCPT_BUDGET bars × permutations, floored at MCPT_N_MIN, capped at MCPT_N_MAX."""
+    n_eff = min(int(n_perm), MCPT_N_MAX, max(MCPT_N_MIN, int(MCPT_BUDGET // max(int(bars), 1))))
+    if n_eff < n_perm:
+        logging.warning("MCPT permutations reduced %d → %d to fit the runtime budget "
+                        "(%d bars × n ≤ %.0e); set MCPT_N lower to silence this",
+                        n_perm, n_eff, bars, MCPT_BUDGET)
+    return n_eff
+
+
 def _auto_mcpt(config, close_v, pos, index, fee, n_trades):
     """Type A backtest: run lib.validation.mcpt on the backtest's own close / position and
     return the three MCPT stats.json fields (see lib.validation.mcpt_stats_fields), or {}.
 
     `MCPT = False` in the strategy skips it; `MCPT_N` overrides the permutation count
-    (default MCPT_N_DEFAULT). periods_per_year comes from the data's real date span (same
-    figure compute_stats annualizes with), fee from FEE; vol-targeting parameters stay at
-    the lib defaults. Never raises: a strategy that never traded, too-short data, a stale
-    lib/validation.py or any other failure logs a warning and the backtest ships every
-    other stat as before — MCPT is an extra, not a gate.
+    (default MCPT_N_DEFAULT, scaled to the runtime budget — see _mcpt_n_effective).
+    periods_per_year comes from the data's real date span (same figure compute_stats
+    annualizes with), fee from FEE, vol_window = one month of bars (ppy / 12, at least 20:
+    1h crypto → 730 ≈ the lib default 720, daily → 21); max_lev / target_vol stay at the
+    lib defaults. Permutations use a private RNG seeded with MCPT_SEED (reproducible,
+    global seed untouched). Never raises: a strategy that never traded, too-short data, a
+    stale lib/validation.py or any other failure logs a warning and the backtest ships
+    every other stat as before — MCPT is an extra, not a gate. A sound p-value whose
+    histogram came out unusable (edges collapsed) is written without the Distribution.
 
     Type C (portfolio) does NOT get an automatic MCPT: mcpt() permutes ONE forward-return
     series against ONE position series, and a portfolio has k of each. Collapsing the
@@ -105,7 +151,7 @@ def _auto_mcpt(config, close_v, pos, index, fee, n_trades):
         logging.warning("MCPT skipped: 0 trades — no position to test")
         return {}
     try:
-        from lib.validation import mcpt, mcpt_stats_fields
+        from lib.validation import mcpt, mcpt_stats_fields, MCPT_P_KEY, MCPT_N_KEY
         from lib.analysis import periods_per_year
     except ImportError as e:  # stale lib on this workspace — fail open, keep the backtest
         logging.warning("MCPT skipped: lib is stale (%s)", e)
@@ -114,10 +160,29 @@ def _auto_mcpt(config, close_v, pos, index, fee, n_trades):
         n_perm = int(config.get('MCPT_N', MCPT_N_DEFAULT))
         if n_perm <= 0:
             raise ValueError(f"MCPT_N must be a positive int, got {n_perm}")
+        n_eff = _mcpt_n_effective(n_perm, len(close_v))
         ppy = periods_per_year(index, len(close_v))
-        actual, p_value, dist = mcpt(close_v, pos, n=n_perm, fee=fee, periods_per_year=ppy)
+        vol_window = max(20, int(round(ppy / 12)))
+        actual, p_value, dist = mcpt(close_v, pos, n=n_eff, fee=fee, periods_per_year=ppy,
+                                     vol_window=vol_window, rng=np.random.default_rng(MCPT_SEED))
+    except Exception as e:
+        logging.warning("MCPT failed (backtest stats still written without it): %s", e)
+        return {}
+    try:
         return mcpt_stats_fields(actual, p_value, dist)
     except Exception as e:
+        # The histogram is a picture; the p-value is the result. When only the picture is
+        # unusable (edges collapsed after rounding) keep p + n, same shape as a manual
+        # write_mcpt_to_stats without dist. A non-finite actual / p / dist means the test
+        # itself is unusable → no key at all (the api ingests with allow_nan=False).
+        dist_arr = np.asarray(dist, dtype=float).ravel()
+        try:
+            p_ok = np.isfinite(float(actual)) and np.isfinite(float(p_value)) and 0.0 <= float(p_value) <= 1.0
+        except (TypeError, ValueError):
+            p_ok = False
+        if p_ok and dist_arr.size and np.isfinite(dist_arr).all():
+            logging.warning("MCPT Distribution dropped (%s); p-value still written", e)
+            return {MCPT_P_KEY: round(float(p_value), 4), MCPT_N_KEY: int(dist_arr.size)}
         logging.warning("MCPT failed (backtest stats still written without it): %s", e)
         return {}
 
@@ -632,7 +697,7 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
                       f"{'significant edge' if mcpt_fields[MCPT_KEYS[0]] < 0.05 else 'no significant edge'} at 95%)")
         stats.update(_carry_over(out_dir, mode))  # live tick keeps MCPT + Generated At; backtest drops/restamps
         stats.setdefault(GENERATED_AT_KEY, int(time.time()))
-        json.dump(stats, open(out_dir / 'stats.json', 'w'), indent=2)
+        _write_stats(out_dir, stats)
 
         # Full chart export on every user-run backtest; a live/cron tick rewrites stats.json
         # every few minutes and re-serializing years of bars each time would burn the VM for
@@ -754,7 +819,7 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         # No automatic MCPT for Type C — see _auto_mcpt's docstring (mcpt() is single-series).
         carried = _carry_over(out_dir, mode)  # live tick keeps MCPT + Generated At; backtest drops/restamps
         carried.setdefault(GENERATED_AT_KEY, int(time.time()))
-        json.dump(
+        _write_stats(out_dir,
             {'strategy': strategy_name, 'interval': interval,
              'start': close_df.index[0].strftime('%Y-%m-%d'),
              'end':   close_df.index[-1].strftime('%Y-%m-%d'),
@@ -768,9 +833,7 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
              **bench_stats,
              'daily_dates': d_dates, 'daily_returns': d_rets,
              **carried,
-             },
-            open(out_dir / 'stats.json', 'w'), indent=2
-        )
+             })
 
         if not quiet:
             plot_pnl_portfolio(pf_series, close_df, title=strategy_name,

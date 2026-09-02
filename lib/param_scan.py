@@ -91,7 +91,8 @@ def nice_grid(lo, hi, n=GRID_N, current=0.0, integer=False, step=None, max_axis=
                plateau's neighbourhood mean collapse into a single cell.
     current  : the constant the strategy file holds RIGHT NOW (anchor). Default 0.
     integer  : True for bar-count parameters (SMA period, hold bars): step ≥ 1, int cells.
-    step     : override the step (still anchored on current; must be a nice number).
+    step     : override the step (still anchored on current; must be a nice number;
+               an integer axis raises on a non-integer step rather than truncating it).
     max_axis : cap on the axis length (api limit 40) — a finer step is coarsened until
                the axis fits, never truncated (truncating would drop `current` or the ends).
 
@@ -104,7 +105,14 @@ def nice_grid(lo, hi, n=GRID_N, current=0.0, integer=False, step=None, max_axis=
     if integer and not float(current).is_integer():
         raise ValueError(f"nice_grid: integer axis but current={current} is not an integer")
     lo, hi = min(lo, hi, current), max(lo, hi, current)
-    step = nice_step(hi - lo, n, integer) if step is None else (int(step) if integer else float(step))
+    if step is None:
+        step = nice_step(hi - lo, n, integer)
+    elif integer:
+        if not float(step).is_integer():  # int(2.5) → 2 would silently move every cell
+            raise ValueError(f"nice_grid: integer axis but step={step} is not an integer")
+        step = int(step)
+    else:
+        step = float(step)
     if step <= 0:
         raise ValueError(f"nice_grid: step must be positive, got {step}")
     while True:
@@ -115,7 +123,10 @@ def nice_grid(lo, hi, n=GRID_N, current=0.0, integer=False, step=None, max_axis=
         step = _coarser(step, integer)
     if integer:
         return [int(round(current + k * step)) for k in range(k_lo, k_hi + 1)]
-    return [round(float(current + k * step), 10) for k in range(k_lo, k_hi + 1)]
+    # + 0.0 turns a -0.0 cell (current=0.25, k=-1, step 0.25) into 0.0 — the web shows the
+    # label verbatim. round(10) matches write_scan / extend_axis so the lattice survives
+    # a round-trip through scan.json and _locate.
+    return [round(float(current + k * step), 10) + 0.0 for k in range(k_lo, k_hi + 1)]
 
 
 def percentile_thresholds(series, n_parts=17, current=None):
@@ -334,7 +345,8 @@ def on_edge(best_idx, shape):
     -------
     list of (axis, side): axis 0 = rows (row_vals), 1 = cols (col_vals);
     side 'lo' = first cell, 'hi' = last cell. Empty list (falsy) when the plateau is
-    interior; a corner returns two entries.
+    interior; a corner returns two entries. An axis of length 1 (a 1×N scan) is never
+    reported — its only cell is both ends, and there is no step to extend it by.
 
         for axis, side in on_edge(best_idx, grid.shape):
             ...extend row_vals (axis 0) or col_vals (axis 1) with extend_axis(vals, side)
@@ -344,6 +356,8 @@ def on_edge(best_idx, shape):
         k, n = int(best_idx[axis]), int(shape[axis])
         if not 0 <= k < n:
             raise ValueError(f"on_edge: best_idx {tuple(best_idx)} is off a grid of shape {tuple(shape)}")
+        if n < 2:
+            continue
         if k == 0:
             edges.append((axis, 'lo'))
         if k == n - 1:
@@ -404,9 +418,10 @@ def _grid_json(a):
 def _locate(val, vals):
     """Index of the grid value closest to val, or None if even that one is not
     (tightly) equal — so a fine step on large values can never match several cells."""
+    val = round(float(val), 10)  # same rounding as the axis (nice_grid / write_scan)
     arr = np.asarray(vals, dtype=float)
-    k   = int(np.argmin(np.abs(arr - float(val))))
-    return k if np.isclose(arr[k], float(val), rtol=1e-9, atol=1e-12) else None
+    k   = int(np.argmin(np.abs(arr - val)))
+    return k if np.isclose(arr[k], val, rtol=1e-9, atol=1e-12) else None
 
 
 def _finite_numbers(x, what):
@@ -468,9 +483,11 @@ def write_scan(grid, row_vals, col_vals, nbr_mean, best_idx, output_dir,
     _finite_numbers(col_vals, 'col_vals')
     if current is not None:
         _finite_numbers(current, 'current')
-    # round(6): keep the axis labels the web shows free of float noise (0.30000000000000004)
-    row_list = [round(v, 6) if isinstance(v, float) else v for v in np.asarray(row_vals).tolist()]
-    col_list = [round(v, 6) if isinstance(v, float) else v for v in np.asarray(col_vals).tolist()]
+    # round(10): keep the axis labels the web shows free of float noise (0.30000000000000004)
+    # — the same rounding nice_grid / extend_axis / _locate use, so a fine threshold like
+    # 0.00012345 survives the trip and is still found on the axis.
+    row_list = [round(v, 10) if isinstance(v, float) else v for v in np.asarray(row_vals).tolist()]
+    col_list = [round(v, 10) if isinstance(v, float) else v for v in np.asarray(col_vals).tolist()]
     if len(row_list) > SCAN_MAX_AXIS or len(col_list) > SCAN_MAX_AXIS:
         raise ValueError(
             f"write_scan: grid {len(row_list)}×{len(col_list)} exceeds the api limit of "

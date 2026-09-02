@@ -27,6 +27,7 @@ def mcpt(
     max_lev=2.0,
     vol_window=720,
     periods_per_year=8760,
+    rng=None,
 ):
     """
     Monte Carlo Permutation Test (MCPT) for strategy edge.
@@ -57,6 +58,10 @@ def mcpt(
     max_lev          : vol-targeting cap (default 2.0)
     vol_window       : rolling window for realized vol (default 720 bars)
     periods_per_year : bars per year for annualization (default 8760 for 1h)
+    rng              : optional numpy Generator / RandomState used for the permutations
+                       (default None → numpy's global RNG, unchanged behaviour). Pass a
+                       seeded one for a reproducible p-value without touching the
+                       global seed — lib/runner.py's automatic MCPT does this.
 
     Returns
     -------
@@ -85,7 +90,8 @@ def mcpt(
         return (r.mean() / r.std()) * np.sqrt(periods_per_year) if r.std() > 0 else np.nan
 
     actual  = _sharpe(fwd_ret)
-    dist    = np.array([_sharpe(np.random.permutation(fwd_ret)) for _ in range(n)])
+    permute = np.random.permutation if rng is None else rng.permutation
+    dist    = np.array([_sharpe(permute(fwd_ret)) for _ in range(n)])
     p_value = float((dist >= actual).mean())
     return actual, p_value, dist
 
@@ -134,7 +140,10 @@ def mcpt_stats_fields(actual, p_value, dist, n_bins=MCPT_DIST_BINS):
         raise ValueError(f"mcpt_stats_fields: n_bins must be positive, got {n_bins}")
     counts, edges = np.histogram(dist, bins=n_bins)  # degenerate dist → numpy widens ±0.5
     edges = np.round(edges, 4)
-    if not np.isfinite(edges).all() or len(edges) != n_bins + 1 or int(counts.sum()) != dist.size:
+    # edges[-1] > edges[0]: a span that collapsed to zero after the 4 dp rounding (every
+    # permuted Sharpe within 1e-4 of each other) would draw as a zero-width histogram.
+    if (not np.isfinite(edges).all() or len(edges) != n_bins + 1
+            or int(counts.sum()) != dist.size or not edges[-1] > edges[0]):
         raise ValueError("mcpt_stats_fields: histogram came out malformed")
     return {
         MCPT_P_KEY:    round(p_value, 4),
