@@ -20,6 +20,7 @@ examples/**/pnl.png
 examples/**/regime.png
 examples/**/mcpt.png
 examples/**/heatmap.png
+examples/**/scan.json
 /tmp/
 
 # platform-managed (skill_sync re-clones this daily) — never commit a copy

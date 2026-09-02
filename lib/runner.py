@@ -39,6 +39,38 @@ CHART_MAX_CHUNKS = 50
 CHART_LIVE_REFRESH_MIN_AGE = 86400  # live-tick rebuild throttle: at most once a day per strategy
 
 
+
+# Keys lib.validation.write_mcpt_to_stats merges into stats.json after a manual MCPT run.
+MCPT_KEYS = ('MCPT p-value', 'MCPT Permutations')
+# Flat epoch-seconds key stamping when the stats were produced by an explicit backtest.
+# The web compares scan.json's generated_at against it: a scan older than the last
+# backtest means the parameters may have moved, so scan.current is shown as unknown.
+GENERATED_AT_KEY = 'Generated At'
+
+
+def _carry_over(out_dir, mode):
+    """Keys to carry from the existing stats.json into the one about to be rewritten.
+
+    A live / cron tick (mode != 'backtest') rewrites stats.json every bar with the SAME
+    code and parameters, so the MCPT p-value computed on them is still valid, and the
+    last explicit backtest's 'Generated At' still marks when the parameters last changed
+    — both are read off the existing file and kept. An explicit backtest returns {} so
+    the MCPT keys are DROPPED (parameters may have changed; the user re-runs MCPT via
+    write_mcpt_to_stats) and 'Generated At' is stamped fresh by the caller. A missing /
+    unreadable / keyless old file is simply "nothing to carry" — never fatal, a tick
+    must not die on it.
+    """
+    if mode == 'backtest':
+        return {}
+    try:
+        with open(Path(out_dir) / 'stats.json', encoding='utf-8') as f:
+            old = json.load(f)
+        return {k: old[k] for k in MCPT_KEYS + (GENERATED_AT_KEY,) if k in old}
+    except Exception as e:  # absent on first tick, or a half-written file — carry nothing
+        logging.debug("stats.json carry-over skipped: %s", e)
+        return {}
+
+
 def _build_levels(raw):
     """opts["levels"] → stats.json panes[].levels (horizontal threshold lines).
 
@@ -540,6 +572,8 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         candles = _build_candles(df)
         if candles:  # optional field — same absent-not-empty convention as panes
             stats['candles'] = candles
+        stats.update(_carry_over(out_dir, mode))  # live tick keeps MCPT + Generated At; backtest drops/restamps
+        stats.setdefault(GENERATED_AT_KEY, int(time.time()))
         json.dump(stats, open(out_dir / 'stats.json', 'w'), indent=2)
 
         # Full chart export on every user-run backtest; a live/cron tick rewrites stats.json
@@ -659,6 +693,8 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         from lib.pnl import daily_returns_typeC
         d_dates, d_rets = daily_returns_typeC(pf_series)
 
+        carried = _carry_over(out_dir, mode)  # live tick keeps MCPT + Generated At; backtest drops/restamps
+        carried.setdefault(GENERATED_AT_KEY, int(time.time()))
         json.dump(
             {'strategy': strategy_name, 'interval': interval,
              'start': close_df.index[0].strftime('%Y-%m-%d'),
@@ -672,6 +708,7 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
              'Trades':              n_trades,
              **bench_stats,
              'daily_dates': d_dates, 'daily_returns': d_rets,
+             **carried,
              },
             open(out_dir / 'stats.json', 'w'), indent=2
         )

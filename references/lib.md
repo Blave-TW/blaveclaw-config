@@ -133,21 +133,27 @@ Taiwan stock data (universe, batch functions, fundamental factors, lookahead-bia
   - `valid_fn`: `(row_val, col_val) → bool` to skip invalid combos (default: `row > col`; for SMA use `lambda f, sl: f < sl`)
   - If `compute_signals_fn` returns a tuple `(signal, settle)`, `settle` is automatically used as `exec_shifted`
   - **All strategy types use the same `scan_grid` call** — see `examples/btc_sma_cross/scan.py` for the canonical SMA-scan pattern and `examples/btc_ti_5min/scan.py` for the threshold-scan pattern
-- `from lib.param_scan import find_plateau, plot_heatmap` — plateau detection and heatmap chart
-  - `find_plateau` returns 5 values: `best_idx, nbr_mean, best_row, best_col, best_sharpe` — use `best_row`, `best_col`, `best_sharpe` directly; `nbr_mean` is a **2D array** (do NOT format it as a scalar)
-  - Canonical usage: `best_idx, _, best_row, best_col, best_sharpe = find_plateau(grid, ROW_VALS, COL_VALS)`
+- `from lib.param_scan import find_plateau, write_scan, plot_heatmap` — plateau detection, scan.json, heatmap chart
+  - `find_plateau` returns 5 values: `best_idx, nbr_mean, best_row, best_col, best_sharpe` — use `best_row`, `best_col`, `best_sharpe` directly; `nbr_mean` is a **2D array** (do NOT format it as a scalar). **Keep `nbr_mean` — `write_scan` needs it.**
+  - Canonical usage: `best_idx, nbr_mean, best_row, best_col, best_sharpe = find_plateau(grid, ROW_VALS, COL_VALS)`
+  - `write_scan(grid, row_vals, col_vals, nbr_mean, best_idx, output_dir, row_param, col_param, fee, start, end, current=None, window=1)` → writes `strategies/{strategy_name}/scan.json` (atomic). **Mandatory after every scan — the web 穩健參數 tab is built from this file; a scan that skips it is invisible on the web.** `row_param`/`col_param` are the strategy **constant names** (`'ENTRY_TH'`, not the `entry_th` kwarg — the web writes "把 ENTRY_TH 改成 …" from them); `current=(s.ENTRY_TH, s.EXIT_TH)` is what `strategy.py` holds right now (the web marks it; off-grid values are kept with `i/j = null`); `end` = the scan data's last date (`df.index[-1].strftime('%Y-%m-%d')`). It records both the global **peak** (nanargmax of `grid`) and the **plateau** (`best_idx`, Sharpe = neighbourhood mean) — report both, recommend the plateau. **Each axis is capped at 40 values** (api limit — `write_scan` raises past it; a bigger grid would upload nothing and leave the web tab blank), so keep scans within 40×40 via a coarser step or narrower range. An all-NaN grid never yields a scan.json (`find_plateau` raises first) — widen the ranges and rescan rather than writing anything by hand.
   - `plot_heatmap` `output_path` is **required** — always pass `output_path='strategies/{strategy_name}/heatmap.png'`, never `/tmp/`
   - `plot_heatmap` **auto-sends the heatmap to Telegram** (via `send_photo`) — you do NOT need a manual `send_photo` after it. Pass `send_telegram=False` only if you explicitly want to suppress it.
 - `from lib.analysis import precise_pnl, compute_stats` — available if you need a custom loop (rare)
 
-**Parameter scan workflow:**
-1. Run `scan.py` to find the best parameters
+**Parameter scan workflow** — fixed order, one `scan.py` in the strategy folder: `scan_grid → find_plateau → write_scan → plot_heatmap`.
+1. Run `scan.py`: pick the ranges (`percentile_thresholds` for a momentum threshold pair; otherwise derive them from the strategy's current constants / the indicator's distribution — see `references/strategy-code.md`), `scan_grid`, `find_plateau`, **`write_scan`** (pass `current=` the constants now in `strategy.py`), `plot_heatmap`. Report BOTH the peak (highest single cell) and the plateau (best neighbourhood mean) with their Sharpes, and recommend the plateau — a lone spike is the overfit cell.
 2. **Update the params directly in the existing `strategy.py`** — do NOT create a new strategy folder
 3. Run backtest in the same `strategy.py` to verify
 Never create a duplicate strategy folder just because you ran a scan.
 
+The web workspace sends two fixed prompts (bilingual — the zh or en version depending on the user's UI language; recognise either); treat them exactly as follows:
+- **Scan** — zh「請掃描策略 {name} 的參數（lib.param_scan…」/ en「Please scan the parameters of strategy {name} …」 → run step 1 above on the strategy's two main constants and reply with the peak and the plateau (param values + Sharpe). This is explicit permission for **one** scan and counts as **one** iteration under the Iteration Brakes — do NOT go on to edit `strategy.py` or re-run the backtest; the user picks on the web.
+- **Adopt** — 「請把策略 {name} 的參數改成 A=…、B=…(穩健參數),重跑回測 … 不用再確認」(en equivalent ends the same way: no further confirmation) → the user has already chosen: set the named constants in `strategies/X/strategy.py` to exactly those values, run the backtest once, report the new stats. No confirmation question, no counter-proposal, no extra scan.
+
 `lib/validation.py`:
-- `from lib.validation import mcpt, plot_mcpt` — Monte Carlo Permutation Test; call `mcpt(close, position, n=2000, fee=..., target_vol=..., ...)` → `(actual_sharpe, p_value, dist)`
+- `from lib.validation import mcpt, plot_mcpt, write_mcpt_to_stats` — Monte Carlo Permutation Test; call `mcpt(close, position, n=2000, fee=..., target_vol=..., ...)` → `(actual_sharpe, p_value, dist)`
+- `write_mcpt_to_stats(STRATEGY_NAME, p_value, len(dist))` — merges `"MCPT p-value"` / `"MCPT Permutations"` into the existing `strategies/<name>/stats.json` (atomic, other fields untouched) so the web shows the p-value next to the backtest stats. **Call it right after `mcpt()`**, then `plot_mcpt`. Requires a `stats.json` from a prior backtest (raises otherwise — never fabricate one). Lifetime: an explicit **backtest** rebuilds `stats.json` from scratch and drops the two keys by design (parameters may have changed — re-run MCPT after changing them); a **live / cron tick** rewrites `stats.json` too but carries the two keys forward (same code, same parameters, p-value still valid), so a deployed strategy keeps showing it. The same rule stamps `"Generated At"` (epoch int) on every explicit backtest and carries it through live ticks — the web compares it with `scan.json`'s `generated_at` to know whether `scan.current` is still the file's real constants.
 - **All validation (MCPT, walk-forward, etc.) goes in a separate `validate.py` in the strategy folder** — never inside `strategy.py`.
 - Daily stock params: `periods_per_year=252`, `vol_window=60`, `max_lev=1.0`
 

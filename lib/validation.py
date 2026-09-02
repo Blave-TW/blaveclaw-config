@@ -2,13 +2,18 @@
 Statistical validation utilities for strategy backtesting.
 
 Usage:
-    from lib.validation import mcpt
+    from lib.validation import mcpt, plot_mcpt, write_mcpt_to_stats
+
+Canonical MCPT flow (validate.py): mcpt → write_mcpt_to_stats → plot_mcpt
 """
 
+import json
 import os
 import tempfile
 import numpy as np
 import pandas as pd
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def mcpt(
@@ -115,3 +120,64 @@ def plot_mcpt(actual, dist, label="Strategy", output_path=os.path.join(tempfile.
     plt.close()
     print(f"MCPT chart saved: {output_path}")
     return output_path
+
+
+def write_mcpt_to_stats(strategy_name, p_value, n):
+    """
+    Merge the MCPT result into `strategies/<strategy_name>/stats.json` so the web
+    workspace can show it next to the backtest stats. **Call it right after mcpt()**
+    in validate.py; without it the p-value only exists in your chat reply.
+
+    Adds / overwrites exactly two flat keys (same style as 'Sharpe Ratio'):
+        "MCPT p-value"      : float 0–1
+        "MCPT Permutations" : int  (= len(dist) = n)
+    Every other field is left untouched. Read → update → atomic write (tmp + os.replace,
+    like lib/report.py), so a reader never sees a half-written file.
+
+    Key lifetime across backtest / live rewrites: see lib/runner.py `_carry_over`.
+
+    Parameters
+    ----------
+    strategy_name : STRATEGY_NAME — the folder under strategies/
+    p_value       : from mcpt()
+    n             : number of permutations, len(dist) from mcpt()
+
+    Returns
+    -------
+    path of the updated stats.json
+
+    Raises FileNotFoundError if stats.json is missing — run the backtest first; never
+    fabricate a stats.json to carry an MCPT result. Raises ValueError on a NaN/inf or
+    out-of-range p_value — the key is then simply absent, which is the correct state.
+    """
+    path = os.path.join(_REPO_ROOT, 'strategies', strategy_name, 'stats.json')
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"{path} not found — run the backtest first, then MCPT; "
+            "write_mcpt_to_stats only merges into an existing stats.json"
+        )
+    # The api ingests stats.json with allow_nan=False — ONE NaN/inf here 400s the whole
+    # machine's strategy upload. Never write a non-finite p-value; no result → no key.
+    p_value = float(p_value)
+    if not np.isfinite(p_value) or not (0.0 <= p_value <= 1.0):
+        raise ValueError(f"write_mcpt_to_stats: p_value must be finite in [0, 1], got {p_value}")
+    n = int(n)
+    if n <= 0:
+        raise ValueError(f"write_mcpt_to_stats: n must be a positive permutation count, got {n}")
+    with open(path, encoding='utf-8') as f:
+        stats = json.load(f)
+    stats['MCPT p-value']      = round(p_value, 4)
+    stats['MCPT Permutations'] = int(n)
+    tmp = path + '.tmp'
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(stats, f, indent=2)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    print(f"MCPT written to {path}: p-value={p_value:.4f}  permutations={int(n)}")
+    return path

@@ -2,8 +2,14 @@
 Utilities for 2D parameter scanning and plateau detection.
 
 Usage:
-    from lib.param_scan import find_plateau, plot_heatmap, percentile_thresholds
+    from lib.param_scan import percentile_thresholds, scan_grid, find_plateau, write_scan, plot_heatmap
+
+Canonical scan flow: scan_grid → find_plateau → write_scan → plot_heatmap
 """
+
+import json
+import os
+import time
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -204,6 +210,148 @@ def find_plateau(grid, row_vals=None, col_vals=None, window=1):
     best_col    = col_vals[best_idx[1]] if col_vals is not None else None
     best_sharpe = float(nbr_mean[best_idx])
     return best_idx, nbr_mean, best_row, best_col, best_sharpe
+
+
+def _grid_json(a):
+    """2D array → nested lists, NaN/inf → None (JSON null), rounded to 4 dp."""
+    return [[None if not np.isfinite(v) else round(float(v), 4) for v in row]
+            for row in np.asarray(a, dtype=float)]
+
+
+def _locate(val, vals):
+    """Index of the grid value closest to val, or None if even that one is not
+    (tightly) equal — so a fine step on large values can never match several cells."""
+    arr = np.asarray(vals, dtype=float)
+    k   = int(np.argmin(np.abs(arr - float(val))))
+    return k if np.isclose(arr[k], float(val), rtol=1e-9, atol=1e-12) else None
+
+
+def _finite_numbers(x, what):
+    """Reject NaN/inf/bool/non-numeric axis or current values — a bool would serialise
+    as true/false and a NaN would 400 the api upload, both leave the web tab blank."""
+    items = list(np.ravel(np.asarray(x, dtype=object)))  # object: keep a stray bool as bool
+    if any(isinstance(v, (bool, np.bool_)) or not isinstance(v, (int, float, np.integer, np.floating))
+           for v in items) or not np.isfinite(np.asarray(items, dtype=float)).all():
+        raise ValueError(f"write_scan: {what} must be finite numbers, got {items}")
+
+
+# api-side cap on each scan.json axis (api/openclaw/agent_strategies.py ingest) — a longer
+# axis is refused there and the web 穩健參數 tab stays blank, so refuse it here first.
+SCAN_MAX_AXIS = 40
+
+
+def write_scan(grid, row_vals, col_vals, nbr_mean, best_idx, output_dir,
+               row_param, col_param, fee, start, end, current=None, window=1):
+    """
+    Write the scan result to `strategies/<name>/scan.json` — the web workspace's
+    穩健參數 (robust parameters) tab reads this file. **Call it after every
+    scan_grid → find_plateau**, before plot_heatmap; a scan without scan.json is
+    invisible to the web user.
+
+    Parameters
+    ----------
+    grid       : 2D Sharpe grid from scan_grid (NaN = invalid / never traded)
+    row_vals   : row parameter values (y-axis), same order as grid rows — max 40
+    col_vals   : col parameter values (x-axis), same order as grid cols — max 40
+                 (api cap; a bigger grid raises here instead of vanishing on the web)
+    nbr_mean   : 2D neighbourhood-average grid returned by find_plateau
+    best_idx   : (i, j) plateau cell returned by find_plateau
+    output_dir : REQUIRED — 'strategies/{strategy_name}' (scan.json lands inside it)
+    row_param  : the strategy CONSTANT name swept along rows, e.g. 'ENTRY_TH'
+                 (the web builds "把 ENTRY_TH 改成 …" prompts from it — use the
+                 module constant name, not the compute_signals kwarg)
+    col_param  : the strategy constant name swept along cols, e.g. 'EXIT_TH'
+    fee        : per-trade fee rate used for the scan (s.FEE)
+    start, end : scan data range as 'YYYY-MM-DD' strings (end = df.index[-1] date;
+                 pass None if unknown)
+    current    : (row_val, col_val) — the constants the strategy file holds RIGHT
+                 NOW, so the web can mark "you are here". Located on the grid by
+                 np.isclose; off-grid values keep their vals with i/j = null.
+                 None → written as null.
+    window     : neighbourhood radius passed to find_plateau (default 1)
+
+    Returns
+    -------
+    path of the written scan.json
+
+    File shape (shared contract with api/web — do NOT rename keys):
+      row_param, col_param, row_vals, col_vals,
+      grid[rows][cols]      Sharpe, NaN → null
+      nbr_mean[rows][cols]  neighbourhood mean, NaN → null
+      peak     {i, j, sharpe}  global max of grid (the fragile optimum)
+      plateau  {i, j, sharpe}  find_plateau best cell; sharpe = neighbourhood mean
+      current  {i, j, vals} | null
+      fee, start, end, window, generated_at (epoch seconds)
+    """
+    # inf is as unusable as NaN for the web (and for nanargmax) — treat it as a hole.
+    grid     = np.where(np.isfinite(grid), np.asarray(grid, dtype=float), np.nan)
+    nbr_mean = np.where(np.isfinite(nbr_mean), np.asarray(nbr_mean, dtype=float), np.nan)
+    _finite_numbers(row_vals, 'row_vals')
+    _finite_numbers(col_vals, 'col_vals')
+    if current is not None:
+        _finite_numbers(current, 'current')
+    # round(6): keep the axis labels the web shows free of float noise (0.30000000000000004)
+    row_list = [round(v, 6) if isinstance(v, float) else v for v in np.asarray(row_vals).tolist()]
+    col_list = [round(v, 6) if isinstance(v, float) else v for v in np.asarray(col_vals).tolist()]
+    if len(row_list) > SCAN_MAX_AXIS or len(col_list) > SCAN_MAX_AXIS:
+        raise ValueError(
+            f"write_scan: grid {len(row_list)}×{len(col_list)} exceeds the api limit of "
+            f"{SCAN_MAX_AXIS}×{SCAN_MAX_AXIS} — the web would show nothing. Use a coarser "
+            "step or a narrower range and rescan."
+        )
+    if grid.shape != (len(row_list), len(col_list)) or nbr_mean.shape != grid.shape:
+        raise ValueError(
+            f"write_scan: grid {grid.shape} / nbr_mean {nbr_mean.shape} must be "
+            f"({len(row_list)}, {len(col_list)}) = (len(row_vals), len(col_vals))"
+        )
+    # Contract: peak/plateau are always complete objects with finite sharpe. An all-NaN
+    # grid (no combo ever traded) therefore writes NOTHING — find_plateau already raised
+    # upstream; never write a scan.json with null peak/plateau.
+    if np.all(np.isnan(grid)):
+        raise ValueError("write_scan: every grid cell is NaN — nothing to write")
+
+    pi, pj = np.unravel_index(np.nanargmax(grid), grid.shape)
+    bi, bj = int(best_idx[0]), int(best_idx[1])
+    if not (0 <= bi < grid.shape[0] and 0 <= bj < grid.shape[1]) or not np.isfinite(nbr_mean[bi, bj]):
+        raise ValueError(f"write_scan: best_idx {best_idx} is off-grid or has no neighbourhood mean")
+    doc = {
+        'row_param': row_param, 'col_param': col_param,
+        'row_vals': row_list, 'col_vals': col_list,
+        'grid':     _grid_json(grid),
+        'nbr_mean': _grid_json(nbr_mean),
+        'peak':     {'i': int(pi), 'j': int(pj), 'sharpe': round(float(grid[pi, pj]), 4)},
+        'plateau':  {'i': bi, 'j': bj, 'sharpe': round(float(nbr_mean[bi, bj]), 4)},
+        'current':  None,
+        'fee': float(fee), 'start': start, 'end': end, 'window': int(window),
+        'generated_at': int(time.time()),
+    }
+    if current is not None:
+        rv, cv = current  # exactly two values — (row_val, col_val); vals is always length 2
+        i, j = _locate(rv, row_list), _locate(cv, col_list)
+        doc['current'] = {'i': i if (i is not None and j is not None) else None,
+                          'j': j if (i is not None and j is not None) else None,
+                          'vals': [np.asarray(rv).item(), np.asarray(cv).item()]}
+
+    os.makedirs(str(output_dir), exist_ok=True)
+    path = os.path.join(str(output_dir), 'scan.json')
+    # Atomic (same pattern as lib/report.py): the uploader may read mid-write, and a
+    # half-written scan.json would break the web tab until the next scan. allow_nan=False
+    # so a NaN that slipped past _grid_json fails here with a stack trace, not in the api.
+    tmp = path + '.tmp'
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(doc, f, ensure_ascii=False, allow_nan=False)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    print(f"Scan written: {path}  (peak {row_param}={row_list[pi]}, {col_param}={col_list[pj]} "
+          f"Sharpe={grid[pi, pj]:.2f}; plateau {row_param}={row_list[bi]}, {col_param}={col_list[bj]} "
+          f"nbr Sharpe={nbr_mean[bi, bj]:.2f})")
+    return path
 
 
 def plot_heatmap(

@@ -231,6 +231,8 @@ Dead zones now behave correctly: a long is **held** through `(sell_th, buy_th)` 
 
 The loop is pure (no I/O) and runs on a daily series in milliseconds — fast enough for `scan_grid`'s repeated calls.
 
+**Scanning any pair — the flow is always `scan_grid → find_plateau → write_scan → plot_heatmap`** (`write_scan` feeds the web 穩健參數 tab; details and the two web prompts in `references/lib.md` › *Parameter scan workflow*).
+
 **Scanning four thresholds — scan each side independently, two heatmaps.**
 
 `scan_grid` / `plot_heatmap` are inherently 2D (two params → one heatmap). Do NOT force symmetry to squeeze four params into one chart — long and short are independent decisions and the market is rarely symmetric (crashes are faster than rallies). Instead scan each side on its own:
@@ -252,7 +254,7 @@ Because each scan turns the **other side OFF**, the long scan and short scan are
 
 ```python
 import numpy as np
-from lib.param_scan import scan_grid, find_plateau, plot_heatmap
+from lib.param_scan import scan_grid, find_plateau, write_scan, plot_heatmap
 import strategy as s
 
 # long side: short_th/cover_th pushed to -inf so no short ever triggers
@@ -262,7 +264,13 @@ grid_L = scan_grid(df, long_fn, buy_vals, sell_vals,
                    row_param='buy_th', col_param='sell_th',
                    fee=s.FEE, freq='1d', warmup=s.WARMUP,
                    valid_fn=lambda b, sll: b > sll)
-plot_heatmap(grid_L, buy_vals, sell_vals, row_label='BUY_TH', col_label='SELL_TH',
+best_L, nbr_L, *_ = find_plateau(grid_L, buy_vals, sell_vals)
+# scan.json holds ONE grid (the web 穩健參數 tab shows one heatmap): write the side you
+# are recommending — here the long side; the short side stays heatmap-only.
+write_scan(grid_L, buy_vals, sell_vals, nbr_L, best_L, 'strategies/<name>',
+           row_param='BUY_TH', col_param='SELL_TH', fee=s.FEE, start=s.START,
+           end=df.index[-1].strftime('%Y-%m-%d'), current=(s.BUY_TH, s.SELL_TH))
+plot_heatmap(grid_L, buy_vals, sell_vals, best_L, row_label='BUY_TH', col_label='SELL_TH',
              output_path='strategies/<name>/heatmap_long.png')
 
 # short side: buy_th/sell_th pushed to +inf so no long ever triggers
@@ -272,7 +280,8 @@ grid_S = scan_grid(df, short_fn, short_vals, cover_vals,
                    row_param='short_th', col_param='cover_th',
                    fee=s.FEE, freq='1d', warmup=s.WARMUP,
                    valid_fn=lambda sh, c: sh < c)
-plot_heatmap(grid_S, short_vals, cover_vals, row_label='SHORT_TH', col_label='COVER_TH',
+best_S, *_ = find_plateau(grid_S, short_vals, cover_vals)
+plot_heatmap(grid_S, short_vals, cover_vals, best_S, row_label='SHORT_TH', col_label='COVER_TH',
              output_path='strategies/<name>/heatmap_short.png')
 ```
 
