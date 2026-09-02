@@ -62,11 +62,12 @@ def fetch_data(hdrs):
 
 
 # ── compute_signals ───────────────────────────────────────────────────────────
-def compute_signals(df, entry_z=ENTRY_Z, exit_z=EXIT_Z):
+# All four constants are kwargs so scan.py can sweep any pair while pinning the rest
+def compute_signals(df, entry_z=ENTRY_Z, exit_z=EXIT_Z, window=WINDOW, zscore_win=ZSCORE_WIN):
     import numpy as np
     import pandas as pd
 
-    df  = _add_indicators(df)
+    df  = _add_indicators(df, window=window, zscore_win=zscore_win)
     z   = df['zscore'].values
     n   = len(z)
     pos = np.full(n, np.nan)

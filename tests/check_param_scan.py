@@ -1,5 +1,7 @@
 """Minimal check for lib/param_scan.write_scan + lib/validation.write_mcpt_to_stats —
-no network, no api. A fake 5×9 Sharpe grid (NaN cells, a sharp isolated peak that is NOT
+no network, no api. nice_grid / percentile_thresholds must put the strategy's current
+constant on a nice-step lattice (the web marks "you are here" only for an on-grid current).
+A fake 5×9 Sharpe grid (NaN cells, a sharp isolated peak that is NOT
 the plateau) goes through find_plateau → write_scan; asserts the scan.json contract the
 web 穩健參數 tab reads (keys, shapes, NaN → null, peak ≠ plateau, current on/off grid).
 Then a stub stats.json takes the MCPT merge and must keep every other field.
@@ -8,7 +10,8 @@ Run: cd blaveclaw-config && .venv/bin/python tests/check_param_scan.py
 import json, math, os, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
-from lib.param_scan import find_plateau, write_scan, _locate
+import pandas as pd
+from lib.param_scan import find_plateau, write_scan, _locate, nice_grid, nice_step, percentile_thresholds, SCAN_MAX_AXIS
 import lib.validation as V
 
 fails = 0
@@ -76,6 +79,51 @@ check(len(json.load(open(os.path.join(d3, "scan.json")))["grid"]) == 40, "剛好
 
 check(_locate(200.0, [199.998, 199.999, 200.0, 200.001]) == 2, "_locate 大數值細步長取最近格,不取第一個 isclose")
 check(_locate(0.2, col_vals) == 1 and _locate(0.83, row_vals) is None, "_locate 命中 / 不在格上")
+
+# ── nice_grid / percentile_thresholds: 目前值必在格上、步長好看 ───────────────────────
+def on_lattice(vals, cur, step):
+    return all(math.isclose((v - cur) / step, round((v - cur) / step), abs_tol=1e-9) for v in vals)
+check(nice_step(1.979 - 0.065, 9) == 0.25, "步長 (p95−p5)/(n−1)=0.239 → 0.25")
+check([nice_step(x, 2) for x in (0.35, 3.5, 0.7, 12, 0.0038)] == [0.25, 2.5, 0.5, 10.0, 0.005], "步長只取 {1,2,2.5,5}×10^k")
+check(nice_step(12, 2, integer=True) == 10 and nice_step(2.4, 2, integer=True) == 2 and nice_step(0.3, 2, integer=True) == 1, "整數步長至少 1、不出 2.5")
+g = nice_grid(0.065, 1.979, 9, current=0.5)
+check(g == [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0], f"current=0.5, p5=0.065, p95=1.979, n=9 → 0.25 步、含 0.5、全是 0.25 倍數 → {g}")
+check(0.5 in g and on_lattice(g, 0.5, 0.25) and g[0] <= 0.065 and g[-1] >= 1.979, "涵蓋 [p5,p95]、目前值是格點")
+g = nice_grid(-1.849, 0.065, 9, current=0.0)
+check(0.0 in g and on_lattice(g, 0.0, 0.25) and g[0] <= -1.849 and g[-1] >= 0.065, f"EXIT 軸錨在 0 → {g}")
+g = nice_grid(1.0, 1.5, 9, current=0.5)
+check(0.5 in g and g[0] <= 0.5 and g[-1] >= 1.5, f"current 在範圍外 → 範圍擴到含 current → {g}")
+g = nice_grid(1.686 - 1, 1.686 + 1, 9, current=1.686)
+check(1.686 in g and on_lattice(g, 1.686, 0.25) and _locate(1.686, g) is not None, f"不整齊的 current 也必在格上(鄰格差 0.25 倍數)→ {g}")
+g = nice_grid(3, 15, 7, current=5, integer=True)
+check(g == [3, 5, 7, 9, 11, 13, 15] and all(type(v) is int for v in g), f"整數參數輸出 int → {g}")
+g = nice_grid(500, 3000, 6, current=1500, integer=True)
+check(g == [500, 1000, 1500, 2000, 2500, 3000] and all(type(v) is int for v in g), f"整數步長 500 → {g}")
+g = nice_grid(20, 22, 9, current=21, integer=True)
+check(g == [20, 21, 22], f"整數軸步長不小於 1 → {g}")
+g = nice_grid(0, 10, 1000, current=5)
+check(len(g) <= SCAN_MAX_AXIS and 5.0 in g and g[0] <= 0 and g[-1] >= 10, f"步長太細 → 放粗到 ≤ {SCAN_MAX_AXIS} 格({len(g)} 格,步長 {g[1]-g[0]})")
+g = nice_grid(0, 10000, 5000, current=0, integer=True)
+check(len(g) <= SCAN_MAX_AXIS and all(type(v) is int for v in g), f"整數軸放粗也 ≤ {SCAN_MAX_AXIS}({len(g)} 格)")
+check(nice_grid(0, 1, 5, current=0.5, step=0.5) == [0.0, 0.5, 1.0], "step= 可指定,仍錨在 current")
+for bad in ((float('nan'), 1, 0.5), (0, 1, float('inf'))):
+    try:
+        nice_grid(bad[0], bad[1], 5, current=bad[2]); check(False, f"nice_grid 非有限值要 raise {bad}")
+    except ValueError:
+        check(True, f"nice_grid 非有限值要 raise {bad}")
+try:
+    nice_grid(3, 15, 7, current=5.5, integer=True); check(False, "整數軸 current 非整數要 raise")
+except ValueError:
+    check(True, "整數軸 current 非整數要 raise")
+rng = np.random.default_rng(0)
+ser = pd.Series(rng.normal(1.0, 0.6, 5000)); ser.iloc[:50] = np.nan
+e, x = percentile_thresholds(ser, 9, current=(0.5, 0.0))
+p5, p95 = np.percentile(ser.dropna(), [5, 95]); st = nice_step(p95 - p5, 9)
+check(0.5 in e and 0.0 in x and on_lattice(e, 0.5, st) and on_lattice(x, 0.0, st), f"percentile_thresholds 兩軸各含目前值、同一步長 {st}")
+check(e[-1] >= p95 and x[0] <= p5 and e[0] <= (p5 + p95) / 2 <= x[-1] and len(e) <= SCAN_MAX_AXIS and len(x) <= SCAN_MAX_AXIS, "entry 涵蓋 [mid,p95]、exit 涵蓋 [p5,mid]")
+check(all(isinstance(v, float) for v in e + x) and _locate(0.5, e) is not None and _locate(0.0, x) is not None, "軸值原生 float,_locate 找得到目前值")
+e0, x0 = percentile_thresholds(ser, 9)
+check(0.0 in e0 and 0.0 in x0, "沒傳 current → 兩軸錨在 0")
 for bad_cur, why in (((True, 0.3), "current 含 bool"), ((float("nan"), 0.3), "current 含 NaN")):
     try:
         write_scan(grid, row_vals, col_vals, nbr_mean, best_idx, d3, "A", "B", 0.0, None, None, current=bad_cur); check(False, f"{why} 要 raise")

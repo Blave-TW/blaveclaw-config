@@ -2,9 +2,10 @@
 Utilities for 2D parameter scanning and plateau detection.
 
 Usage:
-    from lib.param_scan import percentile_thresholds, scan_grid, find_plateau, write_scan, plot_heatmap
+    from lib.param_scan import nice_grid, percentile_thresholds, scan_grid, find_plateau, write_scan, plot_heatmap
 
-Canonical scan flow: scan_grid → find_plateau → write_scan → plot_heatmap
+Canonical scan flow: nice_grid / percentile_thresholds (axes anchored on the current
+constants) → scan_grid → find_plateau → write_scan → plot_heatmap
 """
 
 import json
@@ -17,42 +18,128 @@ import matplotlib.ticker as mticker
 from matplotlib.patches import Rectangle
 
 
-def percentile_thresholds(series, n_parts=9):
+# api-side cap on each scan.json axis (api/openclaw/agent_strategies.py ingest) — a longer
+# axis is refused there and the web 穩健參數 tab stays blank, so refuse it here first
+# (write_scan) and never build one (nice_grid coarsens its step instead).
+SCAN_MAX_AXIS = 40
+
+
+def _nice_candidates(integer=False):
+    """Nice-number mantissas within one decade; 2.5 is dropped for integer axes at the
+    unit decade (2.5 is not an int; 25 / 250 are fine)."""
+    return (1.0, 2.0, 2.5, 5.0, 10.0) if not integer else (1.0, 2.0, 5.0, 10.0)
+
+
+def nice_step(span, n, integer=False):
+    """Round span/(n-1) to the nearest {1, 2, 2.5, 5}×10^k (nearest in ratio, so it is
+    scale-free). integer=True → at least 1 and always an int (SMA lengths, hold bars…)."""
+    if n < 2 or not np.isfinite(span) or span <= 0:
+        return 1 if integer else 1.0
+    raw   = float(span) / (n - 1)
+    if integer and raw < 1:
+        return 1
+    k     = np.floor(np.log10(raw))
+    base  = 10.0 ** k
+    cands = [m * base for m in _nice_candidates(integer and base < 10)]
+    step  = min(cands, key=lambda c: abs(np.log10(c / raw)))
+    return int(round(step)) if integer else float(step)
+
+
+def _coarser(step, integer=False):
+    """Next nice step above `step` (used when an axis would exceed SCAN_MAX_AXIS)."""
+    k     = np.floor(np.log10(step))
+    base  = 10.0 ** k
+    cands = [m * base for m in _nice_candidates(integer and base < 10)]
+    nxt   = min((c for c in cands if c > step * (1 + 1e-9)), default=10.0 * base)
+    return int(round(nxt)) if integer else float(nxt)
+
+
+def nice_grid(lo, hi, n=9, current=0.0, integer=False, step=None, max_axis=SCAN_MAX_AXIS):
     """
-    Split an indicator's distribution into n_parts equal percentile bands.
-    Returns (entry_vals, exit_vals) — upper and lower halves of the percentile grid.
+    Build one scan axis whose cells are `current + k*step` (k integer) — so the
+    strategy's current value is ALWAYS a grid cell and every neighbour sits a clean
+    multiple of a nice step away (0.5 → 0, 0.25, 0.5, 0.75, 1.0 …).
 
-    Typical use: indicator threshold scan where entry > exit (dead zone strategy).
+    Why: the web 穩健參數 tab marks "you are here" by locating `current` on the axis;
+    a percentile linspace (0.065, 0.543, 1.022 …) never contains the file's constant, so
+    the tab shows 「不在掃描範圍」 and cannot highlight the current cell.
 
-    Example (n_parts=9):
-        percentiles at 10%, 20%, ..., 90% → 9 threshold candidates
-        entry_vals = upper half (p50–p90)  → candidates for ENTRY_TH
-        exit_vals  = lower half (p10–p50)  → candidates for EXIT_TH
+    Parameters
+    ----------
+    lo, hi   : range the axis must cover (typically the indicator's p5 / p95, or the
+               current value ± a sensible span). `current` is always covered too.
+    n        : target number of cells — the step is (hi-lo)/(n-1) rounded to the nearest
+               {1, 2, 2.5, 5}×10^k. Actual length differs a little (nice step + the
+               ends rounded outward, at most one extra cell each side).
+    current  : the constant the strategy file holds RIGHT NOW (anchor). Default 0.
+    integer  : True for bar-count parameters (SMA period, hold bars): step ≥ 1, int cells.
+    step     : override the step (still anchored on current; must be a nice number).
+    max_axis : cap on the axis length (api limit 40) — a finer step is coarsened until
+               the axis fits, never truncated (truncating would drop `current` or the ends).
+
+    Returns
+    -------
+    list of float (or int when integer=True), ascending, containing `current`.
+    """
+    if not (np.isfinite(lo) and np.isfinite(hi) and np.isfinite(current)):
+        raise ValueError(f"nice_grid: lo/hi/current must be finite, got {lo}, {hi}, {current}")
+    if integer and not float(current).is_integer():
+        raise ValueError(f"nice_grid: integer axis but current={current} is not an integer")
+    lo, hi = min(lo, hi, current), max(lo, hi, current)
+    step = nice_step(hi - lo, n, integer) if step is None else (int(step) if integer else float(step))
+    if step <= 0:
+        raise ValueError(f"nice_grid: step must be positive, got {step}")
+    while True:
+        k_lo = int(np.floor((lo - current) / step + 1e-9))
+        k_hi = int(np.ceil((hi - current) / step - 1e-9))
+        if k_hi - k_lo + 1 <= max_axis:
+            break
+        step = _coarser(step, integer)
+    if integer:
+        return [int(round(current + k * step)) for k in range(k_lo, k_hi + 1)]
+    return [round(float(current + k * step), 10) for k in range(k_lo, k_hi + 1)]
+
+
+def percentile_thresholds(series, n_parts=9, current=None):
+    """
+    Threshold-pair scan axes from an indicator's distribution, on a nice grid anchored
+    at the strategy's current constants.
+    Returns (entry_vals, exit_vals) — entry covers the upper half [mid, p95], exit the
+    lower half [p5, mid] (dead-zone momentum: entry > exit). Both use ONE step =
+    (p95-p5)/(n_parts-1) rounded to {1, 2, 2.5, 5}×10^k, each anchored so the current
+    ENTRY / EXIT value is a cell (see nice_grid — the web cannot mark an off-grid current).
+
+    Example (n_parts=9, p5=0.065, p95=1.979, current=(0.5, 0.0)):
+        step 0.25 → entry_vals [0.5, 0.75, …, 2.0], exit_vals [0.0, 0.25, …, 1.25]
 
     Parameters
     ----------
     series   : pd.Series — indicator values (NaNs ignored)
-    n_parts  : int — number of equal bands (default 9)
+    n_parts  : int — target cells across p5..p95 (default 9 → ~n/2 per axis)
+    current  : (ENTRY, EXIT) the strategy file holds now — pass `(s.ENTRY_TH, s.EXIT_TH)`.
+               None → both anchored at 0 (legacy callers; only right if 0 is on the lattice
+               you want).
 
     Returns
     -------
-    entry_vals : np.ndarray — upper percentile thresholds
-    exit_vals  : np.ndarray — lower percentile thresholds
+    entry_vals : list[float] — ENTRY_TH candidates (ascending, contains current entry)
+    exit_vals  : list[float] — EXIT_TH candidates (ascending, contains current exit)
     """
-    s    = series.dropna()
-    lo   = np.percentile(s, 5)
-    hi   = np.percentile(s, 95)
-    vals = np.round(np.linspace(lo, hi, n_parts), 3)
-    mid  = len(vals) // 2
-    entry_vals = vals[mid:]
-    exit_vals  = vals[:mid + 1]
+    s  = series.dropna()
+    lo = float(np.percentile(s, 5))
+    hi = float(np.percentile(s, 95))
+    mid = (lo + hi) / 2
+    cur_entry, cur_exit = (0.0, 0.0) if current is None else (float(current[0]), float(current[1]))
+    step = nice_step(hi - lo, n_parts)
+    entry_vals = nice_grid(mid, hi, current=cur_entry, step=step)
+    exit_vals  = nice_grid(lo, mid, current=cur_exit,  step=step)
 
-    p = np.percentile(s, [0, 25, 50, 75, 100])
+    p = np.percentile(s, [0, 5, 25, 50, 75, 95, 100])
     print(f"指標分佈 (n={len(s):,}): "
-          f"min={p[0]:.3f}  p25={p[1]:.3f}  median={p[2]:.3f}  "
-          f"p75={p[3]:.3f}  max={p[4]:.3f}")
-    print(f"ENTRY_TH 候選 ({len(entry_vals)}): {list(entry_vals)}")
-    print(f"EXIT_TH  候選 ({len(exit_vals)}):  {list(exit_vals)}")
+          f"min={p[0]:.3f}  p5={p[1]:.3f}  p25={p[2]:.3f}  median={p[3]:.3f}  "
+          f"p75={p[4]:.3f}  p95={p[5]:.3f}  max={p[6]:.3f}  → step={step}")
+    print(f"ENTRY_TH 候選 ({len(entry_vals)}): {entry_vals}")
+    print(f"EXIT_TH  候選 ({len(exit_vals)}):  {exit_vals}")
     return entry_vals, exit_vals
 
 
@@ -233,11 +320,6 @@ def _finite_numbers(x, what):
     if any(isinstance(v, (bool, np.bool_)) or not isinstance(v, (int, float, np.integer, np.floating))
            for v in items) or not np.isfinite(np.asarray(items, dtype=float)).all():
         raise ValueError(f"write_scan: {what} must be finite numbers, got {items}")
-
-
-# api-side cap on each scan.json axis (api/openclaw/agent_strategies.py ingest) — a longer
-# axis is refused there and the web 穩健參數 tab stays blank, so refuse it here first.
-SCAN_MAX_AXIS = 40
 
 
 def write_scan(grid, row_vals, col_vals, nbr_mean, best_idx, output_dir,

@@ -244,11 +244,15 @@ The loop is pure (no I/O) and runs on a daily series in milliseconds — fast en
 **Choosing the scan ranges — do NOT use `percentile_thresholds` for a contrarian/mean-reversion strategy.** That helper splits the distribution into entry=upper-half / exit=lower-half, which hard-codes the assumption "exit on the opposite side of zero from entry" (fine for momentum). A contrarian long often takes profit on a *positive* indicator reading (fear normalising, not flipping to greed), so its best exit lives on the **same side as entry** — a region `percentile_thresholds` never samples. Instead derive the span from the indicator's own distribution and let the exit sweep **both sides**:
 
 ```python
+from lib.param_scan import nice_grid, nice_step
 zs     = df['indicator'].dropna()
-LO, HI = np.round(np.percentile(zs, [2, 98]), 3)   # data-driven span
-buy_vals  = np.round(np.linspace(0.2, HI, 8), 3)   # entry on the signal side
-sell_vals = np.round(np.linspace(LO, HI, 9), 3)    # exit: full range, BOTH sides
+LO, HI = np.percentile(zs, [2, 98])                              # data-driven span
+step   = nice_step(HI - LO, 9)                                   # one nice step for both axes
+buy_vals  = nice_grid(0.2, HI, current=s.BUY_TH,  step=step)    # entry on the signal side
+sell_vals = nice_grid(LO,  HI, current=s.SELL_TH, step=step)    # exit: full range, BOTH sides
 ```
+
+**Axes are always `nice_grid` axes** (never a raw `linspace` / percentile list): look at the distribution to choose the range, but the cells must be integers or multiples of 1/2/2.5/5 (`step` = span/(n-1) rounded to `{1, 2, 2.5, 5}×10^k`) **and the strategy's current constant must be a cell** — `nice_grid` anchors the lattice on `current`. The web 穩健參數 tab marks "you are here" by locating `current` on the axis; a linspace like `[0.065, 0.543, 1.022, 1.5, 1.979]` never contains the file's `0.5`, so the tab shows 「不在掃描範圍」 and cannot highlight the current cell. Bar-count parameters use `integer=True` (step ≥ 1, int cells). `nice_grid` coarsens an axis that would exceed the 40-cell api cap instead of truncating it.
 
 Because each scan turns the **other side OFF**, the long scan and short scan are fully decoupled — so optimising each in isolation is valid no matter how `SELL_TH` and `COVER_TH` end up ordered relative to each other. Turn a side off by pushing its thresholds out of range (`compute_signals` already takes all four as kwargs):
 
@@ -286,6 +290,18 @@ plot_heatmap(grid_S, short_vals, cover_vals, best_S, row_label='SHORT_TH', col_l
 ```
 
 After combining, the only hard checks are the per-side ones — `BUY_TH > SELL_TH`, `COVER_TH > SHORT_TH`, and `BUY_TH > SHORT_TH`. The order of `SELL_TH` vs `COVER_TH` is **not** a correctness check: `SELL_TH > COVER_TH` gives a flat neutral band, `SELL_TH < COVER_TH` gives an overlapping hold zone (positions ride through the middle). Both are valid — just confirm the independently-picked exits put you in the regime you intended.
+
+**Scanning three or more parameters — pairwise coordinate descent, max two rounds, ONE `scan.json`.** Canonical example: `examples/tw2317_broker_zscore/scan.py` (four constants: `ENTRY_Z`, `EXIT_Z`, `WINDOW`, `ZSCORE_WIN`).
+
+`scan_grid` / `plot_heatmap` / `scan.json` are 2D, and the web's 穩健參數 tab draws exactly one grid. Do not try to flatten N parameters into one chart; sweep them a pair at a time with the others pinned:
+
+1. **Round 1 — the two most likely sensitive constants**, everything else pinned at the values `strategy.py` holds now. Thresholds first (entry/exit levels move the Sharpe most), then window lengths, then the rest. Every constant must be a `compute_signals` kwarg so the pinned ones are just passed through. `find_plateau` → pin that pair at its plateau.
+2. **Round 2 — the next pair** (or, with three constants, the remaining one paired with the most sensitive one from round 1), thresholds pinned at the round-1 plateau. `find_plateau` → done.
+3. **Stop after two rounds.** Each round is one iteration under `AGENTS.md` › *Iteration Brakes*; do not re-scan round 1 with the round-2 windows, do not add a third pair. Report both plateaus and let the user choose.
+
+Every round gets its own `plot_heatmap` PNG (`heatmap.png`, `heatmap_round2.png` — they reach the user through the workspace chat / Telegram). **`write_scan` is called once, for the round-1 pair only.** Reason: the web's adopt prompt only changes the two constants in `scan.json`, and round 1 is the only grid computed with every *other* constant at the file's current value — so its `current` mark is honest and 「把 ENTRY_Z 改成 …」 lands on a cell that was actually scanned. Round 2 was computed with the thresholds pinned at the plateau, not the file's values; writing it would mark a current cell whose Sharpe was never measured under the file's constants. The round-2 recommendation goes in the conversation. Long/short threshold pairs that decouple by turning the other side off (previous section) are a separate case — two independent 2D scans, write the side you recommend.
+
+**One real parameter only** (`FEE`, `SYMBOL`, `INTERVAL` do not count): pair it with another constant that actually exists in the strategy. If there truly is only one, scan it 1D — loop `compute_signals` over a `nice_grid` axis, plot a line chart, send the PNG — and **write no `scan.json`**: the web's first version draws 2D grids only, and a padded fake axis would show the user a heatmap of a parameter that does not exist.
 
 ## What You Do NOT Need to Write
 
