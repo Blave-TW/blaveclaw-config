@@ -23,8 +23,6 @@ and ships whatever lands there.
 - **`<id>` is the file name stem and the report id**: `[A-Za-z0-9_-]{1,64}`. Sending
   the same id again **overwrites** that report on the platform — deterministic ids
   make a re-run idempotent; date-stamped ids keep every run.
-  **Reserved:** `daily-YYYY-MM-DD` and `wk-YYYY-MM-DD` belong to the runtime's own
-  performance reports — reusing them overwrites the official report.
 - **Write atomically**: write `<id>.json.tmp` (any name not ending in `.json` is
   ignored by the scan) and `os.replace()` it into place. Belt and braces on top of
   that: the uploader leaves any report whose own mtime — **or that of any picture in
@@ -378,7 +376,7 @@ one into a report that shouldn't have it is its own failure.
 | `type` | What applies |
 |---|---|
 | `research`, `morning` | **All six rules.** These exist to answer "what do you think, and why". |
-| `performance` | **Rules 5 and 6 only** (plus rule 2 on any sentence that explains *why* a number moved — stating the number itself is the point of the report and needs no thesis). A performance report is a state snapshot: numbers, attribution, what changed since last time. Do **not** invent an investment view to fill a section; the clean snapshot is the correct output. (The runtime writes the official daily/weekly ones itself, §1 — yours are ad-hoc extras.) |
+| `performance` | **Rules 5 and 6 only** (plus rule 2 on any sentence that explains *why* a number moved — stating the number itself is the point of the report and needs no thesis). A performance report is a state snapshot: numbers, attribution, what changed since last time. Do **not** invent an investment view to fill a section; the clean snapshot is the correct output. The runtime produces no report of its own — every performance report is one the user asked for, one-off or as a registered job (§8). |
 
 ### 1. One falsifiable claim, carried by the `lead`
 
