@@ -51,22 +51,29 @@ def precise_pnl(close_v, open_v, w_curr, w_prev, exec_shifted, fee):
     return pf_ret, overnight, delta_w, tc_daily
 
 
+def periods_per_year(index, n=None):
+    """Bars per year derived from the actual date range of `index` (n bars over
+    span_days) — works for any market (crypto 24/7, stocks 252d, futures ~250d,
+    intraday, weekly, etc.). Falls back to n when the span is < 1 day or the index
+    is not indexable. Shared by compute_stats and the runner's automatic MCPT."""
+    if n is None:
+        n = len(index)
+    if n > 1 and hasattr(index, '__getitem__'):
+        span_days = (index[-1] - index[0]).days
+        return n / (span_days / 365.25) if span_days > 0 else n
+    return n
+
+
 def compute_stats(pf_ret, index):
     """
     Annualized performance stats from per-bar returns.
     Returns (sharpe, sortino, omega, mdd, ann_ret).
 
-    ppy is derived from the actual date range — works for any market
-    (crypto 24/7, stocks 252d, futures ~250d, intraday, weekly, etc.).
+    ppy is derived from the actual date range — see periods_per_year().
     """
     r = np.nan_to_num(np.asarray(pf_ret, dtype=float), nan=0.0)
     n = len(r)
-
-    if n > 1 and hasattr(index, '__getitem__'):
-        span_days = (index[-1] - index[0]).days
-        ppy = n / (span_days / 365.25) if span_days > 0 else n
-    else:
-        ppy = n
+    ppy = periods_per_year(index, n)
 
     mean_r   = r.mean()
     std_r    = r.std(ddof=1) if n > 1 else 0.0

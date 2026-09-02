@@ -40,8 +40,17 @@ CHART_LIVE_REFRESH_MIN_AGE = 86400  # live-tick rebuild throttle: at most once a
 
 
 
-# Keys lib.validation.write_mcpt_to_stats merges into stats.json after a manual MCPT run.
-MCPT_KEYS = ('MCPT p-value', 'MCPT Permutations')
+# MCPT (Monte Carlo Permutation Test) fields in stats.json — written automatically by every
+# Type A backtest (see _auto_mcpt) and by lib.validation.write_mcpt_to_stats after a manual
+# run. Mirrors lib.validation.MCPT_*_KEY.
+MCPT_KEYS = ('MCPT p-value', 'MCPT Permutations', 'MCPT Distribution')
+# Default permutation count for the automatic backtest MCPT; a strategy overrides it with
+# `MCPT_N = <int>` or disables the test with `MCPT = False`. Measured 2026-09 on lib.validation
+# .mcpt (pure numpy, one rolling std + n permutations of a 1D array), Apple M5, 40k bars 1h:
+# n=500 0.2 s / 1000 0.3 s / 2000 0.7 s; 200k bars (5min, 2 years) n=2000 3.5 s. A 2-vCPU
+# fleet VM is roughly 3–6× slower, so 2000 stays well inside the 30 s budget for a backtest
+# — and matches the n the manual flow has always used, so p-values stay comparable.
+MCPT_N_DEFAULT = 2000
 # Flat epoch-seconds key stamping when the stats were produced by an explicit backtest.
 # The web compares scan.json's generated_at against it: a scan older than the last
 # backtest means the parameters may have moved, so scan.current is shown as unknown.
@@ -52,13 +61,13 @@ def _carry_over(out_dir, mode):
     """Keys to carry from the existing stats.json into the one about to be rewritten.
 
     A live / cron tick (mode != 'backtest') rewrites stats.json every bar with the SAME
-    code and parameters, so the MCPT p-value computed on them is still valid, and the
+    code and parameters, so the MCPT fields computed on them are still valid, and the
     last explicit backtest's 'Generated At' still marks when the parameters last changed
     — both are read off the existing file and kept. An explicit backtest returns {} so
-    the MCPT keys are DROPPED (parameters may have changed; the user re-runs MCPT via
-    write_mcpt_to_stats) and 'Generated At' is stamped fresh by the caller. A missing /
-    unreadable / keyless old file is simply "nothing to carry" — never fatal, a tick
-    must not die on it.
+    the old MCPT keys are DROPPED (parameters may have changed) — the backtest then runs
+    MCPT afresh itself (_auto_mcpt) and 'Generated At' is stamped fresh by the caller. A
+    missing / unreadable / keyless old file is simply "nothing to carry" — never fatal, a
+    tick must not die on it.
     """
     if mode == 'backtest':
         return {}
@@ -68,6 +77,48 @@ def _carry_over(out_dir, mode):
         return {k: old[k] for k in MCPT_KEYS + (GENERATED_AT_KEY,) if k in old}
     except Exception as e:  # absent on first tick, or a half-written file — carry nothing
         logging.debug("stats.json carry-over skipped: %s", e)
+        return {}
+
+
+def _auto_mcpt(config, close_v, pos, index, fee, n_trades):
+    """Type A backtest: run lib.validation.mcpt on the backtest's own close / position and
+    return the three MCPT stats.json fields (see lib.validation.mcpt_stats_fields), or {}.
+
+    `MCPT = False` in the strategy skips it; `MCPT_N` overrides the permutation count
+    (default MCPT_N_DEFAULT). periods_per_year comes from the data's real date span (same
+    figure compute_stats annualizes with), fee from FEE; vol-targeting parameters stay at
+    the lib defaults. Never raises: a strategy that never traded, too-short data, a stale
+    lib/validation.py or any other failure logs a warning and the backtest ships every
+    other stat as before — MCPT is an extra, not a gate.
+
+    Type C (portfolio) does NOT get an automatic MCPT: mcpt() permutes ONE forward-return
+    series against ONE position series, and a portfolio has k of each. Collapsing the
+    portfolio into a single return series and permuting that would be a bootstrap of the
+    strategy's own realized returns — exactly the substitute AGENTS.md forbids, because it
+    answers a different question. Until mcpt() grows a multi-asset variant, Type C stays
+    manual/unavailable rather than faked.
+    """
+    if config.get('MCPT', True) is False:
+        logging.info("MCPT skipped: strategy sets MCPT = False")
+        return {}
+    if n_trades == 0:
+        logging.warning("MCPT skipped: 0 trades — no position to test")
+        return {}
+    try:
+        from lib.validation import mcpt, mcpt_stats_fields
+        from lib.analysis import periods_per_year
+    except ImportError as e:  # stale lib on this workspace — fail open, keep the backtest
+        logging.warning("MCPT skipped: lib is stale (%s)", e)
+        return {}
+    try:
+        n_perm = int(config.get('MCPT_N', MCPT_N_DEFAULT))
+        if n_perm <= 0:
+            raise ValueError(f"MCPT_N must be a positive int, got {n_perm}")
+        ppy = periods_per_year(index, len(close_v))
+        actual, p_value, dist = mcpt(close_v, pos, n=n_perm, fee=fee, periods_per_year=ppy)
+        return mcpt_stats_fields(actual, p_value, dist)
+    except Exception as e:
+        logging.warning("MCPT failed (backtest stats still written without it): %s", e)
         return {}
 
 
@@ -572,6 +623,13 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         candles = _build_candles(df)
         if candles:  # optional field — same absent-not-empty convention as panes
             stats['candles'] = candles
+        if mode == 'backtest':  # automatic MCPT — backtest only; a live tick carries it over below
+            mcpt_fields = _auto_mcpt(config, close_v, pos, df.index, fee, n_trades)
+            if mcpt_fields:
+                stats.update(mcpt_fields)
+                print(f"  MCPT p-value: {mcpt_fields[MCPT_KEYS[0]]:.4f}  "
+                      f"(n={mcpt_fields[MCPT_KEYS[1]]}, "
+                      f"{'significant edge' if mcpt_fields[MCPT_KEYS[0]] < 0.05 else 'no significant edge'} at 95%)")
         stats.update(_carry_over(out_dir, mode))  # live tick keeps MCPT + Generated At; backtest drops/restamps
         stats.setdefault(GENERATED_AT_KEY, int(time.time()))
         json.dump(stats, open(out_dir / 'stats.json', 'w'), indent=2)
@@ -693,6 +751,7 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         from lib.pnl import daily_returns_typeC
         d_dates, d_rets = daily_returns_typeC(pf_series)
 
+        # No automatic MCPT for Type C — see _auto_mcpt's docstring (mcpt() is single-series).
         carried = _carry_over(out_dir, mode)  # live tick keeps MCPT + Generated At; backtest drops/restamps
         carried.setdefault(GENERATED_AT_KEY, int(time.time()))
         json.dump(
