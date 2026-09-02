@@ -408,7 +408,7 @@ from lib.data import (
     fetch_twstock_price_adj_batch,              # (stock_ids, start, end, headers) → Open/Close
     fetch_twstock_price_batch,                  # (stock_ids, start, end, headers) → 原始日K OHLCV（含 High/Low）
     fetch_twstock_per_batch,                    # (stock_ids, start, end, headers) → dividend_yield/PER/PBR
-    fetch_twstock_institutional_batch,          # (stock_ids, start, end, headers) → foreign_net 及原始欄位
+    fetch_twstock_institutional_batch,          # (stock_ids, start, end, headers) → foreign_net（= foreign_buy − foreign_sell，單位是股，÷1000 才是張）及原始欄位
     fetch_twstock_shareholding_batch,           # (stock_ids, start, end, headers) → shareholders 欄
     fetch_twstock_foreign_shareholding_batch,   # (stock_ids, start, end, headers) → 外資持股比率/股數
     fetch_twstock_financials_batch,             # (stock_ids, headers) → 損益表 long format

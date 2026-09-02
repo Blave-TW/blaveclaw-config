@@ -441,6 +441,7 @@ _SINGLE_FILE_PREFIXES = frozenset({
     'twstock_price', 'twstock_price_nonadj', 'twstock_inst', 'twstock_shareholding',
     'twstock_per', 'twstock_foreign_sh',
     'twmarket_index', 'twmarket_turnover', 'twmarket_institutional', 'twmarket_margin',
+    'twfutures_institutional',
 })
 _META_TS_FMT = '%Y-%m-%dT%H:%M:%S'
 _META_KEY = b'blave_cache_meta'
@@ -2639,6 +2640,61 @@ def fetch_twfutures_pcr(start, end, headers):
     df = pd.DataFrame(data)
     df['date'] = pd.to_datetime(df['date'])
     return df.set_index('date').sort_index()[['pcr']].astype(float)
+
+
+_TWFUT_INST_INVESTORS = (('foreign', '外資'), ('investment_trust', '投信'), ('dealer', '自營商'))
+_TWFUT_INST_COLUMNS = [f'{k}_{m}' for k, _ in _TWFUT_INST_INVESTORS
+                       for m in ('net_oi', 'long_oi', 'short_oi', 'net_deal')]
+# 用戶會拿執行商品名(TXF/MXF)來問法人籌碼,但 TAIFEX 的法人統計按商品代號分:
+# TX=台指期、MTX=小台。微台的代號就是 TMF,有自己的一套法人統計(與 MTX 數字不同),直通。
+_TWFUT_INST_ALIASES = {'TXF': 'TX', 'MXF': 'MTX'}
+
+
+def _fetch_twfutures_institutional_raw(futures_id, start, end, headers):
+    """Raw fetch → one row per date, 12 float columns (see _TWFUT_INST_COLUMNS).
+    The endpoint returns 3 rows per day (外資/投信/自營商); pivoted here so the
+    cache layer sees a plain date-indexed frame like the twmarket_* series."""
+    end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
+    r = _retry_get(f'{BASE}/studio/market/twfutures/institutional/{futures_id}',
+                   headers=headers, params={'start': start, 'end': end_str}, timeout=60)
+    data = r.json().get('data', [])
+    if not data:
+        return pd.DataFrame(columns=_TWFUT_INST_COLUMNS)
+    df = pd.DataFrame(data)
+    df['date'] = pd.to_datetime(df['date'])
+    out = {}
+    for key, label in _TWFUT_INST_INVESTORS:
+        sub = df[df['institutional_investors'] == label].set_index('date').sort_index()
+        sub = sub[~sub.index.duplicated(keep='last')]
+        long_oi = sub['long_open_interest_balance_volume'].astype(float)
+        short_oi = sub['short_open_interest_balance_volume'].astype(float)
+        out[f'{key}_net_oi'] = long_oi - short_oi
+        out[f'{key}_long_oi'] = long_oi
+        out[f'{key}_short_oi'] = short_oi
+        out[f'{key}_net_deal'] = (sub['long_deal_volume'].astype(float)
+                                  - sub['short_deal_volume'].astype(float))
+    return pd.DataFrame(out).sort_index()
+
+
+def fetch_twfutures_institutional(futures_id, start, end, headers):
+    """期貨三大法人未平倉與交易口數(日). Returns a date-indexed DataFrame with
+    12 float columns, 口數:
+      {foreign|investment_trust|dealer}_net_oi   未平倉淨口數(多 − 空)——「外資期貨淨多單」就是 foreign_net_oi
+      {…}_long_oi / {…}_short_oi                  未平倉多方 / 空方口數
+      {…}_net_deal                                當日交易淨口數(買 − 賣)
+
+    futures_id: 'TX'(台指期)、'MTX'(小台)、'TMF'(微台,有自己的統計);'TE'/'TF' 端點接受但
+    未實測。執行商品名 'TXF'→'TX'、'MXF'→'MTX' 自動對應。
+    個股期貨沒有法人統計(伺服器回 404)。資料來源 TAIFEX,盤後約 15:00 後才有當日。
+    Cached like the twmarket_* daily series (one parquet per id, delta-updated).
+    Raw 3-rows-per-day layout: see references/twfutures.md.
+    """
+    futures_id = _TWFUT_INST_ALIASES.get(futures_id.upper(), futures_id.upper())
+    return _extend_cache_monthly(
+        'twfutures_institutional', {'id': futures_id},
+        lambda s, e: _fetch_twfutures_institutional_raw(futures_id, s, e, headers),
+        start, end,
+    )
 
 
 def fetch_twfutures_bid_ask_vol(start, end, headers):

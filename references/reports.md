@@ -94,6 +94,52 @@ The sidecar is newer than the rest of this page: a runtime that predates it pass
 report lands in `failed/` for that reason, this machine's runtime is too old — upload
 the picture yourself and reference it by `sha256` (§5), or leave it out.
 
+## 1b. Templates — the data half is already written
+
+For the three morning-brief types the deterministic half lives in `lib/report_templates.py`.
+A template fetches every series through `lib.data`, builds the KPI row, charts, tables and
+the footnote in contract shape, and hands back a `Pack` with the figures it used
+(`pack.context`) and the narrative slots left for you (`pack.slots`). You add the
+judgement; you do not touch the blocks.
+
+```python
+from lib.report_templates import tw_market_brief, crypto_market_brief, symbol_brief, publish
+
+pack = tw_market_brief()                 # today (Taipei); headers come from the workspace .env
+print(pack.describe())                   # every figure the pack carries, one line each — cite these
+#   [tw-market-20260902] 台股大盤晨報 2026-09-02
+#     加權指數: 46,948.72(+1.78%),20 日高 46,948.72
+#     三大法人: 外資 +267.0 億(昨 -144.0 億)、投信 +131.0 億、自營 +163.0 億、合計 +561.0 億
+#     外資期貨淨多單: +12,300 口(+2,500 口,09-01)
+#     缺少:  - 台指期 2026-09-01 無夜盤 bar(…)      ← a missing series is a missing block, never a guess
+#     narrative slots: lead≤600, read≤2400, action≤1500, risk≤900
+
+publish(pack, narrative={
+    "lead":   "外資現貨與期貨同日轉多,量能放大六成——這是資金回補,不是空窗反彈。",
+    "read":   "…what the numbers say and why (markdown, §4 subset)…",
+    "action": "…what to do about it, with levels…",
+    "risk":   "外資連兩日淨賣超逾 150 億,或淨多單回落到 1 萬口以下,這份解讀作廢。",
+})
+```
+
+- `crypto_market_brief(symbols=("BTC", "ETH", "SOL"))` — price / returns table, rebased
+  performance, BTC funding, the market-wide Blave indicators, today's macro events.
+- `symbol_brief("2330")` — Taiwan stock: close / volume / 外資買賣超 (張), key levels (20 日高低,
+  5/20/60 日均); `symbol_brief("BTC")` — crypto perp: price, funding, 爆倉 / 巨鯨 / 多空力道.
+- Slots: `lead` becomes the opening card (one falsifiable claim), `read` / `action` become
+  sections after the data, `risk` a warning callout before the footnote. Each has a character
+  cap (`pack.slots`); `publish` raises past it — cut, do not summarise.
+- **Scheduled run = `publish(pack)` with no narrative** (data-only, `origin: scheduled`). The
+  runtime has no timer that wakes the agent, so a cron job cannot carry a judgement; a canned
+  sentence in a script is a view nobody formed. Report ids are date-stamped
+  (`tw-market-20260902`), so a re-run the same day overwrites rather than duplicates.
+- `pack.notes` lists what the source did not have (e.g. 期貨法人 not published yet, no night
+  bars); the corresponding block is simply absent. Say so in the narrative if it matters;
+  never fill the gap with a number.
+
+Headers, if you need `lib.data` outside a template: `headers_from_env()` in the same module
+reads `blave_api_key` / `blave_secret_key` from the workspace `.env` (see `references/lib.md`).
+
 ## 2. Envelope
 
 ```json

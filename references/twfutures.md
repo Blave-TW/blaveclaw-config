@@ -109,31 +109,29 @@ pcr = foreign["賣權"] / foreign["買權"]
 
 ## 期貨三大法人（TaiwanFuturesInstitutionalInvestors）
 
-每天 3 筆：自營商、投信、外資。
+**Use `lib.data.fetch_twfutures_institutional` — do not hand-roll the request.** It caches like the
+`twmarket_*` daily series and pivots the endpoint's 3-rows-per-day layout into one row per date:
 
 ```python
-def fetch_twfutures_institutional(futures_id: str, start: str, end: str, headers: dict) -> pd.DataFrame:
-    """欄位：date, institutional_investors, long/short_deal_volume/amount, long/short_open_interest_balance_volume/amount"""
-    r = requests.get(
-        f"https://api.blave.org/studio/market/twfutures/institutional/{futures_id}",
-        params={"start": start, "end": end},
-        headers=headers,
-        timeout=60,
-    )
-    r.raise_for_status()
-    data = r.json().get("data", [])
-    return pd.DataFrame(data) if data else pd.DataFrame()
+from lib.data import fetch_twfutures_institutional
+
+df = fetch_twfutures_institutional("TX", "2026-01-01", None, hdrs)   # None = up to today
+# 12 float columns, 口數:
+#   foreign_net_oi / investment_trust_net_oi / dealer_net_oi   未平倉淨口數(多 − 空)
+#   {…}_long_oi / {…}_short_oi                                 未平倉多方 / 空方
+#   {…}_net_deal                                               當日交易淨口數(買 − 賣)
+foreign_net = df["foreign_net_oi"]          # 「外資期貨淨多單」
+today_delta = df["foreign_net_oi"].diff().iloc[-1]
 ```
 
-常用分析：
-```python
-df = fetch_twfutures_institutional("TX", "2025-01-01", "2025-05-30", hdrs)
+`futures_id`: `TX`（台指期）、`MTX`（小台）、`TMF`（微台 — its own series, the numbers differ from
+`MTX`）; `TE` / `TF` are accepted by the endpoint but not verified. The execution-instrument names
+`TXF` / `MXF` map to `TX` / `MTX`. Stock futures have no institutional data (server 404). Source TAIFEX; a day's rows appear after ~15:00 TWN, so a morning
+brief on day D reads D-1's positions.
 
-# 外資淨未平倉（多 - 空）
-foreign = df[df["institutional_investors"] == "外資"].copy()
-foreign["net_oi"] = foreign["long_open_interest_balance_volume"] - foreign["short_open_interest_balance_volume"]
-foreign_net = foreign.set_index("date")["net_oi"]
-```
+Raw endpoint layout (only if you need the amounts): `GET /studio/market/twfutures/institutional/{futures_id}`
+→ 3 rows per day (自營商 / 投信 / 外資) with `long/short_deal_volume/amount`,
+`long/short_open_interest_balance_volume/amount`.
 
 ---
 

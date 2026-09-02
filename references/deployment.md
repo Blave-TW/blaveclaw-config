@@ -9,7 +9,8 @@ Strategy execution MUST be scheduled as a system cron job (Linux) or Scheduled T
 
 - Every agent wake-up burns the user's LLM credit (a full session trajectory per tick). A `*/5` agent cron costs orders of magnitude more than the identical system cron, for zero added value — the strategy script is deterministic Python and needs no reasoning to run.
 - Failure notification is already handled deterministically: `run_strategy.sh` (Type B) and `wait_for_bar.py` (Type A/C) both catch crashes and send the Telegram alert via `manager/alert_failure.py`. An agent cron adds no reliability.
-- Agent crons are reserved for work that genuinely needs reasoning: daily/weekly report narration, anomaly triage, reconcile summaries. Frequency: at most a few per day, never per tick.
+- **Blave Agent runtime (`/opt/blave-agent`): there is no agent cron.** Nothing on the machine can wake the agent on a timer — every scheduled thing is deterministic Python on the system cron, and a scheduled report is the data-only form (`lib/report_templates.py` `publish(pack)`, see AGENTS.md › Reports). Do not promise a scheduled narration and do not script a canned one.
+- **Old OpenClaw runtime (`/root/.openclaw`) only:** agent crons exist and are reserved for work that genuinely needs reasoning — anomaly triage, reconcile summaries, a report's narration. Frequency: at most a few per day, never per tick.
 - If the same strategy has both a system cron AND an agent cron that runs it, that is a bug — remove the agent cron (keep the system one) after telling the user why.
 - If the user explicitly asks you to run the strategy on every tick via agent cron, explain the credit cost first and offer the system-cron path; only proceed if they still insist.
 
