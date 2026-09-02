@@ -19,7 +19,7 @@ recompute a number the pack already carries.
         "risk":   "...the level that would prove the lead wrong...",
     })
 
-    publish(pack)                          # no narrative = data pack only
+    publish(pack)                          # no narrative = data pack only, id gets "-auto"
                                            # (a scheduled run: no LLM, no invented view)
 
 Templates: `tw_market_brief()`, `crypto_market_brief()`, `symbol_brief(symbol)`.
@@ -401,9 +401,10 @@ def tw_market_brief(date=None, headers=None, lookback_days=90):
     foot += [("src", "指數、成交值、三大法人、融資餘額:TWSE 日資料,經 Blave API。三大法人為淨買賣超金額,融資餘額為張數。")]
     blocks.append(footnote(foot))
 
-    title = f"台股大盤晨報 {date}"
-    return Pack(f"tw-market-{date.replace('-', '')}", title, "morning", "台股大盤晨報", blocks, ctx, notes,
-                meta={"period": {"from": asof[5:].replace("-", "/"), "to": date[5:].replace("-", "/")}})
+    # 標題不帶日期——側欄列本身顯示建立時間(Wei 2026-09-02 拍板);id 仍帶日期,同日重跑才會覆蓋。
+    # 資料日與晨報日不同才標 period,同日就省(印「09/02–09/02」沒有資訊)。
+    meta = {} if asof == date else {"period": {"from": asof[5:].replace("-", "/"), "to": date[5:].replace("-", "/")}}
+    return Pack(f"tw-market-{date.replace('-', '')}", "台股大盤晨報", "morning", "台股大盤晨報", blocks, ctx, notes, meta=meta)
 
 
 def _txf_night_session(headers, day, notes):
@@ -512,8 +513,7 @@ def crypto_market_brief(date=None, headers=None, symbols=("BTC", "ETH", "SOL"), 
         blocks.append(table("今日總經事件", _CAL_COLUMNS, cal, caption="台北時間;priority 1–2 的事件"))
     foot += [("src", "價格:Binance USDT 永續日 K。資金費率為 Binance 日頻,單位 %。市場方向 / 資金稀缺為 Blave 指標(z-score);頂尖交易員曝險為指標原始值。日頻指標只到前一個完整日。")]
     blocks.append(footnote(foot))
-    title = f"加密市場晨報 {date}"
-    return Pack(f"crypto-market-{date.replace('-', '')}", title, "morning", "加密市場晨報", blocks, ctx, notes)
+    return Pack(f"crypto-market-{date.replace('-', '')}", "加密市場晨報", "morning", "加密市場晨報", blocks, ctx, notes)
 
 
 # ─── template 3: 單標的晨報 ───────────────────────────────────────────────────
@@ -588,7 +588,7 @@ def _tw_symbol_brief(stock_id, date, headers, lookback_days):
     blocks.append(_levels_table(lv, last))
     foot.append(("src", "日 K 為 TWSE 未還原價,成交量為張。"))
     blocks.append(footnote(foot))
-    return Pack(f"symbol-{stock_id}-{date.replace('-', '')}", f"{stock_id} 晨報 {date}", "morning", "單標的晨報",
+    return Pack(f"symbol-{stock_id}-{date.replace('-', '')}", f"{stock_id} 晨報", "morning", "單標的晨報",
                 blocks, ctx, notes)
 
 
@@ -632,7 +632,7 @@ def _crypto_symbol_brief(sym, date, headers, lookback_days):
     blocks.append(_levels_table(lv, last))
     foot.append(("src", "價格:Binance USDT 永續日 K,最後一根為今日未收盤 bar。資金費率單位 %。爆倉 / 巨鯨 / 多空力道為 Blave 指標 z-score。"))
     blocks.append(footnote(foot))
-    return Pack(f"symbol-{label.lower()}-{date.replace('-', '')}", f"{label} 晨報 {date}", "morning", "單標的晨報",
+    return Pack(f"symbol-{label.lower()}-{date.replace('-', '')}", f"{label} 晨報", "morning", "單標的晨報",
                 blocks, ctx, notes)
 
 
@@ -682,6 +682,16 @@ def publish(pack, narrative=None, report_id=None, title=None, origin=None):
     if origin not in (None, "chat", "scheduled"):
         raise ValueError("origin must be 'chat' or 'scheduled'")
     meta = dict(pack.meta)
-    meta["origin"] = origin or ("chat" if any(v.strip() for v in narrative.values()) else "scheduled")
-    return write_report(report_id or pack.report_id, title or pack.title, out,
+    narrated = any(v.strip() for v in narrative.values())
+    meta["origin"] = origin or ("chat" if narrated else "scheduled")
+    # 純數據包用自己的 id(-auto):排程版同一天跑,不能把早上那份有判讀的蓋掉
+    # (29026 實測:cron 首跑覆蓋了對話產的 tw-market-20260902)。明給 report_id 就照給。
+    if report_id is None:
+        report_id = pack.report_id if narrated else pack.report_id + "-auto"
+    path = write_report(report_id, title or pack.title, out,
                         type=pack.type, report_type=pack.report_type, meta=meta)
+    # 說給看工具輸出的 agent 聽:檔案幾秒內會被 uploader 搬到 reports/sent/,在 reports/ 找不到
+    # 是正常的,不要再 ls / find 去確認(實測每次都多花 3–4 步)。
+    print(f"[report] {os.path.basename(path)} written — the uploader moves it to reports/sent/ within "
+          "seconds and it appears in the workspace sidebar shortly. Nothing to check; reply now.")
+    return path

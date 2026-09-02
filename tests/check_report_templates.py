@@ -52,7 +52,8 @@ def walk_numbers(o):
 for name, pack in (("tw", T.tw_market_brief("2026-09-02", H)), ("crypto", T.crypto_market_brief("2026-09-02", H)),
                    ("2330", T.symbol_brief("2330", "2026-09-02", H)), ("btc", T.symbol_brief("BTC", "2026-09-02", H))):
     for nar in (NAR, None):
-        path = T.publish(pack, nar, report_id=pack.report_id + ("" if nar else "-sched"))
+        path = T.publish(pack, nar)
+        check(os.path.basename(path) == pack.report_id + ("" if nar else "-auto") + ".json", f"{name}: {'有判讀' if nar else '純數據包'} id = {os.path.basename(path)[:-5]}")
         doc = json.load(open(path)); b = doc["blocks"]; types = [x["type"] for x in b]
         tag = f"{name}{'+narrative' if nar else ' data-only'}"
         check(types[0] == "meta" and types.count("meta") == 1, f"{tag}: meta 唯一且第一")

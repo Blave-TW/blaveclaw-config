@@ -107,7 +107,7 @@ from lib.report_templates import tw_market_brief, crypto_market_brief, symbol_br
 
 pack = tw_market_brief()                 # today (Taipei); headers come from the workspace .env
 print(pack.describe())                   # every figure the pack carries, one line each — cite these
-#   [tw-market-20260902] 台股大盤晨報 2026-09-02
+#   [tw-market-20260902] 台股大盤晨報          ← title has no date: the sidebar row shows when it was made
 #     加權指數: 46,948.72(+1.78%),20 日高 46,948.72
 #     三大法人: 外資 +267.0 億(昨 -144.0 億)、投信 +131.0 億、自營 +163.0 億、合計 +561.0 億
 #     外資期貨淨多單: +12,300 口(+2,500 口,09-01)
@@ -131,11 +131,17 @@ publish(pack, narrative={
   cap (`pack.slots`); `publish` raises past it — cut, do not summarise.
 - **Scheduled run = `publish(pack)` with no narrative** (data-only, `origin: scheduled`). The
   runtime has no timer that wakes the agent, so a cron job cannot carry a judgement; a canned
-  sentence in a script is a view nobody formed. Report ids are date-stamped
-  (`tw-market-20260902`), so a re-run the same day overwrites rather than duplicates.
+  sentence in a script is a view nobody formed. Ids are date-stamped and the data-only form
+  gets an `-auto` suffix (`tw-market-20260902-auto`), so a scheduled run never overwrites the
+  narrated report you produced in chat the same day; re-running the same form the same day
+  overwrites itself.
 - `pack.notes` lists what the source did not have (e.g. 期貨法人 not published yet, no night
   bars); the corresponding block is simply absent. Say so in the narrative if it matters;
   never fill the gap with a number.
+
+Run it from the workspace root so `lib` imports: `python3 -c '…'` from `/opt/blave-agent/workspace`, or
+`PYTHONPATH=/opt/blave-agent/workspace python3 tmp/make_brief.py` — `python3 tmp/x.py` alone puts `tmp/` on
+`sys.path`, not the workspace, and `from lib.report_templates import …` fails (seen on 29026, three retries).
 
 Headers, if you need `lib.data` outside a template: `headers_from_env()` in the same module
 reads `blave_api_key` / `blave_secret_key` from the workspace `.env` (see `references/lib.md`).
