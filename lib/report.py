@@ -44,6 +44,7 @@ report never appeared or you suspect it was refused:
 import json
 import os
 import re
+import shutil
 import time
 
 # The uploader scans $BLAVE_AGENT_WORKSPACE/reports, so that env var wins when it
@@ -160,6 +161,151 @@ def write_report(report_id, title, blocks, type="research", report_type=None,
             pass
         raise
     return path
+
+
+JOBS_DIR = os.path.join(WORKSPACE, "report_jobs")
+_JOB_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
+_CRON_FIELD_RE = re.compile(r"[0-9*,/-]+")
+_CRON_RANGES = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+
+
+def _check_cron(cron):
+    """The 5 normalised fields, or raise ValueError. Same grammar the runtime
+    evaluates (numbers, `*`, ranges, lists, `/step`; minute 0–59, hour 0–23, day 1–31,
+    month 1–12, weekday 0–7) — a registration that passes here shows up with a real
+    next-run time instead of as a broken file the user can only delete."""
+    fields = cron.split() if isinstance(cron, str) else []
+    if len(fields) != 5 or not all(_CRON_FIELD_RE.fullmatch(f) for f in fields):
+        raise ValueError(f"cron {cron!r} must be 5 fields of [0-9*,/-] (minute hour dom month dow)")
+    for field, (lo, hi) in zip(fields, _CRON_RANGES):
+        for part in field.split(","):
+            step = 1
+            if "/" in part:
+                part, step_s = part.split("/", 1)
+                if not step_s.isdigit() or int(step_s) < 1:
+                    raise ValueError(f"cron {cron!r}: bad step in {field!r}")
+                step = int(step_s)
+            if part == "*":
+                continue
+            bounds = part.split("-", 1) if "-" in part else [part]
+            if not all(b.isdigit() for b in bounds):
+                raise ValueError(f"cron {cron!r}: bad value {part!r} in {field!r}")
+            a, b = int(bounds[0]), int(bounds[-1])
+            if a < lo or b > hi or a > b:
+                raise ValueError(f"cron {cron!r}: {part!r} outside {lo}–{hi} in {field!r}")
+    return fields
+
+
+def _write_text_atomic(path, text):
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def register_schedule(id, title, prompt, cron, human, script, enabled=True):
+    """Register (or update) a scheduled report: writes `report_jobs/<id>/run.py` and
+    `job.json`. Returns the job directory. The runtime installs the schedule from
+    that file, runs the script, records each run and reports the list to the web —
+    never touch crontab / schtasks yourself.
+
+    id      `[a-z0-9][a-z0-9-]{0,39}`, a slug (`perf-4h`, `tsmc-morning`); same id =
+            update (keeps `created_at`, bumps `updated_at`, clears any pending edit).
+    title   1–80 chars, the list row.
+    prompt  1–2000 chars — the user's own words, verbatim, not your rewrite; the
+            web shows it back to them as the report's description.
+    cron    standard 5-field cron in this machine's local time (no `@daily`, no
+            seconds). Windows only runs a subset — see references/reports.md §8.
+    human   1–60 chars, the schedule in words (「每 4 小時」「每個交易日 08:30」);
+            the only form the user ever sees, so make it match the cron exactly.
+    script  the full text of run.py. It runs like a scheduled strategy: cwd is the
+            workspace, every `BLAVE_*` variable stripped, no machine token; it
+            publishes by writing into `reports/` (write_report / templates
+            `publish(pack)`), and writes nothing when there is nothing to report.
+    """
+    if not isinstance(id, str) or not _JOB_ID_RE.fullmatch(id):
+        raise ValueError(f"job id {id!r} must match [a-z0-9][a-z0-9-]{{0,39}}")
+    for name, value, cap in (("title", title, 80), ("prompt", prompt, 2000), ("human", human, 60)):
+        if not isinstance(value, str) or not 1 <= len(value) <= cap:
+            raise ValueError(f"{name} must be a string of 1–{cap} characters")
+    fields = _check_cron(cron)
+    if not isinstance(script, str) or not script.strip():
+        raise ValueError("script must be the full text of run.py")
+    if not isinstance(enabled, bool):
+        raise ValueError("enabled must be True or False")
+
+    job_dir = os.path.join(JOBS_DIR, id)
+    os.makedirs(job_dir, exist_ok=True)
+    now = int(time.time())
+    created_at = now
+    try:
+        with open(os.path.join(job_dir, "job.json"), encoding="utf-8") as f:
+            prev = json.load(f)
+        if (isinstance(prev, dict) and isinstance(prev.get("created_at"), int)
+                and not isinstance(prev["created_at"], bool)):
+            created_at = prev["created_at"]
+    except (OSError, ValueError):
+        pass
+    _write_text_atomic(os.path.join(job_dir, "run.py"), script)
+    doc = {"id": id, "title": title, "prompt": prompt,
+           "schedule": {"human": human, "cron": " ".join(fields)},
+           "enabled": enabled, "created_at": created_at, "updated_at": now, "pending": None}
+    _write_text_atomic(os.path.join(job_dir, "job.json"),
+                       json.dumps(doc, ensure_ascii=False, indent=2) + "\n")
+    return job_dir
+
+
+def list_schedules():
+    """Every registered job, for answering 「我有哪些定期報告」: the job.json fields
+    plus `last_run` (the last line of the runtime's runs.jsonl, or None). A job whose
+    job.json is unreadable comes back as `{"id", "error"}`."""
+    try:
+        names = sorted(os.listdir(JOBS_DIR))
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        d = os.path.join(JOBS_DIR, name)
+        if not os.path.isdir(d):
+            continue
+        try:
+            with open(os.path.join(d, "job.json"), encoding="utf-8") as f:
+                doc = json.load(f)
+            if not isinstance(doc, dict):
+                raise ValueError("not an object")
+        except (OSError, ValueError) as e:
+            out.append({"id": name, "error": f"bad job.json: {e}"})
+            continue
+        doc["last_run"] = None
+        try:
+            with open(os.path.join(d, "runs.jsonl"), encoding="utf-8") as f:
+                lines = [ln for ln in f.read().splitlines() if ln.strip()]
+            if lines:
+                doc["last_run"] = json.loads(lines[-1])
+        except (OSError, ValueError):
+            pass
+        out.append(doc)
+    return out
+
+
+def remove_schedule(id):
+    """Delete a job (registration, script and run history). True if it existed.
+    Already-published reports are untouched. Use this when the user asks in chat;
+    the web's own delete button does not come through here."""
+    if not isinstance(id, str) or not _JOB_ID_RE.fullmatch(id):
+        raise ValueError(f"job id {id!r} must match [a-z0-9][a-z0-9-]{{0,39}}")
+    d = os.path.join(JOBS_DIR, id)
+    if not os.path.isdir(d):
+        return False
+    shutil.rmtree(d)
+    return True
 
 
 def status(report_id):

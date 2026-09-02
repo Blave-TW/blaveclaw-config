@@ -440,3 +440,80 @@ Never invent a mechanism to explain a number you have not verified, never presen
 as an observation, and never firm up a hedge to make the report read stronger. A confident
 sentence with nothing under it is a worse failure than a shallow one: the shallow report wastes
 the reader's time, the fabricated one loses them money. Every figure stays real or labelled.
+
+## 8. Scheduled reports — a job directory, not a cron line
+
+A recurring report is **one directory plus one registration file**. You write the script and
+the registration; the runtime owns the schedule (it installs, pauses and removes the crontab
+line / scheduled task itself), runs the script, records every run and reports the list to the
+web, where the user can pause, resume, run now and delete without you. **Never touch crontab
+or schtasks for a report.** `lib.report.register_schedule` writes both files correctly:
+
+```python
+from lib.report import register_schedule, list_schedules, remove_schedule
+
+register_schedule(
+    "perf-4h",                                   # id: [a-z0-9][a-z0-9-]{0,39}, a slug
+    "每 4 小時運行狀況",                          # title, 1–80
+    "每 4 小時給我一份各策略運行狀況：倉位、當日損益、最近訊號、有沒有錯誤。",  # the user's words, verbatim
+    "0 */4 * * *",                               # cron, 5 fields, this machine's local time
+    "每 4 小時",                                  # the schedule in words — the only form the user sees
+    script,                                      # full text of run.py
+)
+list_schedules()        # every job + its last run — for 「我有哪些定期報告」
+remove_schedule("perf-4h")   # when the user asks you in chat to delete one
+```
+
+```
+workspace/report_jobs/<id>/
+  job.json      the registration — exists = registered, deleted = cancelled
+  run.py        your script
+  runs.jsonl    written by the runtime: one line per run, read-only for you
+  run.log       stdout + stderr of the last run, read-only for you
+```
+
+`job.json` (what `register_schedule` writes; the file is the contract, the helper is a
+convenience):
+
+```json
+{"id": "perf-4h", "title": "每 4 小時運行狀況",
+ "prompt": "每 4 小時給我一份各策略運行狀況：倉位、當日損益、最近訊號、有沒有錯誤。",
+ "schedule": {"human": "每 4 小時", "cron": "0 */4 * * *"},
+ "enabled": true, "created_at": 1756800000, "updated_at": 1756800000, "pending": null}
+```
+
+- Same id again = update. `register_schedule` keeps `created_at`, bumps `updated_at` and
+  sets `pending` back to `null` — that is how the web learns an edit has landed, so always
+  re-register through it rather than editing the file by hand. At most 20 jobs per machine.
+- `prompt` is the user's own request, not your rewrite; the web shows it back as the
+  report's description and hands it to you again when they edit it.
+- `schedule.cron` is standard 5-field cron in the machine's local time — no `@daily`,
+  no seconds field, no month/weekday names. The web never displays the cron; it displays
+  `schedule.human` and the next run time the runtime computes from the cron, which is how a
+  mis-parse becomes visible — so restate the schedule when you register it (AGENTS.md).
+- **Windows machines** only run this subset: `*/N * * * *` with N in
+  1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30; `M */N * * *` with N in 1, 2, 3, 4, 6, 8, 12 (steps
+  that divide the hour / day — for any other N the task scheduler counts from creation time
+  and the next-run time shown to the user would be wrong); `M H * * *`; `M H * * D` (one
+  weekday digit); `M H D * *`. Anything else (`1-5` weekday ranges, `9,18` lists, `*/7`) is
+  not installed and shows as an error in the user's list — split it into several jobs or
+  pick the nearest expressible schedule and say so.
+
+`run.py` constraints — it runs exactly like a scheduled strategy:
+
+- cwd is the workspace; `lib/` imports work as usual.
+- Every `BLAVE_*` environment variable is stripped: no machine token, no direct API
+  call to the platform. A report reaches the platform only by landing in `reports/` —
+  `write_report(...)` or a template `publish(pack)` (§1b), with pictures in the sidecar (§5).
+- Write nothing when there is nothing to report. Exit 0 with no new `reports/*.json` is
+  recorded as `skipped`, which is the correct outcome for a signal-only job; a non-zero
+  exit or a run over 600 s is `failed` (the tail of `run.log` shows in the web, and the
+  usual failure alert fires). Do not script a fixed judgement into it — a scheduled run
+  is data-only (§1b).
+- Use date-stamped report ids (`perf-20260902-0800`) unless the re-run really should
+  overwrite the previous report.
+
+When the user edits a job from the web you receive 「請修改定期報告「{title}」（id：{id}）。
+新的描述：「…」。新的週期：「…」…」: change `run.py` and/or the schedule accordingly, call
+`register_schedule` again with the same id, and restate the parsed schedule. Finish it in
+that turn — the web shows a waiting state until the re-registration lands.
