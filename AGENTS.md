@@ -80,7 +80,7 @@ Everything else (screener, grid, arbitrage, one-off execution, alert bot)?
 
 If unsure between A and C: Type A has ONE symbol and ONE position (long/short/flat). Type C has N symbols and a weight vector that sums to ≤ 1.
 
-**Type A:** uses `_add_indicators`, `fetch_data`, `compute_signals` three-layer architecture. Long AND short strategies require FOUR independent thresholds + stateful loop — see `references/strategy-code.md`.
+**Type A:** uses `_add_indicators`, `fetch_data`, `compute_signals` three-layer architecture. Long AND short strategies require FOUR independent thresholds + `lib.strategy.threshold_position` — see `references/strategy-code.md`.
 
 **FEE must reflect the real market — never 0, never the template placeholder.** Replace `TEMPLATE_A.py`'s `FEE = 0.0005` with a rate you have verified for the actual symbol/exchange (Taiwan index futures: use the per-instrument TXF/MXF/TMF cost table in `references/lib.md` — 0.03% is a conservative ceiling that overtaxes 1m strategies; Binance spot/perp taker ≈ 0.04–0.1%); never copy `FEE` from another strategy without checking it. `FEE = 0` silently overstates every return and Sharpe number — treat it as a bug.
 

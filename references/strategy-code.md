@@ -202,38 +202,24 @@ SHORT_TH = -0.8   # enter short  when it falls below this
 
 **Why not two?** Collapsing long-exit and short-entry into one `exit_th` (e.g. `signal[x < exit_th] = -1.0`) removes the flat state entirely — the book is *always* long or short and flips directly at one level. That couples two unrelated risk decisions, eliminates any neutral zone, and makes the backtest flip on every minor oscillation around that single level. The four-threshold form gives each side its own entry and its own exit, with a flat hold-band in the middle.
 
-**You MUST use a stateful loop — vectorized assignment is WRONG here.**
+**Two sides on → position is stateful; use `lib.strategy.threshold_position`, never a vectorized assignment.**
 
 The naive `signal[x>buy]=1; signal[x<short]=-1; signal[(x>cover)&(x<sell)]=0` (then ffill) is **buggy**. With one side only, the exit is a half-line (`x < exit_th` → 0) that price can never skip — vectorized is fine. But with two sides the flat exit must be a *bounded band* `(cover_th, sell_th)` (a half-line would overwrite the opposite entry). An exit is a **threshold crossing**, not "landing inside a band": if price gaps over the band in a single bar (e.g. from short territory straight into the long dead zone), `ffill` keeps holding the **stale** position instead of exiting. The dead zones can no longer be told apart from a carried-over position. Correct exit logic requires the current position, i.e. **state**:
 
 ```python
 def compute_signals(df, buy_th=BUY_TH, sell_th=SELL_TH,
                      cover_th=COVER_TH, short_th=SHORT_TH):
-    import pandas as pd, numpy as np
-    x   = df['indicator'].to_numpy()
-    pos = 0                                  # current position: +1 / 0 / -1
-    out = np.zeros(len(x))
-    for i, xi in enumerate(x):
-        if np.isnan(xi):
-            out[i] = pos; continue
-        # 1) exit first — crossing back out of a position's dead zone
-        if pos == 1 and xi < sell_th:   pos = 0     # exit long → flat
-        elif pos == -1 and xi > cover_th: pos = 0   # exit short → flat
-        # 2) then entry (allows a same-bar flip flat→long/short after an exit)
-        if pos == 0:
-            if   xi > buy_th:   pos = 1
-            elif xi < short_th: pos = -1
-        out[i] = pos
-    return pd.Series(out, index=df.index)
+    from lib.strategy import threshold_position
+    return threshold_position(df['indicator'], buy_th, sell_th, cover_th, short_th)
 ```
 
 Dead zones now behave correctly: a long is **held** through `(sell_th, buy_th)` and only exits once `x` actually crosses *below* `sell_th` — no matter how far it gaps; a short is held through `(short_th, cover_th)` and exits only on crossing *above* `cover_th`. A big gap from one side past the flat band straight to the opposite entry flips in a single bar (exit then enter), which the band-landing version silently misses.
 
-The loop is pure (no I/O) and runs on a daily series in milliseconds — fast enough for `scan_grid`'s repeated calls.
+`threshold_position` is the per-bar state machine (exit checked before entry, NaN holds). It is a Python loop — ~0.5 s per 390k bars (5-min since 2023, measured on a Lightsail medium) — which is nothing once per backtest. Never hand-write the loop in `strategy.py`; call the lib. For scans see *Scanning four thresholds* below: with one side pushed out of range the lib takes a vectorized path, so a scan cell costs milliseconds, not the loop.
 
 **Scanning any pair — the flow is always `scan_grid → find_plateau → (on_edge → extend_axis → scan_grid → find_plateau, once) → write_scan → plot_heatmap`** (`write_scan` feeds the web 穩健參數 tab; details and the two web prompts in `references/lib.md` › *Parameter scan workflow*).
 
-**Grid size — three principles** (Pardo's plateau-search practice / industry convention): **10–20 values per axis** (the `nice_grid` / `percentile_thresholds` defaults: ≈ 15 → 100–400 combos, ≤ 10 s for any strategy — scan time is linear in combos × bars, 40×40 on two years of 5-min bars is ~45 s); **the step must have trading meaning** (whole bars for windows, a threshold move a trader would notice — a finer step makes neighbours differ by noise and the plateau's neighbourhood mean degenerate into a single cell); **coarse first, then fine** (zoom a second scan into the plateau's neighbourhood only if it needs resolving). 40 per axis is the hard cap.
+**Grid size — three principles** (Pardo's plateau-search practice / industry convention): **10–20 values per axis** (the `nice_grid` / `percentile_thresholds` defaults: ≈ 15 → 100–400 combos — scan time is linear in combos × bars × the cost of ONE `compute_signals` call: vectorized signals (`hysteresis`, rolling/where/ffill) run 100–400 cells in ≤ 10 s on any bar count, 40×40 on two years of 5-min bars in ~45 s; a per-bar Python loop inside `compute_signals` costs ~0.5 s per cell on 390k bars (minutes per grid) — vectorize before widening the grid, never the other way round); **the step must have trading meaning** (whole bars for windows, a threshold move a trader would notice — a finer step makes neighbours differ by noise and the plateau's neighbourhood mean degenerate into a single cell); **coarse first, then fine** (zoom a second scan into the plateau's neighbourhood only if it needs resolving). 40 per axis is the hard cap.
 
 **Plateau on a grid border → extend that side once, rescan, then `write_scan`.** A border cell's neighbourhood is truncated and the real optimum may lie outside the range. After `find_plateau`, `on_edge(best_idx, grid.shape)` lists the borders hit (`(axis, side)`); `extend_axis(vals, side)` adds 5 cells beyond that end at the same step (int axes stay int, never past 40; `floor=1` for bar counts). Rerun `scan_grid → find_plateau` on the extended axes and write that grid. **One extension only** — it is the same scan and the same iteration under the Iteration Brakes; a plateau still on the border after it is reported as such.
 
@@ -244,6 +230,8 @@ The loop is pure (no I/O) and runs on a daily series in milliseconds — fast en
 1. **Long scan** — sweep `buy_th` × `sell_th` with the short side turned OFF → `heatmap_long.png`, pick the best long pair.
 2. **Short scan** — sweep `short_th` × `cover_th` with the long side turned OFF → `heatmap_short.png`, pick the best short pair.
 3. Put all four into `strategy.py`, run the full long+short backtest to verify.
+
+With one side off, the position is a one-sided hysteresis (a half-line exit, exactly expressible as `where` + `ffill`). `threshold_position` detects a side whose entry no bar ever reaches and takes that vectorized path itself (`lib.strategy.hysteresis`, ~5 ms per call on 390k bars), so the ±1e9 idiom in the full example below is what makes a per-side scan fast — a hand-written loop in `compute_signals` would pay ~0.5 s per cell instead. Anything `compute_signals` does after the position (vol scaling, filters, `exec_at_close`) is kept, because the scan still goes through `compute_signals`.
 
 **Choosing the scan ranges — do NOT use `percentile_thresholds` for a contrarian/mean-reversion strategy.** That helper splits the distribution into entry=upper-half / exit=lower-half, which hard-codes the assumption "exit on the opposite side of zero from entry" (fine for momentum). A contrarian long often takes profit on a *positive* indicator reading (fear normalising, not flipping to greed), so its best exit lives on the **same side as entry** — a region `percentile_thresholds` never samples. Instead derive the span from the indicator's own distribution and let the exit sweep **both sides**:
 

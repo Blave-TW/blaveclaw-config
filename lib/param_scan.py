@@ -9,8 +9,9 @@ constants) → scan_grid → find_plateau → (on_edge → extend_axis → scan_
 once) → write_scan → plot_heatmap
 
 Grid size: every axis targets ~15 cells (GRID_N; ≈ 11–21 after nice-step rounding), i.e.
-100–400 combos — ≤ 10 s for any strategy (scan time is linear in combos × bars; 40×40 on
-two years of 5-min bars is ~45 s). A finer step has no trading meaning, and the 3×3
+100–400 combos — ≤ 10 s with a vectorized compute_signals (scan time is linear in
+combos × bars × one signal pass; 40×40 on two years of 5-min bars is ~45 s; a per-bar
+Python loop in compute_signals costs ~0.5 s per cell on 390k bars — vectorize first). A finer step has no trading meaning, and the 3×3
 neighbourhood mean degenerates into a single cell when neighbours differ by noise only.
 """
 
@@ -30,7 +31,7 @@ from matplotlib.patches import Rectangle
 SCAN_MAX_AXIS = 40
 
 # Default target cells per axis (nice_grid n / percentile_thresholds n_parts derive from it).
-# 15 → 100–400 combos per grid, ≤ 10 s for any strategy; finer steps have no trading meaning
+# 15 → 100–400 combos per grid (≤ 10 s when compute_signals is vectorized); finer steps have no trading meaning
 # and turn the plateau's neighbourhood mean into a single-cell pick. 40 stays the hard cap.
 GRID_N = 15
 
@@ -86,7 +87,7 @@ def nice_grid(lo, hi, n=GRID_N, current=0.0, integer=False, step=None, max_axis=
                the step is (hi-lo)/(n-1) rounded to the nearest {1, 2, 2.5, 5}×10^k.
                Actual length differs a little (nice step + the ends rounded outward, at
                most one extra cell each side). 10–20 cells per axis is the sweet spot:
-               100–400 combos, ≤ 10 s for any strategy, and every neighbour is a step
+               100–400 combos (≤ 10 s with vectorized signals), and every neighbour is a step
                that means something in trading terms — a finer grid only makes the
                plateau's neighbourhood mean collapse into a single cell.
     current  : the constant the strategy file holds RIGHT NOW (anchor). Default 0.
@@ -219,12 +220,16 @@ def scan_grid(data, compute_signals_fn, row_vals, col_vals,
 
     for i, rv in enumerate(row_vals):
         for j, cv in enumerate(col_vals):
+            # an explicit valid_fn is checked BEFORE compute_signals — an invalid
+            # combo (entry ≤ exit) used to pay the full signal pass and then be
+            # dropped; that is ~40% of a threshold grid. Without one, the default
+            # depends on the result's type (Type A: row > col; Type C: all valid).
+            if valid_fn is not None and not valid_fn(rv, cv):
+                continue
             result = compute_signals_fn(data, **{row_param: rv, col_param: cv})
 
             # ── Type C: (weights_mat, price_df[, exec_at_close]) ──────────────
             if isinstance(result, tuple) and isinstance(result[0], np.ndarray):
-                if valid_fn is not None and not valid_fn(rv, cv):
-                    continue
                 weights_orig, price_df, *_opt = result
                 w_orig = weights_orig[warmup:]
                 pf     = price_df.iloc[warmup:]
@@ -244,8 +249,7 @@ def scan_grid(data, compute_signals_fn, row_vals, col_vals,
 
             # ── Type A: pd.Series or (pd.Series, exec_at_close) ──────────────
             else:
-                _valid_fn = valid_fn if valid_fn is not None else (lambda r, c: r > c)
-                if not _valid_fn(rv, cv):
+                if valid_fn is None and not rv > cv:
                     continue
                 if isinstance(result, tuple):
                     sig, settle = result[0], result[1]
