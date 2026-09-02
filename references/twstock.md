@@ -154,7 +154,7 @@ df = fetch_twstock_ohlcv('2330', '5m', headers, start='2025-01-01', end='2025-06
 import requests
 
 def fetch_twstock_kbar(stock_id: str, start: str, end: str, headers: dict) -> pd.DataFrame:
-    """最多 31 天，資料從 2019-01-01 起。欄位：date, minute, open, high, low, close, volume"""
+    """最多 31 天，資料從 2019-01-01 起（與 minute/ohlcv 同一份資料）。欄位：date, minute, stock_id, open, high, low, close, volume"""
     r = requests.get(
         f"https://api.blave.org/studio/market/twstock/kbar/{stock_id}",
         params={"start": start, "end": end},
@@ -171,10 +171,12 @@ def fetch_twstock_kbar(stock_id: str, start: str, end: str, headers: dict) -> pd
 ```
 
 **注意事項：**
-- `minute` 格式為 `HH:MM:SS`（例如 `09:00:00`）
-- 一天約 266 筆（09:00–13:25，每分鐘一筆）
+- `minute` 格式為 `HH:MM:SS`（例如 `09:00:00`），為該分鐘 bar 的起點標籤
+- 一天最多 271 筆（09:00–13:30，含 13:30 收盤撮合那根）；冷門股只有有成交的分鐘才有列
 - 非交易日（週末、假日）自動略過，不返回資料
 - 超過 31 天會回 400 錯誤；長期回測需分段呼叫
+- 資料與 `minute/ohlcv` 同一份（伺服器本地分線庫，不打上游）：涵蓋股票以 `/studio/market/twstock/minute/ohlcv/symbols` 為準，不在名單內或已下市的代碼回 400
+- 當日（盤中）資料為暫定值，16:10 後才換成官方分 K；回測請用昨日以前的資料
 
 ---
 
