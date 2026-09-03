@@ -132,6 +132,13 @@ script cannot refresh faster than once a minute and would draw a line, not candl
 
 ## 3. Machine widget scripts
 
+**`lib` must be importable from `run.py`.** The runtime runs a job as
+`python3 report_jobs/<id>/run.py` from the workspace, and Python puts the script's own
+directory on `sys.path`, not the workspace — a bare `from lib.watch import write_data` fails
+with `ModuleNotFoundError`. `add_widget(script=…)` pins the workspace for you (it prepends
+`sys.path.insert(0, os.getcwd())` unless your script already does). If you write `run.py`
+by hand, add those two lines yourself — the examples below assume `add_widget`.
+
 `run.py` runs like a scheduled strategy: cwd = workspace, every `BLAVE_*` variable stripped
 (no machine token), 600 s timeout, on a Starter machine of 2 vCPU / 4 GB shared with the
 user's live strategies. It is **deterministic code — never an LLM call, never a chat turn**,
@@ -315,10 +322,13 @@ from lib.portfolio import load_all_states
 from lib.report_templates import TPE          # 台北時區:機器的系統時鐘是 UTC
 from lib.watch import write_data
 
-states = load_all_states()                      # {name: state_dict}, local files only
+states = load_all_states()                      # {name: state_dict}; only strategies that have run
+names = sorted(d for d in os.listdir("strategies")            # skip templates, the runner's own
+               if os.path.isdir(os.path.join("strategies", d))  # report-* work dirs, __pycache__
+               and not d.startswith(("TEMPLATE", "report-", "_", ".")))
 rows = []
-for name in sorted(states):
-    st = states[name] or {}
+for name in names:                              # every strategy, not just the ones with state:
+    st = states.get(name) or {}                 # a strategy that never ran shows "—", not nothing
     path = f"strategies/{name}/state.json"
     try:                                         # live runs rewrite state every bar,
         mt = os.path.getmtime(path)              # so mtime = last successful run
@@ -342,7 +352,7 @@ add_widget("strat-health", "block", "策略運行狀況", block_type="table",
            refresh_cron="*/15 * * * *", refresh_human="每 15 分鐘", script=script)
 ```
 
-Zero fetches — it reads `strategies/*/state.json` relative to the workspace root (the runner
+Zero fetches — it lists `strategies/*/` and reads each `state.json` relative to the workspace root (the runner
 executes jobs with `cwd` = workspace, so the glob resolves) on the machine, so it costs no API quota and
 works when the network is down. It is the one card that says something *broke*, which is why it
 is worth offering early.
@@ -366,7 +376,7 @@ from lib.data import fetch_twstock_quote_batch
 from lib.report_templates import headers_from_env
 from lib.watch import write_data
 
-LEVELS = {"2330": ("跌破", 2300.0), "2317": ("突破", 235.0), "2454": ("跌破", 1180.0)}
+LEVELS = {"2330": ("跌破", 2300.0), "2317": ("突破", 235.0), "2454": ("跌破", 4000.0)}
 
 hdrs = headers_from_env()
 quotes = fetch_twstock_quote_batch(list(LEVELS), hdrs)     # one call, ~10 s snapshot

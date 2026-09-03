@@ -302,12 +302,38 @@ def _read_watch_job(id):
     return job if job is not None and job.get("kind") == "watch" else None
 
 
+# The runtime runs a job as `python3 report_jobs/<id>/run.py` from the workspace, and
+# Python puts the *script's* directory on sys.path — not the cwd — so a bare
+# `from lib…` raises ModuleNotFoundError (seen on 29026: every §5 example failed on
+# first run). Pin the workspace before the user's script; a script that already does
+# it is left alone.
+_PATH_BOOTSTRAP = ("import os as _os, sys as _sys\n"
+                   "_sys.path.insert(0, _os.getcwd())  # lib/ lives in the workspace, not next to run.py\n")
+
+
+def _with_workspace_on_path(script):
+    # "already pinned" means a real statement, not a comment mentioning sys.path
+    # (§3 of the reference says add_widget does this — an agent will write that down)
+    if _PATH_BOOTSTRAP in script or re.search(r"^\s*sys\.path\.(insert|append)\(", script, re.M):
+        return script
+    # `from __future__` must stay the first statement — slot the bootstrap after it
+    lines = script.splitlines(keepends=True)
+    i = 0
+    while i < len(lines) and (not lines[i].strip() or lines[i].lstrip().startswith("#")
+                              or lines[i].startswith("from __future__")):
+        i += 1
+    if i and any(l.startswith("from __future__") for l in lines[:i]):
+        return "".join(lines[:i]) + _PATH_BOOTSTRAP + "".join(lines[i:])
+    return _PATH_BOOTSTRAP + script
+
+
 def _register_watch_job(id, title, refresh, block_type, script):
     """`report_jobs/<id>/` through lib.report.register_schedule (same cron grammar,
     same created_at / updated_at / pending handling), then tag the registration with
     `kind: "watch"` and the widget's block type. The runtime ignores fields it does
     not know, so a runtime without watch support installs it as a plain job."""
-    job_dir = register_schedule(id, title, title, refresh["cron"], refresh["human"], script)
+    job_dir = register_schedule(id, title, title, refresh["cron"], refresh["human"],
+                                _with_workspace_on_path(script))
     doc = _read_job(id) or {}
     doc.update({"kind": "watch", "widget_id": id, "block_type": block_type})
     _write_text_atomic(_job_path(id), json.dumps(doc, ensure_ascii=False, indent=2) + "\n")
