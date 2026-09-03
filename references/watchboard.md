@@ -83,20 +83,29 @@ scheduled report. Fix the call; nothing was written.
 |---|---|---|---|---|
 | `price` | stream | 2×2 (default 4×2) | none | last price, change vs. previous close / settlement (crypto: previous UTC day's close), day high-low, timestamp; futures show the session. Taiwan symbols, or crypto with `venue="binance"` |
 | `kline` | stream | 4×3 (default 6×3) | `interval`: `1m` `5m` `15m` `60m` `1d` | candlestick chart; history from the platform, the forming bar from ticks (Taiwan) or the Binance kline stream (crypto with `venue="binance"`) |
-| `book` | stream | 2×3 | none | 5-level order book — **`TXF` / `MXF` only** |
-| `watchlist` | stream | 3×2 | none; `symbols` 1–20 | table of symbol, last, change %, time |
-| `block` | machine | 2×2; chart-like `block_type` 4×3 | `block_type` | one report block, drawn by the report renderer from your `write_data` payload. Chart-like = `line_chart` `drawdown` `heatmap` `bar_chart` `histogram` `box` `scatter` `image` (min and default 4×3); `kpi_row` `metric_table` `table` `text` `quote` `code` `callout` stay 2×2 |
+| `book` | stream | 2×3 (default 3×3) | none | 5-level order book — Taiwan futures `TXF` / `MXF`, or a crypto perpetual with `venue="binance"`. Stocks have no book |
+| `watchlist` | stream | 3×2 (default 4×3) | none; `symbols` 1–20 | table of symbol, last, change %, time. One watchlist beats three `price` tiles: same information, fewer cells, fewer stream slots |
+| `block` | machine | 2×2; chart-like `block_type` 4×3 | `block_type` | one report block, drawn by the report renderer from your `write_data` payload. Chart-like = `line_chart` `drawdown` `heatmap` `bar_chart` `histogram` `box` `scatter` `image` (min 4×3, default 6×3); `kpi_row` and `table` default 6×3, `callout` 4×2, the rest stay 2×2 |
+
+**The minimum is a floor, not a default.** Below it the card cannot draw its content; the
+defaults above are the sizes that stay readable on a 1440-wide screen with the chat pane open
+(canvas ≈ 750px). Omit `w`/`h` and you get the default — don't pass the minimum by hand.
+
+**`text`, `quote` and `code` are not watchboard cards.** They exist in the block catalogue
+because the report renderer is shared, but prose in a tile is a report squeezed into a grid
+cell. If the answer is a paragraph, write a report. A tile answers with a number, a table or
+a chart.
 
 - **Ids**: `[A-Za-z0-9_-]{1,32}`, unique on the board, yours to pick. A machine widget's id is
   also its `report_jobs/` directory, so it must be a slug `[a-z0-9][a-z0-9-]{0,31}`.
 - **Symbols** (stream): a stock id (4–8 letters/digits, e.g. `2330`, `00878`), the index
   `TAIEX`, or the futures `TXF` / `MXF`. `TMF` is not streamed — use `MXF` for the price.
-- **Crypto** (`price` / `kline` only): add `venue="binance"` and give `symbol` as a Binance USD-M
+- **Crypto** (`price` / `kline` / `book`): add `venue="binance"` and give `symbol` as a Binance USD-M
   perpetual — `BTC`, `BTCUSDT` or `BTC/USDT` all work; it is written uppercased with `/` removed and
   the api normalises from there. `lib/watch.py` checks the shape only (3–20 letters/digits, one
   optional `/`), never a list of what Binance trades. Each crypto widget is its own connection in
-  the browser, so keep to **at most 6 crypto widgets on a board**. `venue` on `book` / `watchlist` /
-  `block` is refused — those are Taiwan-only or machine widgets.
+  the browser, so keep to **at most 6 crypto widgets on a board**. `venue` on `watchlist` / `block` is
+  refused — a watchlist is Taiwan-only and a block is a machine widget.
 - **Sizes**: 12-column grid, `w` 1–12, `h` 1–12, at least the type's minimum (for a `block`, the
   minimum follows its `block_type`); omit `w`/`h` for the minimum. Position is never yours: the
   platform places new tiles, the user moves them.
@@ -185,6 +194,20 @@ checks one op by the name `add_widget` / `update_widget` / `remove_widget` retur
 `status("<widget id>")` checks the newest op that mentions that widget.
 
 ## 5. Worked examples
+
+**Which one to reach for.** A board is read top-down as "what needs me now → what happened to my
+money → what is the market doing → detail". When the user has not said what they want, offer them
+in this order — and stop at four or five cards. A crowded board is read by nobody.
+
+1. **A price or watchlist tile** — the one big number, zero setup, ticks by the second.
+2. **Strategy health** (`table`) — the only card that tells them something *broke*. Reads local
+   state, costs nothing.
+3. **A scanner** (`table`) — the largest single use we see on real machines, and it replaces the
+   hourly push notification people complain about.
+4. **Exposure** (`kpi_row`) — reads local state, costs nothing.
+5. **A chart** (`kline`) — confirmation, not discovery, so it comes after.
+6. **Threshold distance** (`kpi_row`) — needs the user to name a level, so you cannot offer it
+   silently, but ask: it is the one thing people hand-roll most and we cover least.
 
 ### A TXF price tile and its 5-minute chart (stream — no script)
 
@@ -279,3 +302,106 @@ Hourly is written `0 */1 * * *`: the plain `0 * * * *` is not in the Windows sub
 (`references/reports.md` §8) and would not be installed there. `0 9-14 * * 1-5` would fit
 trading hours better on Linux but is outside that subset too — pick the cadence for the
 machine you are on and say which you chose.
+
+### A `table` strategy-health widget every 15 minutes (machine)
+
+```python
+from lib.watch import add_widget
+
+script = '''
+import os, time
+from datetime import datetime
+from lib.portfolio import load_all_states
+from lib.report_templates import TPE          # 台北時區:機器的系統時鐘是 UTC
+from lib.watch import write_data
+
+states = load_all_states()                      # {name: state_dict}, local files only
+rows = []
+for name in sorted(states):
+    st = states[name] or {}
+    path = f"strategies/{name}/state.json"
+    try:                                         # live runs rewrite state every bar,
+        mt = os.path.getmtime(path)              # so mtime = last successful run
+        age = time.time() - mt
+        seen = datetime.fromtimestamp(mt, TPE).strftime("%m/%d %H:%M")
+    except OSError:
+        age, seen = None, "—"                    # never fake a time we do not have
+    pos = st.get("position")
+    rows.append({"s": name, "t": seen,
+                 "p": "—" if pos is None else f"{pos:+g}",
+                 "st": "—" if age is None else ("停更" if age > 3 * 3600 else "正常")})
+if rows:
+    write_data("strat-health", {"type": "table", "columns": [
+        {"key": "s", "label": "策略", "align": "left"},
+        {"key": "t", "label": "最後執行", "align": "left", "format": "date"},
+        {"key": "p", "label": "部位", "align": "right", "format": "number"},
+        {"key": "st", "label": "狀態", "align": "left"}],
+        "rows": rows})
+'''
+add_widget("strat-health", "block", "策略運行狀況", block_type="table",
+           refresh_cron="*/15 * * * *", refresh_human="每 15 分鐘", script=script)
+```
+
+Zero fetches — it reads `strategies/*/state.json` relative to the workspace root (the runner
+executes jobs with `cwd` = workspace, so the glob resolves) on the machine, so it costs no API quota and
+works when the network is down. It is the one card that says something *broke*, which is why it
+is worth offering early.
+
+**Where the timestamp comes from, and when it lies:** `lib/runner.py` saves state on every bar in
+live mode, so the file's mtime is the last successful run. That holds for strategies driven by
+`lib.runner.run`. A hand-written runner that only saves on a position change — or writes state
+somewhere else — will look stale when it is fine. If the user's strategies are hand-rolled, say so
+and leave the column blank rather than printing a time that means something else.
+
+### A `kpi_row` threshold-distance monitor (machine)
+
+The most hand-rolled thing on real machines, and the one this catalogue covered worst. The user
+names the levels; you write them into the script.
+
+```python
+from lib.watch import add_widget
+
+script = '''
+from lib.data import fetch_twstock_quote_batch
+from lib.report_templates import headers_from_env
+from lib.watch import write_data
+
+LEVELS = {"2330": ("跌破", 2300.0), "2317": ("突破", 235.0), "2454": ("跌破", 1180.0)}
+
+hdrs = headers_from_env()
+quotes = fetch_twstock_quote_batch(list(LEVELS), hdrs)     # one call, ~10 s snapshot
+items = []
+for sid, (side, level) in LEVELS.items():
+    q = quotes.get(sid) or {}
+    px = q.get("close")
+    if not px:
+        continue
+    gap = (px - level) / level * 100 if side == "突破" else (level - px) / level * 100
+    hit = gap >= 0                                          # +ve = past the level, −ve = short of it
+    items.append((not hit, abs(gap),                        # triggered first, then nearest
+                  {"label": f"{sid} {side} {level:,.0f}",
+                   "value": ("已觸發" if hit else f"{abs(gap):.2f}%"),
+                   "tone": "pos" if hit else "neutral"}))
+items.sort(key=lambda t: t[:2])                             # first cell renders large
+if items:
+    write_data("levels", {"type": "kpi_row", "items": [t[2] for t in items[:4]]})
+'''
+add_widget("levels", "block", "價位監控", block_type="kpi_row",
+           refresh_cron="*/5 * * * *", refresh_human="每 5 分鐘", script=script)
+```
+
+The sort is what makes the card useful: anything triggered goes first, then the nearest level —
+otherwise the big first cell shows whichever level the user happened to type first.
+`kpi_row` defaults to 6×3 here, and it must: four cells fold to two rows on a narrow canvas and
+`h=2` hides the bottom row's values entirely. Four levels is the cap — the first cell renders
+large, so put the one that matters there (the sort does that once something triggers).
+
+**Say what this is, honestly.** A machine widget runs at most once a minute, so the distance can
+be up to a minute behind. That is fine for "am I near my level"; it is not a trigger, and it is
+not the same as the price tile next to it, which ticks by the second. If the user wants to be
+*told* when it fires, that is an alert (Telegram from a strategy or a cron script), not a tile —
+a tile only shows.
+
+**Signal variant, same shape.** Watching an indicator instead of a price: fetch bars with
+`lib.data.fetch_twstock_ohlcv(sid, "1d", hdrs)` (or `fetch_kline` for crypto), compute the
+indicator, and put "指標值 vs 門檻" in `value`. Everything else is identical.

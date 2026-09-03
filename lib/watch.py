@@ -77,7 +77,7 @@ INDEX_SYMBOLS = ("TAIEX",)
 FUTURES_SYMBOLS = ("TXF", "MXF")
 INTERVALS = ("1m", "5m", "15m", "60m", "1d")
 VENUES = ("binance",)
-CRYPTO_TYPES = ("price", "kline")       # the only widgets that take a venue (contract §3.1)
+CRYPTO_TYPES = ("price", "kline", "book")  # the only widgets that take a venue (contract §3.1)
 WATCHLIST_MAX = 20
 
 # type -> (kind, min w, min h). A block widget's minimum depends on its block_type:
@@ -136,7 +136,8 @@ def _check_symbol(symbol, type):
     if symbol in FUTURES_SYMBOLS:
         return symbol
     if type == "book":
-        raise ValueError(f"book widget only supports {' / '.join(FUTURES_SYMBOLS)}, got {symbol!r}")
+        raise ValueError(f"book widget only supports {' / '.join(FUTURES_SYMBOLS)} "
+                         f"(or a crypto perpetual with venue=\"binance\"), got {symbol!r}")
     if symbol in INDEX_SYMBOLS or _STOCK_RE.fullmatch(symbol):
         return symbol
     raise ValueError(f"symbol {symbol!r} must be a stock id (4–8 letters/digits), "
@@ -166,11 +167,23 @@ def _check_crypto_symbol(symbol):
     return bare
 
 
-# Default sizes when the caller gives none: the type's minimum, except price and
-# kline (contract §3) — at 1440 wide with the chat pane open the canvas is ~750px
-# (12 cols ≈ 62px), a 3-col price card truncates its title, so price defaults to 4;
-# kline defaults to 6 so the candles have room to read.
-_DEFAULT_W = {"price": 4, "kline": 6}
+# Default sizes when the caller gives none (contract §3). The minimum is a floor —
+# below it the card cannot draw its content — and is NOT the default: measured at
+# 1440 wide with the chat pane open the canvas is only ~750px (12 cols ≈ 62px), and
+# every one of these defaults is the size at which the card stays readable there.
+# The user can still drag anything down to its minimum.
+_DEFAULT_WH = {
+    "price": (4, 2),      # a 3-col card truncates its title
+    "kline": (6, 3),      # candles need room to read
+    "book": (3, 3),       # 2×3 squeezes the volume bars to a slit and clips the spread
+    "watchlist": (4, 3),  # fits 5 rows; more than that scrolls
+}
+# block widgets default by block_type; anything not listed falls back to its minimum
+_DEFAULT_BLOCK_WH = {
+    "kpi_row": (6, 3),    # four cells fold to 2+2 on a narrow canvas and h=2 hides the values
+    "table": (6, 3),      # 5 rows is what h=3 holds
+    "callout": (4, 2),    # two lines of body text
+}
 
 
 def _check_grid(type, w, h, block_type=None):
@@ -178,8 +191,13 @@ def _check_grid(type, w, h, block_type=None):
     label = type
     if block_type in CHART_BLOCKS:
         min_w, min_h, label = CHART_MIN_W, CHART_MIN_H, f"{block_type} block"
-    w = _DEFAULT_W.get(type, min_w) if w is None else w
-    h = min_h if h is None else h
+    dw, dh = _DEFAULT_WH.get(type, (min_w, min_h))
+    if type == "block":
+        dw, dh = _DEFAULT_BLOCK_WH.get(block_type, (min_w, min_h))
+        if block_type in CHART_BLOCKS:
+            dw, dh = 6, 3
+    w = dw if w is None else w
+    h = dh if h is None else h
     for name, v, lo in (("w", w, min_w), ("h", h, min_h)):
         if not isinstance(v, int) or isinstance(v, bool) or not lo <= v <= 12:
             raise ValueError(f"{name} for a {label} widget must be an int in {lo}–12, got {v!r}")
@@ -309,12 +327,13 @@ def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None, ven
     type          `price` / `kline` / `book` / `watchlist` (stream) or `block` (machine).
     title         1–40 chars, the tile header.
     symbol        stream, all but watchlist: a stock id (4–8 letters/digits), `TAIEX`,
-                  `TXF` or `MXF`; `book` accepts only `TXF` / `MXF`. With venue="binance"
+                  `TXF` or `MXF`; `book` accepts only `TXF` / `MXF` (or a crypto
+                  perpetual with venue="binance"). With venue="binance"
                   a Binance USD-M perpetual — `BTC`, `BTCUSDT` or `BTC/USDT` — written
                   as given, uppercased, `/` and `-` removed; the api normalises the rest.
     symbols       watchlist: 1–20 symbols (same shapes as `symbol`; Taiwan only).
     interval      kline: `1m` / `5m` / `15m` / `60m` / `1d`.
-    venue         price / kline only: `"binance"` makes `symbol` a crypto symbol (contract
+    venue         price / kline / book only: `"binance"` makes `symbol` a crypto symbol (contract
                   §3.1; refused on book / watchlist / block). A crypto K-line is always
                   this widget, never a block + line_chart drawn by a script — the live
                   candles come from the platform stream.
