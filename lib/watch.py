@@ -25,6 +25,9 @@ Usage:
     add_widget("txf", "price", "台指期", symbol="TXF")                  # stream widget
     add_widget("tsmc-k", "kline", "2330 1 分 K", symbol="2330", interval="1m")
     add_widget("btc-1h", "kline", "BTC 1H", symbol="BTC", venue="binance", interval="60m")  # crypto
+    add_widget("tsmc-k5", "kline", "台積電 5 分 K", symbol="2330", interval="5m",      # price levels
+               levels=[{"price": 2300, "side": "below"}, {"price": 2450, "side": "above", "label": "前高"}])
+    update_widget("tsmc-k5", levels=[{"price": 2280, "side": "below"}])   # reset the monitor
     add_widget("risk", "block", "持倉風險",                              # machine widget
                block_type="kpi_row", refresh_cron="*/5 * * * *",
                refresh_human="每 5 分鐘", script=script_text)
@@ -76,6 +79,11 @@ _SHA_RE = re.compile(r"[0-9a-f]{64}")
 INDEX_SYMBOLS = ("TAIEX",)
 FUTURES_SYMBOLS = ("TXF", "MXF")
 INTERVALS = ("1m", "5m", "15m", "60m", "1d")
+# kline price levels (contract §3.4): at most 4 per card — more labels than that overlap
+# on a 256px-high card; monitor more prices on another card.
+LEVELS_MAX = 4
+LEVEL_SIDES = ("above", "below")
+LEVEL_LABEL_MAX = 12
 VENUES = ("binance",)
 CRYPTO_TYPES = ("price", "kline", "book")  # the only widgets that take a venue (contract §3.1)
 WATCHLIST_MAX = 20
@@ -225,6 +233,46 @@ def _check_interval(interval):
     return interval
 
 
+def _check_levels(levels):
+    """kline price levels (contract §3.4): a list of 0–4 `{price, side, label?}` dicts.
+    Returns a fresh list with `since` stamped now on every entry — the moment the monitor
+    starts; the web decides "triggered" from the bars after it. The caller never sends
+    `since`: a hand-picked time would re-trigger on old bars."""
+    if not isinstance(levels, (list, tuple)):
+        raise ValueError("levels must be a list of {'price': ..., 'side': 'above'|'below', 'label'?: ...}")
+    if len(levels) > LEVELS_MAX:
+        raise ValueError(f"at most {LEVELS_MAX} levels per kline card (got {len(levels)}) — "
+                         "labels overlap beyond that; monitor more prices on another card")
+    now = int(time.time())
+    out = []
+    for i, lv in enumerate(levels):
+        p = f"levels[{i}]"
+        if not isinstance(lv, dict):
+            raise ValueError(f"{p} must be a dict with price and side")
+        if "since" in lv:
+            raise ValueError(f"{p}.since is filled in by lib/watch.py (the moment the monitor "
+                             "starts) — never pass it")
+        extra = set(lv) - {"price", "side", "label"}
+        if extra:
+            raise ValueError(f"{p} has unknown keys {sorted(extra)}; only price, side, label")
+        price = lv.get("price")
+        if (isinstance(price, bool) or not isinstance(price, (int, float))
+                or price != price or price in (float("inf"), float("-inf")) or price <= 0):
+            raise ValueError(f"{p}.price must be a finite positive number, got {price!r}")
+        if lv.get("side") not in LEVEL_SIDES:
+            raise ValueError(f"{p}.side must be one of {', '.join(LEVEL_SIDES)} "
+                             f"(above = breakout, below = breakdown), got {lv.get('side')!r}")
+        clean = {"price": price, "side": lv["side"], "since": now}
+        if "label" in lv:
+            label = lv["label"]
+            label = label.strip() if isinstance(label, str) else label  # api strips too; agree on what counts
+            if not isinstance(label, str) or not 1 <= len(label) <= LEVEL_LABEL_MAX:
+                raise ValueError(f"{p}.label must be 1–{LEVEL_LABEL_MAX} characters")
+            clean["label"] = label
+        out.append(clean)
+    return out
+
+
 def _check_block(block):
     """Reject an obviously wrong block: not an object, unknown type, a required prop
     missing or empty, NaN anywhere (json.dumps with allow_nan=False does that last one
@@ -343,8 +391,8 @@ def _register_watch_job(id, title, refresh, block_type, script):
 # ─── public api ───────────────────────────────────────────────────────────────
 
 def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None, venue=None,
-               block_type=None, refresh_cron=None, refresh_human=None, script=None,
-               w=None, h=None):
+               levels=None, block_type=None, refresh_cron=None, refresh_human=None,
+               script=None, w=None, h=None):
     """Add one widget to the board. Returns the op file path.
 
     id            `[A-Za-z0-9_-]{1,32}`, unique on the board — yours to pick. A machine
@@ -359,6 +407,13 @@ def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None, ven
                   as given, uppercased, `/` and `-` removed; the api normalises the rest.
     symbols       watchlist: 1–20 symbols (same shapes as `symbol`; Taiwan only).
     interval      kline: `1m` / `5m` / `15m` / `60m` / `1d`.
+    levels        kline only (Taiwan or crypto): price monitor lines drawn on the chart,
+                  0–4 of `{"price": 2300, "side": "below"}` / `{"price": 2450, "side":
+                  "above", "label": "前高"}`. `side` is the crossing direction (above =
+                  breakout, below = breakdown); `label` ≤ 12 chars replaces the direction
+                  word. Stamped with `since` = now here — never pass it. The web derives
+                  "triggered" from the bars after `since` (one-shot: stays triggered until
+                  you `update_widget(levels=...)`). No script, second-level, zero cost.
     venue         price / kline / book only: `"binance"` makes `symbol` a crypto symbol (contract
                   §3.1; refused on book / watchlist / block). A crypto K-line is always
                   this widget, never a block + line_chart drawn by a script — the live
@@ -412,11 +467,17 @@ def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None, ven
                 source = {"kind": "stream", "venue": venue, "symbol": _check_crypto_symbol(symbol)}
         if type == "kline":
             props["interval"] = _check_interval(interval)
-        elif interval is not None:
-            raise ValueError(f"interval is only for kline widgets, not {type}")
+            if levels is not None:
+                checked = _check_levels(levels)
+                if checked:                      # [] on add = no monitor, same as omitting
+                    props["levels"] = checked
+        else:
+            for name, v in (("interval", interval), ("levels", levels)):
+                if v is not None:
+                    raise ValueError(f"{name} is only for kline widgets, not {type}")
     else:
         for name, v in (("symbol", symbol), ("symbols", symbols), ("interval", interval),
-                        ("venue", venue)):
+                        ("venue", venue), ("levels", levels)):
             if v is not None:
                 raise ValueError(f"{name} is for stream widgets; block is a machine widget")
         props["block_type"] = _check_block_type(block_type)
@@ -439,16 +500,27 @@ def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None, ven
     return _write_op("add", {"widget": widget})
 
 
-def update_widget(id, *, title=None, props=None, refresh_cron=None, refresh_human=None,
-                  script=None):
-    """Change a widget's title, props, refresh schedule or (machine only) script.
-    Returns the op file path, or None when only the script changed (that is local —
-    the runtime picks the new run.py up on its next run, no op needed).
+def update_widget(id, *, title=None, props=None, levels=None, refresh_cron=None,
+                  refresh_human=None, script=None):
+    """Change a widget's title, props, price levels (kline), refresh schedule or
+    (machine only) script. Returns the op file path, or None when only the script
+    changed (that is local — the runtime picks the new run.py up on its next run, no
+    op needed).
 
     Never the position or size: `grid` belongs to the user's drag-and-drop and an
     update op does not carry it. `props` is a dict of the type's props (`interval` for
     kline, `block_type` for block); for a machine widget the local `report_jobs/<id>/`
     registration is rewritten to match, through the same `register_schedule` path.
+
+    `levels` (kline only, contract §3.4): `None` leaves the monitor alone, `[]` clears
+    it, a new list **resets** it — every entry gets a fresh `since`, so the web's
+    triggered state goes back to "watching". Same shape as in `add_widget`; `since` is
+    never yours to pass.
+
+    `props` and `levels` are a shallow merge on the api (contract §4.1): only the keys
+    sent change, the rest of the widget's props stay. Whether the widget is a kline is
+    not checked here — a stream widget leaves no record on this machine — so `levels`
+    on any other type is refused by the api (400, `status` shows `failed` naming it).
 
     Changing a block's `block_type` to a chart-like one (CHART_BLOCKS, minimum 4×3) is
     not size-checked here — this machine has no view of the board. If the tile is
@@ -469,11 +541,18 @@ def update_widget(id, *, title=None, props=None, refresh_cron=None, refresh_huma
                 _check_interval(v)
             elif k == "block_type":
                 _check_block_type(v)
+            elif k == "levels":
+                raise ValueError("pass levels=[...] as its own argument, not inside props= "
+                                 "(lib stamps each level's since)")
             else:
                 raise ValueError(f"unknown prop {k!r} (interval for kline, block_type for block)")
         if job is not None and set(props) - {"block_type"}:
             raise ValueError("a machine widget's props are only block_type")
         patch["props"] = dict(props)
+    if levels is not None:
+        if job is not None:
+            raise ValueError(f"levels is only for kline widgets; {id!r} is a machine widget")
+        patch.setdefault("props", {})["levels"] = _check_levels(levels)   # [] clears
     if refresh_cron is not None or refresh_human is not None:
         patch["source"] = {"refresh": _check_refresh(refresh_cron, refresh_human)}
     if script is not None and (not isinstance(script, str) or not script.strip()):

@@ -31,7 +31,8 @@ workspace/report_jobs/<widget_id>/
   ending in `.json`.
 - Ops are applied in file-name order. `add` needs the whole widget (position optional —
   the platform appends the tile to the bottom row); `update` carries only `title`,
-  `props` and `source.refresh` — **never `grid`**, the layout belongs to the user;
+  `props` (a shallow merge: only the keys sent change) and `source.refresh` — **never `grid`**,
+  the layout belongs to the user;
   `remove` also deletes the platform's stored data for that widget.
 - A data file is one report block wrapped in a small envelope, **≤ 64 KB**. The api checks
   it with the same validator reports use; a mismatch between the block sent and the
@@ -46,9 +47,9 @@ convenience.
 ```python
 from lib.watch import add_widget, update_widget, remove_widget, write_data, status
 
-add_widget(id, type, title, *, symbol=None, symbols=None, interval=None, venue=None,
+add_widget(id, type, title, *, symbol=None, symbols=None, interval=None, venue=None, levels=None,
            block_type=None, refresh_cron=None, refresh_human=None, script=None, w=None, h=None)
-update_widget(id, *, title=None, props=None, refresh_cron=None, refresh_human=None, script=None)
+update_widget(id, *, title=None, props=None, levels=None, refresh_cron=None, refresh_human=None, script=None)
 remove_widget(id)
 write_data(widget_id, block, images=None)     # inside run.py — the only publish call there
 status(op_file_or_widget_id)                  # pending | sent | failed: <reason> | unknown
@@ -82,7 +83,7 @@ scheduled report. Fix the call; nothing was written.
 | type | kind | min w×h | props | what it shows |
 |---|---|---|---|---|
 | `price` | stream | 2×2 (default 4×2) | none | last price, change vs. previous close / settlement (crypto: previous UTC day's close), day high-low, timestamp; futures show the session. Taiwan symbols, or crypto with `venue="binance"` |
-| `kline` | stream | 4×3 (default 6×3) | `interval`: `1m` `5m` `15m` `60m` `1d` | candlestick chart; history from the platform, the forming bar from ticks (Taiwan) or the Binance kline stream (crypto with `venue="binance"`) |
+| `kline` | stream | 4×3 (default 6×3) | `interval`: `1m` `5m` `15m` `60m` `1d`; `levels`: 0–4 `{price, side, label?}` — the price monitor, drawn as lines on the chart (§5) | candlestick chart; history from the platform, the forming bar from ticks (Taiwan) or the Binance kline stream (crypto with `venue="binance"`) |
 | `book` | stream | 2×3 (default 3×3) | none | 5-level order book — Taiwan futures `TXF` / `MXF`, or a crypto perpetual with `venue="binance"`. Stocks have no book |
 | `watchlist` | stream | 3×2 (default 4×3) | none; `symbols` 1–20 | table of symbol, last, change %, time. One watchlist beats three `price` tiles: same information, fewer cells, fewer stream slots |
 | `block` | machine | 2×2; chart-like `block_type` 4×3 | `block_type` | one report block, drawn by the report renderer from your `write_data` payload. Chart-like = `line_chart` `drawdown` `heatmap` `bar_chart` `histogram` `box` `scatter` `image` (min 4×3, default 6×3); `kpi_row` and `table` default 6×3, `callout` 4×2, the rest stay 2×2 |
@@ -207,14 +208,15 @@ money → what is the market doing → detail". When the user has not said what 
 in this order — and stop at four or five cards. A crowded board is read by nobody.
 
 1. **A price or watchlist tile** — the one big number, zero setup, ticks by the second.
-2. **Strategy health** (`table`) — the only card that tells them something *broke*. Reads local
+2. **Price levels on a K-line** (`kline` + `levels`) — needs the user to name a level, so you
+   cannot offer it silently, but ask the user for the price: it is the one
+   thing people hand-roll most, and it is now zero-script, second-level and free.
+3. **Strategy health** (`table`) — the only card that tells them something *broke*. Reads local
    state, costs nothing.
-3. **A scanner** (`table`) — the largest single use we see on real machines, and it replaces the
+4. **A scanner** (`table`) — the largest single use we see on real machines, and it replaces the
    hourly push notification people complain about.
-4. **Exposure** (`kpi_row`) — reads local state, costs nothing.
-5. **A chart** (`kline`) — confirmation, not discovery, so it comes after.
-6. **Threshold distance** (`kpi_row`) — needs the user to name a level, so you cannot offer it
-   silently, but ask: it is the one thing people hand-roll most and we cover least.
+5. **Exposure** (`kpi_row`) — reads local state, costs nothing.
+6. **A chart** (`kline`) without levels — confirmation, not discovery, so it comes after.
 
 ### A TXF price tile and its 5-minute chart (stream — no script)
 
@@ -363,55 +365,55 @@ live mode, so the file's mtime is the last successful run. That holds for strate
 somewhere else — will look stale when it is fine. If the user's strategies are hand-rolled, say so
 and leave the column blank rather than printing a time that means something else.
 
-### A `kpi_row` threshold-distance monitor (machine)
+### Price levels on a K-line (stream — no script)
 
-The most hand-rolled thing on real machines, and the one this catalogue covered worst. The user
-names the levels; you write them into the script.
+The most hand-rolled thing on real machines. The user names the levels; you put them on the
+chart:
 
 ```python
 from lib.watch import add_widget
 
-script = '''
-from lib.data import fetch_twstock_quote_batch
-from lib.report_templates import headers_from_env
-from lib.watch import write_data
-
-LEVELS = {"2330": ("跌破", 2300.0), "2317": ("突破", 235.0), "2454": ("跌破", 4000.0)}
-
-hdrs = headers_from_env()
-quotes = fetch_twstock_quote_batch(list(LEVELS), hdrs)     # one call, ~10 s snapshot
-items = []
-for sid, (side, level) in LEVELS.items():
-    q = quotes.get(sid) or {}
-    px = q.get("close")
-    if not px:
-        continue
-    gap = (px - level) / level * 100 if side == "突破" else (level - px) / level * 100
-    hit = gap >= 0                                          # +ve = past the level, −ve = short of it
-    items.append((not hit, abs(gap),                        # triggered first, then nearest
-                  {"label": f"{sid} {side} {level:,.0f}",
-                   "value": ("已觸發" if hit else f"{abs(gap):.2f}%"),
-                   "tone": "pos" if hit else "neutral"}))
-items.sort(key=lambda t: t[:2])                             # first cell renders large
-if items:
-    write_data("levels", {"type": "kpi_row", "items": [t[2] for t in items[:4]]})
-'''
-add_widget("levels", "block", "價位監控", block_type="kpi_row",
-           refresh_cron="*/5 * * * *", refresh_human="每 5 分鐘", script=script)
+add_widget("tsmc-k5", "kline", "台積電 5 分 K", symbol="2330", interval="5m",
+           levels=[{"price": 2300, "side": "below"}, {"price": 2450, "side": "above", "label": "前高"}])
 ```
 
-The sort is what makes the card useful: anything triggered goes first, then the nearest level —
-otherwise the big first cell shows whichever level the user happened to type first.
-`kpi_row` defaults to 6×3 here, and it must: four cells fold to two rows on a narrow canvas and
-`h=2` hides the bottom row's values entirely. Four levels is the cap — the first cell renders
-large, so put the one that matters there (the sort does that once something triggers).
+One op, no job directory, nothing to schedule, and it costs nothing: the lines are drawn on the
+candles and the browser moves the picture by the second from the same stream the chart uses. A
+level is `price` + `side` — `below` fires when a bar's low reaches the price (跌破), `above` when
+a high reaches it (突破) — plus an optional `label` (≤ 12 characters; it replaces the direction
+word on the line, 「前高 2,450」 instead of 「突破 2,450」). `lib/watch.py` stamps every level
+with `since` = now; passing `since` yourself is refused.
 
-**Say what this is, honestly.** A machine widget runs at most once a minute, so the distance can
-be up to a minute behind. That is fine for "am I near my level"; it is not a trigger, and it is
-not the same as the price tile next to it, which ticks by the second. If the user wants to be
-*told* when it fires, that is an alert (Telegram from a strategy or a cron script), not a tile —
-a tile only shows.
+**Triggered is derived, not stored.** The web looks at the bars after `since`: the first one that
+crosses the line gets the marker, the line turns solid in the direction's colour and the card
+header says 「已跌破 2,300 · 13:25」. Reload, another device — the same answer, with no machine
+script and no state on the platform. **One-shot**, like TradingView's "Stopped — Triggered": once
+fired it stays fired until you change the levels. To arm it again, or watch a new price, send the
+whole list once more:
 
-**Signal variant, same shape.** Watching an indicator instead of a price: fetch bars with
-`lib.data.fetch_twstock_ohlcv(sid, "1d", hdrs)` (or `fetch_kline` for crypto), compute the
-indicator, and put "指標值 vs 門檻" in `value`. Everything else is identical.
+```python
+from lib.watch import update_widget
+
+update_widget("tsmc-k5", levels=[{"price": 2280, "side": "below"},
+                                 {"price": 2450, "side": "above", "label": "前高"}])
+update_widget("tsmc-k5", levels=[])          # clear the monitor, keep the chart
+```
+
+`levels=None` (the default) leaves the monitor alone; a new list resets every level's `since`,
+so the triggered state goes back to watching. The op carries only `{"levels": [...]}` — props
+are a shallow merge on the api, so `interval` and everything else stay as they are. Four levels
+per card is the cap (the labels overlap beyond that) — more prices, another card; one symbol
+per card is the `kline` rule anyway. Crypto takes the same argument:
+
+```python
+from lib.watch import add_widget
+
+add_widget("btc-1h", "kline", "BTC 1H", symbol="BTC", venue="binance", interval="60m",
+           levels=[{"price": 100000, "side": "above", "label": "十萬"}])
+```
+
+Distance to the level is read by eye — the gap between the candles and the line, and on the right
+axis the last-price label sitting next to the level's label. Do not print a percentage beside it,
+and do not build this as a `kpi_row` script: a script refreshes at most once a minute and shows a
+number where the chart shows the thing itself. A tile only shows; if the user wants to be *told*
+when it fires, that is an alert (Telegram from a strategy or a cron script), not a widget.
