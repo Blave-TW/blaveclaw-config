@@ -48,8 +48,10 @@ convenience.
 from lib.watch import add_widget, update_widget, remove_widget, write_data, status
 
 add_widget(id, type, title, *, symbol=None, symbols=None, interval=None, venue=None, levels=None,
-           block_type=None, refresh_cron=None, refresh_human=None, script=None, w=None, h=None)
-update_widget(id, *, title=None, props=None, levels=None, refresh_cron=None, refresh_human=None, script=None)
+           panes=None, block_type=None, refresh_cron=None, refresh_human=None, script=None,
+           w=None, h=None)
+update_widget(id, *, title=None, props=None, levels=None, panes=None, refresh_cron=None,
+              refresh_human=None, script=None)
 remove_widget(id)
 write_data(widget_id, block, images=None)     # inside run.py — the only publish call there
 status(op_file_or_widget_id)                  # pending | sent | failed: <reason> | unknown
@@ -83,7 +85,7 @@ scheduled report. Fix the call; nothing was written.
 | type | kind | min w×h | props | what it shows |
 |---|---|---|---|---|
 | `price` | stream | 2×2 (default 4×2) | none | last price, change vs. previous close / settlement (crypto: previous UTC day's close), day high-low, timestamp; futures show the session. Taiwan symbols, or crypto with `venue="binance"` |
-| `kline` | stream | 4×3 (default 6×3) | `interval`: `1m` `5m` `15m` `60m` `1d`; `levels`: 0–4 `{price, side, label?}` — the price monitor, drawn as lines on the chart (§5) | candlestick chart; history from the platform, the forming bar from ticks (Taiwan) or the Binance kline stream (crypto with `venue="binance"`) |
+| `kline` | stream | 4×3 (default 6×3, 6×4 with one indicator pane, 6×5 with two) | `interval`: `1m` `5m` `15m` `60m` `1d`; `levels`: 0–4 `{price, side, label?}` — the price monitor, drawn as lines on the chart (§5); `panes`: 0–2 `{id}` — indicator sub-panes under the candles, **crypto only**, `id` is the indicator's slug (`holder_concentration`), not a number (§5) | candlestick chart; history from the platform, the forming bar from ticks (Taiwan) or the Binance kline stream (crypto with `venue="binance"`) |
 | `book` | stream | 2×3 (default 3×3) | none | 5-level order book — Taiwan futures `TXF` / `MXF`, or a crypto perpetual with `venue="binance"`. Stocks have no book |
 | `watchlist` | stream | 3×2 (default 4×3) | none; `symbols` 1–20 | table of symbol, last, change %, time. One watchlist beats three `price` tiles: same information, fewer cells, fewer stream slots |
 | `block` | machine | 2×2; chart-like `block_type` 4×3 | `block_type` | one report block, drawn by the report renderer from your `write_data` payload. Chart-like = `line_chart` `drawdown` `heatmap` `bar_chart` `histogram` `box` `scatter` `image` (min 4×3, default 6×3); `kpi_row` and `table` default 6×3, `callout` 4×2, the rest stay 2×2 |
@@ -108,7 +110,7 @@ a chart.
   the browser, so keep to **at most 6 crypto widgets on a board**. `venue` on `watchlist` / `block` is
   refused — a watchlist is Taiwan-only and a block is a machine widget.
 - **Sizes**: 12-column grid, `w` 1–12, `h` 1–12, at least the type's minimum (for a `block`, the
-  minimum follows its `block_type`); omit `w`/`h` for the minimum. Position is never yours: the
+  minimum follows its `block_type`); omit `w`/`h` for the default. Position is never yours: the
   platform places new tiles, the user moves them.
 - **Board limits** (the api refuses beyond them): 24 widgets, 20 distinct stream symbols across
   the board, 12 machine widgets. `title` 1–40 characters.
@@ -129,7 +131,9 @@ the slowest cadence that still answers the question.
 
 **For a crypto K-line use the `kline` widget with `venue="binance"`, never a `block` +
 `line_chart` drawn by a script.** The live candles come from the platform's Binance stream; a
-script cannot refresh faster than once a minute and would draw a line, not candles.
+script cannot refresh faster than once a minute and would draw a line, not candles. The same
+goes for a **crypto indicator on that chart**: it is `panes` on the `kline` widget (§5), not a
+scheduled script publishing a `line_chart` block.
 
 ## 3. Machine widget scripts
 
@@ -221,7 +225,8 @@ in this order — and stop at four or five cards. A crowded board is read by nob
    from the reconcile snapshot. Zero fetch, no keys.
 7. **Taiwan market temperature** (`kpi_row`) — one run a day, after-hours numbers; the intraday
    index is a `price` tile, not this card.
-8. **A chart** (`kline`) without levels — confirmation, not discovery, so it comes after.
+8. **A chart** (`kline`) without levels — confirmation, not discovery, so it comes after. For
+   crypto it can carry one or two indicator sub-panes (`panes`), also script-free.
 
 ### A TXF price tile and its 5-minute chart (stream — no script)
 
@@ -535,8 +540,9 @@ if len(items) == 4:                      # 缺一格就不發,卡片留上一次
                                          # 會被讀成「那一項沒有」,不是「沒抓到」
     ds = sorted({d.strftime("%Y-%m-%d") for d in days})   # 各欄資料日不一定同一天
     block = kpi_row(items)
-    block["caption"] = ("TWSE 盤後統計,非即時;**各格資料日可能不同**——融資餘額當日約 21:00 才\n"
-                        "公布,傍晚跑的話那一格是前一個交易日(所以每格 delta 都帶自己的日期)。資料日 "
+    # caption 是純文字(渲染器不吃 markdown),不要放 ** 之類的記號
+    block["caption"] = ("TWSE 盤後統計,非即時;各格資料日可能不同——融資餘額當日約 21:00 才公布,"
+                        "傍晚跑的話那一格是前一個交易日,所以每格都帶自己的日期。資料日 "
                         + (ds[-1] if len(ds) == 1 else ds[0] + "~" + ds[-1] + ",見各格日期"))
     write_data("tw-temp", block)
 '''
@@ -683,3 +689,96 @@ axis the last-price label sitting next to the level's label. Do not print a perc
 and do not build this as a `kpi_row` script: a script refreshes at most once a minute and shows a
 number where the chart shows the thing itself. A tile only shows; if the user wants to be *told*
 when it fires, that is an alert (Telegram from a strategy or a cron script), not a widget.
+
+### Indicator sub-panes on a K-line (stream, crypto — no script)
+
+The user asks for 「BTC 的加上籌碼集中度」. That is one argument on the chart they already have,
+not a second card:
+
+```python
+from lib.watch import add_widget
+
+add_widget("btc-1h", "kline", "BTC 1 小時 K", symbol="BTC", venue="binance", interval="60m",
+           panes=[{"id": "holder_concentration"}])
+```
+
+The indicator is drawn in its own pane under the candles, 6×4 by default (6×5 with two panes,
+6×3 with none). To put one on a chart that is already on the board, or to take it off:
+
+```python
+from lib.watch import update_widget
+
+update_widget("btc-1h", panes=[{"id": "holder_concentration"}])          # put one on
+update_widget("btc-1h", panes=[{"id": "holder_concentration"},          # and a second
+                               {"id": "funding_rate"}])
+update_widget("btc-1h", panes=[])                                       # take them off
+```
+
+The list you send **replaces** the panes on the card, so adding a second one means sending both.
+Everything else in `props` stays — `interval`, `levels` — because props are a shallow merge on
+the api. `update_widget` never resizes the card (`grid` is the user's), so a chart the user
+sized 6×3 will be tight with a pane on it: tell them to drag it a row taller rather than trying
+to do it for them.
+
+**`id` is the indicator's slug — the same word `lib/data.py` fetches it with.** You already
+know these: `fetch_holder_concentration` calls `holder_concentration/get_alpha`, so the slug is
+`holder_concentration`. The ten alpha fetchers in `lib/data.py` are the list to pick from:
+
+`holder_concentration` 籌碼集中度 · `funding_rate` 資金費率 · `taker_intensity` 多空力道 ·
+`whale_hunter` 巨鯨警報 · `unusual_movement` 異常漲跌 · `squeeze_momentum` 擠壓動能 ·
+`liquidation` 爆倉指標 · `market_sentiment` 市場情緒 · `capital_shortage` 資金稀缺
+
+(`market_direction` has a fetcher in `lib/data.py` but is **not** in the platform catalogue —
+it cannot be a sub-pane; asking for it comes back as an unknown-slug 400. Verified on prod.)
+
+The platform's catalogue is larger than this list (21 indicators) — prod also serves slugs that
+have no fetcher here, such as `gtrade_holder_concentration`, `hyperliquid_top_trader_exposure`
+and `main_alt` — but only indicators that draw as a line can be a sub-pane; a heat map or a
+single-value indicator is refused. `lib/watch.py` checks the shape of the slug, never that it
+exists, so anything wrong comes back as an api 400 and the op ends in `ops/failed/`. If the
+user names an indicator that is not in the list above, say so rather than inventing a slug.
+
+**Three things to check before you pick one.** All three are measured on prod, and all three are
+things to tell the user about rather than work around:
+
+- **Five of them are market-level, not per-symbol**: `blave_top_trader_exposure`,
+  `capital_shortage`, `gtrade_holder_concentration`, `hyperliquid_top_trader_exposure` and
+  `main_alt`. Put one on a BTC card and on an ETH card and you get two identical lines. Using
+  them is fine; telling the user it is *his symbol's* data is not. The api response carries a
+  `scope` field and that is the authority — verified on prod: those five rows really are
+  `scope = market`, so the card labels them for you.
+- **Some indicators are coarser than the candles and degrade to a few points.**
+  `squeeze_momentum`'s finest period is 1d: measured against a 1m chart it comes back with
+  **one point**, 5m three, 15m seven, 60m fourteen. Nothing errors — there is simply no line to
+  look at. Match the indicator's resolution to the interval; a 1d indicator belongs under 60m
+  or 1d candles.
+- **Parameters are the platform's defaults, and v1 cannot change them.** `funding_rate`
+  (exchange), `liquidation` / `taker_intensity` / `unusual_movement` (time frame) and
+  `whale_hunter` (time frame and score type) all take parameters on the platform, but `panes`
+  has no way to pass one — you get the default set (`24h`, `score_oi`). If the user wants a
+  particular parameter, say so: Studio for now, or v2.
+
+**A 1d card starts blank on the left.** The 1d indicator window is 180 days while the chart
+loads 300 bars, so the oldest ~120 candles have no indicator line under them. That is the
+contract's "align by time, never fill in" rule working, not a broken pane.
+
+What this is and is not:
+
+- **No machine, no job, no cron.** The platform fetches the indicator and the browser draws it.
+  This is not a `block` widget, so there is no script to write and nothing to schedule —
+  nothing on this machine runs for it.
+- **Crypto only.** `panes` needs `venue="binance"`; the indicator library is a crypto one, so
+  `add_widget` refuses a Taiwan `kline` before anything is written. `update_widget` cannot tell
+  (a stream widget leaves no record here) — there the api refuses it and `status` shows `failed`.
+- **At most two per card.** Past that the candles are squeezed out of the main pane. Two
+  indicators that answer different questions belong on two charts.
+- **The two run at different speeds, and the card says so.** Candles stream by the second;
+  indicators are polled on their own cadence, so the pane carries its own data time. That gap
+  is honest — do not describe the indicator as live.
+- **Points stop where the indicator's data stops** — nothing is extended forward, and the
+  platform may round an indicator up to its own minimum period (see the resolution note above).
+
+**Do not build this as a script.** The 籌碼集中度 card an agent once shipped as a `block` +
+`line_chart` on a `09:20` cron is exactly the wrong shape: it refreshes once a day, and it puts
+the price and the indicator on two separate cards that the user has to line up by eye. A crypto
+indicator that belongs under a price chart is `panes` on that chart's `kline` widget.

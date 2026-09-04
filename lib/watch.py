@@ -28,6 +28,9 @@ Usage:
     add_widget("tsmc-k5", "kline", "台積電 5 分 K", symbol="2330", interval="5m",      # price levels
                levels=[{"price": 2300, "side": "below"}, {"price": 2450, "side": "above", "label": "前高"}])
     update_widget("tsmc-k5", levels=[{"price": 2280, "side": "below"}])   # reset the monitor
+    add_widget("btc-k", "kline", "BTC 1 小時 K", symbol="BTC", venue="binance",  # indicator pane
+               interval="60m", panes=[{"id": "holder_concentration"}])   # id = the slug
+    update_widget("btc-k", panes=[])                       # drop the pane, keep the chart
     add_widget("risk", "block", "持倉風險",                              # machine widget
                block_type="kpi_row", refresh_cron="*/5 * * * *",
                refresh_human="每 5 分鐘", script=script_text)
@@ -84,6 +87,12 @@ INTERVALS = ("1m", "5m", "15m", "60m", "1d")
 LEVELS_MAX = 4
 LEVEL_SIDES = ("above", "below")
 LEVEL_LABEL_MAX = 12
+# kline indicator sub-panes (contract §3.5): at most 2 — past that the candles in the main
+# pane are left under 200px. Crypto only; the indicator library is a crypto one. A pane's `id`
+# is the indicator's slug (`indicators.name`), the same word lib/data.py fetches it with — the
+# numeric ids live in a MySQL table this machine cannot see, so they are not the vocabulary.
+PANES_MAX = 2
+_PANE_ID_RE = re.compile(r"[a-z0-9_]{1,40}")
 VENUES = ("binance",)
 CRYPTO_TYPES = ("price", "kline", "book")  # the only widgets that take a venue (contract §3.1)
 WATCHLIST_MAX = 20
@@ -182,10 +191,17 @@ def _check_crypto_symbol(symbol):
 # The user can still drag anything down to its minimum.
 _DEFAULT_WH = {
     "price": (4, 2),      # a 3-col card truncates its title
-    "kline": (6, 3),      # candles need room to read
+    "kline": (6, 3),      # candles need room to read; with indicator panes see _KLINE_PANE_WH
     "book": (3, 3),       # 2×3 squeezes the volume bars to a slit and clips the spread
     "watchlist": (4, 3),  # fits 5 rows; more than that scrolls
 }
+# kline carrying indicator sub-panes (contract §3.5): one row taller per pane. At 6×3 the
+# sub-pane is left ~40px once the card head and the time axis are gone — the failure mode
+# the contract already killed `equity_drawdown` for. **Only the default moves**: the type's
+# minimum stays 4×3, on purpose and in agreement with the api, which does not raise the floor
+# for panes either — otherwise adding an indicator to a card the user already sized 6×3 would
+# be refused. A caller who asks for a small card gets the small card.
+_KLINE_PANE_WH = {1: (6, 4), 2: (6, 5)}
 # block widgets default by block_type; anything not listed falls back to its minimum
 _DEFAULT_BLOCK_WH = {
     "kpi_row": (6, 3),    # four cells fold to 2+2 on a narrow canvas and h=2 hides the values
@@ -194,12 +210,14 @@ _DEFAULT_BLOCK_WH = {
 }
 
 
-def _check_grid(type, w, h, block_type=None):
+def _check_grid(type, w, h, block_type=None, n_panes=0):
     kind, min_w, min_h = CATALOGUE[type]
     label = type
     if block_type in CHART_BLOCKS:
         min_w, min_h, label = CHART_MIN_W, CHART_MIN_H, f"{block_type} block"
     dw, dh = _DEFAULT_WH.get(type, (min_w, min_h))
+    if type == "kline" and n_panes:
+        dw, dh = _KLINE_PANE_WH[n_panes]
     if type == "block":
         dw, dh = _DEFAULT_BLOCK_WH.get(block_type, (min_w, min_h))
         if block_type in CHART_BLOCKS:
@@ -270,6 +288,54 @@ def _check_levels(levels):
                 raise ValueError(f"{p}.label must be 1–{LEVEL_LABEL_MAX} characters")
             clean["label"] = label
         out.append(clean)
+    return out
+
+
+def _check_panes(panes):
+    """kline indicator sub-panes (contract §3.5): a list of 0–2 `{"id": "<slug>"}` dicts, drawn
+    as their own panes under the candles. Returns a fresh `[{"id": slug}, ...]`.
+
+    `id` is the indicator's **slug** (`indicators.name`, e.g. `"holder_concentration"`), never a
+    number — the slugs are the same words `lib/data.py` already uses to fetch an indicator
+    (`fetch_holder_concentration` → `holder_concentration/get_alpha`), so that module's alpha
+    fetchers are your list of what to write here.
+
+    **Whether the slug exists is not checked here** — the catalogue lives on the platform and
+    this machine holds no copy of it. An unknown slug, or one whose indicator is not a line
+    (heat maps and single-value indicators), is refused by the api (400) and the op lands in
+    `ops/failed/`.
+
+    `overlay` is not accepted in v1: these indicators are all z-scores, so drawing one on the
+    price axis flattens the candles into a line — an indicator always gets its own sub-pane.
+    """
+    if not isinstance(panes, (list, tuple)):
+        raise ValueError('panes must be a list of {"id": "<indicator slug>"} dicts')
+    if len(panes) > PANES_MAX:
+        raise ValueError(f"at most {PANES_MAX} indicator panes per kline card (got {len(panes)}) "
+                         "— beyond that the candles are squeezed out of the main pane")
+    out = []
+    for i, pane in enumerate(panes):
+        p = f"panes[{i}]"
+        if not isinstance(pane, dict):
+            raise ValueError(f'{p} must be a dict like {{"id": "holder_concentration"}}')
+        if "overlay" in pane:
+            raise ValueError(f"{p}.overlay is not accepted (v1): this indicator library is all "
+                             "z-scores, so drawing one on the price axis flattens the candles "
+                             "into a line — every indicator gets its own sub-pane")
+        extra = set(pane) - {"id"}
+        if extra:
+            raise ValueError(f"{p} has unknown keys {sorted(extra)}; only id")
+        pid = pane.get("id")
+        if isinstance(pid, bool) or isinstance(pid, int):
+            raise ValueError(f"{p}.id is the indicator's slug, not a number — write "
+                             f'"holder_concentration", the same word lib/data.py fetches it '
+                             f"with, got {pid!r}")
+        if not isinstance(pid, str) or not _PANE_ID_RE.fullmatch(pid):
+            raise ValueError(f"{p}.id must be an indicator slug matching "
+                             f"[a-z0-9_]{{1,40}} (e.g. \"funding_rate\"), got {pid!r}")
+        if any(o["id"] == pid for o in out):
+            raise ValueError(f"{p}.id lists indicator {pid!r} twice")
+        out.append({"id": pid})
     return out
 
 
@@ -391,7 +457,7 @@ def _register_watch_job(id, title, refresh, block_type, script):
 # ─── public api ───────────────────────────────────────────────────────────────
 
 def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None, venue=None,
-               levels=None, block_type=None, refresh_cron=None, refresh_human=None,
+               levels=None, panes=None, block_type=None, refresh_cron=None, refresh_human=None,
                script=None, w=None, h=None):
     """Add one widget to the board. Returns the op file path.
 
@@ -414,6 +480,14 @@ def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None, ven
                   word. Stamped with `since` = now here — never pass it. The web derives
                   "triggered" from the bars after `since` (one-shot: stays triggered until
                   you `update_widget(levels=...)`). No script, second-level, zero cost.
+    panes         kline with venue="binance" only (the indicator library is a crypto one —
+                  a Taiwan kline is refused here): 0–2 indicator sub-panes drawn under the
+                  candles, `[{"id": "holder_concentration"}]`. `id` is the indicator's **slug**
+                  — the same word `lib/data.py` fetches it with, so its alpha fetchers are the
+                  list to pick from. This machine cannot check the slug exists, so an unknown
+                  one (or an indicator that is not a line) comes back as an api 400. No script,
+                  no job, no cron — the platform fetches the indicator, so never build this as
+                  a `block` + `line_chart` computed by a script.
     venue         price / kline / book only: `"binance"` makes `symbol` a crypto symbol (contract
                   §3.1; refused on book / watchlist / block). A crypto K-line is always
                   this widget, never a block + line_chart drawn by a script — the live
@@ -430,10 +504,12 @@ def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None, ven
     script        machine: the full text of `report_jobs/<id>/run.py`. It runs like a
                   scheduled strategy (cwd = workspace, no `BLAVE_*`, no token, no LLM)
                   and publishes by calling `write_data(id, block)`.
-    w, h          initial size in grid units; default = the type's minimum (price: 4×2,
-                  kline: 6×3; a block is 2×2, or 4×3 when its block_type is chart-like —
-                  see CHART_BLOCKS). Position is the user's — the platform appends the
-                  tile to the bottom row.
+    w, h          initial size in grid units; omit them for the type's default (price 4×2,
+                  kline 6×3 — 6×4 with one indicator pane, 6×5 with two; book 3×3;
+                  watchlist 4×3; a block goes by its block_type, 6×3 for a chart-like one).
+                  The minimum is a floor, not the default, and a size you pass is taken as
+                  given. Position is the user's — the platform appends the tile to the
+                  bottom row.
     """
     if type not in CATALOGUE:
         raise ValueError(f"type {type!r} is not one of {', '.join(CATALOGUE)}")
@@ -471,13 +547,23 @@ def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None, ven
                 checked = _check_levels(levels)
                 if checked:                      # [] on add = no monitor, same as omitting
                     props["levels"] = checked
+            if panes is not None:
+                if venue is None:
+                    # The whole indicator library is a crypto one (symbols go through Binance
+                    # normalisation); Taiwan indicators are a separate case — contract §3.5.
+                    raise ValueError("panes need a crypto kline (venue=\"binance\") — the "
+                                     "indicator library is crypto only, a Taiwan chart has no "
+                                     "indicator sub-panes")
+                checked = _check_panes(panes)
+                if checked:                      # [] on add = no panes, same as omitting
+                    props["panes"] = checked
         else:
-            for name, v in (("interval", interval), ("levels", levels)):
+            for name, v in (("interval", interval), ("levels", levels), ("panes", panes)):
                 if v is not None:
                     raise ValueError(f"{name} is only for kline widgets, not {type}")
     else:
         for name, v in (("symbol", symbol), ("symbols", symbols), ("interval", interval),
-                        ("venue", venue), ("levels", levels)):
+                        ("venue", venue), ("levels", levels), ("panes", panes)):
             if v is not None:
                 raise ValueError(f"{name} is for stream widgets; block is a machine widget")
         props["block_type"] = _check_block_type(block_type)
@@ -489,7 +575,8 @@ def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None, ven
             raise ValueError(f"report_jobs/{id}/ is a scheduled report, not a widget — "
                              "pick another id (or remove_schedule it first if the user asks)")
         source = {"kind": "machine", "refresh": refresh}
-    grid = _check_grid(type, w, h, props.get("block_type"))    # block minimum depends on block_type
+    # block minimum depends on block_type; a kline's *default* grows with its indicator panes
+    grid = _check_grid(type, w, h, props.get("block_type"), len(props.get("panes", ())))
 
     widget = {"id": id, "type": type, "title": title, "grid": grid, "source": source,
               "props": props, "created_by": "agent", "updated_at": int(time.time())}
@@ -500,12 +587,12 @@ def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None, ven
     return _write_op("add", {"widget": widget})
 
 
-def update_widget(id, *, title=None, props=None, levels=None, refresh_cron=None,
+def update_widget(id, *, title=None, props=None, levels=None, panes=None, refresh_cron=None,
                   refresh_human=None, script=None):
-    """Change a widget's title, props, price levels (kline), refresh schedule or
-    (machine only) script. Returns the op file path, or None when only the script
-    changed (that is local — the runtime picks the new run.py up on its next run, no
-    op needed).
+    """Change a widget's title, props, price levels (kline), indicator sub-panes (crypto
+    kline), refresh schedule or (machine only) script. Returns the op file path, or None
+    when only the script changed (that is local — the runtime picks the new run.py up on
+    its next run, no op needed).
 
     Never the position or size: `grid` belongs to the user's drag-and-drop and an
     update op does not carry it. `props` is a dict of the type's props (`interval` for
@@ -517,10 +604,17 @@ def update_widget(id, *, title=None, props=None, levels=None, refresh_cron=None,
     triggered state goes back to "watching". Same shape as in `add_widget`; `since` is
     never yours to pass.
 
-    `props` and `levels` are a shallow merge on the api (contract §4.1): only the keys
-    sent change, the rest of the widget's props stay. Whether the widget is a kline is
-    not checked here — a stream widget leaves no record on this machine — so `levels`
-    on any other type is refused by the api (400, `status` shows `failed` naming it).
+    `panes` (crypto kline only, contract §3.5): `None` leaves the indicator sub-panes
+    alone, `[]` removes them and keeps the chart, a list of 0–2 `{"id": "<slug>"}` replaces
+    them. Same shape as in `add_widget`. The card is not resized — `grid` is the user's —
+    so on a 6×3 card the panes are tight; say so and let the user drag it taller (a card
+    with one pane is comfortable at 6×4, two at 6×5).
+
+    `props`, `levels` and `panes` are a shallow merge on the api (contract §4.1): only the
+    keys sent change, the rest of the widget's props stay. Whether the widget is a kline —
+    and, for `panes`, whether it is a *crypto* kline — is not checked here: a stream widget
+    leaves no record on this machine. Sending either to the wrong widget is refused by the
+    api (400, `status` shows `failed` naming it).
 
     Changing a block's `block_type` to a chart-like one (CHART_BLOCKS, minimum 4×3) is
     not size-checked here — this machine has no view of the board. If the tile is
@@ -544,6 +638,8 @@ def update_widget(id, *, title=None, props=None, levels=None, refresh_cron=None,
             elif k == "levels":
                 raise ValueError("pass levels=[...] as its own argument, not inside props= "
                                  "(lib stamps each level's since)")
+            elif k == "panes":
+                raise ValueError("pass panes=[...] as its own argument, not inside props=")
             else:
                 raise ValueError(f"unknown prop {k!r} (interval for kline, block_type for block)")
         if job is not None and set(props) - {"block_type"}:
@@ -553,12 +649,17 @@ def update_widget(id, *, title=None, props=None, levels=None, refresh_cron=None,
         if job is not None:
             raise ValueError(f"levels is only for kline widgets; {id!r} is a machine widget")
         patch.setdefault("props", {})["levels"] = _check_levels(levels)   # [] clears
+    if panes is not None:
+        if job is not None:
+            raise ValueError(f"panes is only for crypto kline widgets; {id!r} is a machine widget")
+        patch.setdefault("props", {})["panes"] = _check_panes(panes)      # [] clears
     if refresh_cron is not None or refresh_human is not None:
         patch["source"] = {"refresh": _check_refresh(refresh_cron, refresh_human)}
     if script is not None and (not isinstance(script, str) or not script.strip()):
         raise ValueError("script must be the full text of run.py")
     if not patch and script is None:
-        raise ValueError("nothing to update: give title, props, refresh_cron+refresh_human or script")
+        raise ValueError("nothing to update: give title, props, levels, panes, "
+                         "refresh_cron+refresh_human or script")
 
     if job is not None and ("title" in patch or "props" in patch or "source" in patch or script):
         sched = job.get("schedule") if isinstance(job.get("schedule"), dict) else {}
