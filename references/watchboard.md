@@ -215,8 +215,13 @@ in this order — and stop at four or five cards. A crowded board is read by nob
    state, costs nothing.
 4. **A scanner** (`table`) — the largest single use we see on real machines, and it replaces the
    hourly push notification people complain about.
-5. **Exposure** (`kpi_row`) — reads local state, costs nothing.
-6. **A chart** (`kline`) without levels — confirmation, not discovery, so it comes after.
+5. **Funds and exposure** (`kpi_row`) — reads local state; one account read on top when a venue
+   is bound, and three honest cells when it is not.
+6. **Positions** (`table`) — the same band one level down: what the account actually holds, read
+   from the reconcile snapshot. Zero fetch, no keys.
+7. **Taiwan market temperature** (`kpi_row`) — one run a day, after-hours numbers; the intraday
+   index is a `price` tile, not this card.
+8. **A chart** (`kline`) without levels — confirmation, not discovery, so it comes after.
 
 ### A TXF price tile and its 5-minute chart (stream — no script)
 
@@ -261,7 +266,7 @@ net, gross = sum(signed.values()), sum(abs(x) for x in signed.values())
 longs = sum(1 for x in signed.values() if x > 0)
 shorts = sum(1 for x in signed.values() if x < 0)
 write_data("exposure", {"type": "kpi_row", "items": [
-    {"label": "淨曝險", "value": f"{net:+,.0f}", "tone": "pos" if net > 0 else "neg" if net < 0 else "neutral"},
+    {"label": "淨曝險", "value": f"{net:+,.0f}", "tone": "neutral"},   # direction, not profit
     {"label": "總曝險", "value": f"{gross:,.0f}", "tone": "neutral"},
     {"label": "多 / 空 標的", "value": f"{longs} / {shorts}", "tone": "neutral"},
 ]})
@@ -271,8 +276,168 @@ add_widget("exposure", "block", "持倉曝險", block_type="kpi_row",
 ```
 
 Reads only local strategy state through `lib.portfolio` — no fetch at all, so `*/5` costs
-nothing. `net` is signed, so its tone follows the sign; the count is unsigned and stays
+nothing. `net` carries a sign but is **direction, not profit** — it stays `neutral`, the same rule
+the report catalogue applies to `Net Exposure` in a table (a green +0.62× reads as "up 0.62%").
+Only realised or unrealised money takes `pos`/`neg`; the count is unsigned and stays
 `neutral`. Restate "每 5 分鐘" to the user before you move on.
+
+### The same card with the account's equity — 資金與曝險 (machine)
+
+```python
+from lib.watch import add_widget
+
+script = '''
+import importlib
+from lib.portfolio import aggregate_portfolio
+from lib.report_templates import kpi, kpi_row
+from lib.venue_wiring import read_env, detect_venue
+from lib.watch import write_data
+
+target = aggregate_portfolio()
+signed = {s: (v["size"] if v["side"] == "long" else -v["size"])
+          for s, v in target.items() if v["side"]}
+net, gross = sum(signed.values()), sum(abs(x) for x in signed.values())
+longs = sum(1 for x in signed.values() if x > 0)
+shorts = sum(1 for x in signed.values() if x < 0)
+
+eq = None                              # 沒綁 venue、金鑰失效、交易所不通 → 少一格,不是壞掉
+env = read_env()
+vid = detect_venue(env)                # 官方 lib 齊全的交易所才認得;台灣券商一律 None
+if vid:
+    try:
+        eq = importlib.import_module("lib.account_" + vid).get_equity(env)
+    except Exception:
+        eq = None
+
+items = []
+if eq:
+    items.append(kpi("帳戶權益", f"{eq['equity']:,.2f}", "neutral", unit=eq.get("currency")))
+items.append(kpi("淨曝險", f"{net:+,.0f}", "neutral"))   # direction, not profit
+items.append(kpi("總曝險", f"{gross:,.0f}", "neutral",
+                 delta=(f"{gross / eq['equity']:.2f}× 權益"
+                        if eq and eq["equity"] > 0 else None)))
+items.append(kpi("多 / 空 標的", f"{longs} / {shorts}", "neutral"))
+write_data("funds", kpi_row(items))
+'''
+add_widget("funds", "block", "資金與曝險", block_type="kpi_row",
+           refresh_cron="*/5 * * * *", refresh_human="每 5 分鐘", script=script)
+```
+
+The exposure card above with the money in front of it. **This one or that one, not both** — same
+numbers, one extra cell. No `w`/`h` here: four cells take the `kpi_row` default 6×3, and the 6×2
+above is sized for three (at four the row folds to 2+2 on a narrow canvas and `h=2` clips the
+values).
+
+Equity is the only line that leaves the machine: one signed account read per run through
+`lib/account_<venue>.py`, which `lib.venue_wiring.detect_venue` picks from the keys in `.env`.
+**When it is not there the card is three cells, never a 0 and never an error string** — the
+exposure half is pure local arithmetic and is not broken by a missing key. `detect_venue` routes
+only venues that ship both `lib/account_<id>.py` and `lib/order_<id>.py`, and it deliberately
+skips the Taiwan brokers (`sinopac`, `president`, `capital`), so a 群益 machine gets the three-cell
+form even though `lib/account_capital.py` does have `get_equity` (it reads the worker's snapshot,
+no network) — call that module by name if the user asks for equity there, and say why it is wired
+by hand.
+
+**今日損益 is not a cell, and do not invent one.** It needs yesterday's equity; the machine keeps
+none. `get_flows(env, since)` is on-chain deposits and withdrawals, not PnL — the platform is what
+nets flows out of its own equity-snapshot series — and a widget script must not carry state between
+runs (§3). Offer 權益 / 淨曝險 / 總曝險 and say the day's PnL needs an equity history the machine
+does not have.
+
+### A `table` positions widget every 5 minutes (machine)
+
+```python
+from lib.watch import add_widget
+
+script = '''
+import json
+from datetime import datetime, timezone
+from lib.portfolio import aggregate_portfolio, split_key
+from lib.report_templates import TPE
+from lib.watch import write_data
+
+try:                                    # 對帳過才有;讀不到就整欄「—」,不拿目標冒充實際
+    with open("manager/last_reconcile.json") as f:
+        snap = json.load(f)
+except (OSError, ValueError):
+    snap = {}
+actual = snap.get("actual") or {}       # {key: {"side", "size"}},那一輪交易所真的回報的部位
+# 同一輪的目標;沒快照(或機器上還是舊格式的快照)才自己算
+target = snap.get("target") or aggregate_portfolio()
+
+def cell(key, row):
+    if not row or not row.get("side"):
+        return "—"                      # 方向要進每一格:兩側方向可能相反(策略剛翻倉、
+                                        # HALT 開著、下單一直失敗),只印一個方向會把
+                                        # 「多 1000 / 空 1000」畫成已經對齊的樣子
+    t = target.get(key) or {}           # 口數 vs 金額:compute_diff 的 is_lot_based 同一條判斷
+    lots = ((t.get("asset_spec") or {}).get("type") == "futures_contracts"
+            or t.get("exchange") == "capital")
+    size = abs(float(row.get("size") or 0))
+    sign = "空 " if row.get("side") == "short" else "多 "
+    return sign + (f"{size:,.0f} 口" if lots else f"{size:,.0f}")
+
+rows = []
+for key in sorted(set(target) | set(actual)):
+    a, t = actual.get(key) or {}, target.get(key) or {}
+    if not a.get("side") and not t.get("side"):           # 兩邊都平的殘留 key 不佔一列
+        continue
+    sym, market = split_key(key)                          # BTCUSDT@spot → ("BTCUSDT", "spot")
+    rows.append({"s": sym + ("(現貨)" if market == "spot" else ""),
+                 "a": cell(key, a), "t": cell(key, t)})
+
+ts = snap.get("ts")                     # 現在是 utcnow().isoformat();老機器上還有 epoch 秒的舊檔
+try:                                    # 讀不懂就當沒有時間,不要讓整張卡掛掉
+    dt = (datetime.fromtimestamp(float(ts), timezone.utc) if isinstance(ts, (int, float))
+          else datetime.fromisoformat(ts).replace(tzinfo=timezone.utc))
+    when = dt.astimezone(TPE).strftime("%m/%d %H:%M")
+except (TypeError, ValueError):
+    when = None
+if "actual" not in snap:                # 老機器的快照沒有這個欄位——不能因為讀得到時間
+    cap = "這台機器的對帳快照沒有實際部位(舊格式),實際欄全是「—」 · "   # 就說「剛對過帳」
+elif not actual:
+    cap = "上次對帳時交易所沒有部位 · " if when else "這台機器還沒對過帳 · "
+else:
+    cap = "對帳快照 " + when + " · " if when else "對帳快照 · "
+cap += "數量為部位金額(帳戶計價幣別),台股/期貨標的為口數;進場均價與未實現損益機器上沒有來源"
+if rows:
+    write_data("positions", {"type": "table", "columns": [
+        {"key": "s", "label": "標的", "align": "left"},
+        {"key": "a", "label": "實際", "align": "right"},      # 方向在格子裡,不上色:
+        {"key": "t", "label": "目標", "align": "right"}],     # 部位方向不是賺賠
+        "rows": rows, "caption": cap})
+'''
+add_widget("positions", "block", "持倉明細", block_type="table",
+           refresh_cron="*/5 * * * *", refresh_human="每 5 分鐘", script=script, w=6, h=4)
+```
+
+Zero fetch and no keys: `manager/last_reconcile.json` is written by `lib.portfolio.reconcile()`
+on every round, and `manager/reconciler.py` runs a heartbeat round every 5 minutes even when no
+strategy moved (`RECONCILE_EVERY_S = 300`), so `*/5` and the snapshot's own cadence line up —
+faster would redraw the same file. `w=6, h=4` because the `table` default 6×3 holds five rows.
+
+**What the snapshot actually holds**, and what follows from it: `{"ts", "target", "actual",
+"orders"}` (plus `"ledger"` when `self_ledger` is on). `actual` is what `get_positions()` returned
+that round *after* `lib/venue_wiring.auto_get_positions()` mapped it — `{key: {"side", "size"}}`,
+where `size` is the **account-currency notional** (`size × mark_price`) for a crypto swap, **lots**
+for a capital account, and the inventory value for a `SYMBOL@spot` row. The base-currency quantity
+and the mark price are gone by then, so the 數量 column is money, not coins — label it that way.
+
+**進場均價 and 未實現損益 are not columns, because nothing on this machine knows them.** A
+`lib/account_*.py` position row is `{symbol, side, size, mark_price}` (capital's is
+`{symbol: {side, size}}`, lots) — no entry price at any venue — and no other file stores one: `manager/orders.jsonl` keeps each leg's `fill_price`, but averaging
+those into a cost basis is position accounting the machine does not do, on a log that
+`references/manager.md` § self_ledger already documents as drift-prone. So the card shows **實際 vs
+目標** instead, which is the honest superset: what is held, and whether the bot still wants it.
+If the user asks for entry price and unrealised PnL, say the machine has no source for them today
+rather than printing a number derived from a guess.
+
+Two limits worth saying out loud. **One card, one account**: a machine trading both TW and crypto
+would mix TWD and USDT in one money column, and there is no FX rate on the machine to bridge them
+— filter on the target row's `exchange` and give each account its own card. And a machine that has
+never reconciled has no snapshot: the card then lists targets with 實際 = 「—」 and the caption says
+so. Never relabel a target as a position. `report_templates.table` is not used here because it
+forces a block `title`, and the tile header is already the title.
 
 ### A `table` scanner widget, hourly (machine)
 
@@ -311,6 +476,107 @@ Hourly is written `0 */1 * * *`: the plain `0 * * * *` is not in the Windows sub
 (`references/reports.md` §8) and would not be installed there. `0 9-14 * * 1-5` would fit
 trading hours better on Linux but is outside that subset too — pick the cadence for the
 machine you are on and say which you chose.
+
+### A `kpi_row` Taiwan market-temperature widget, once a day (machine)
+
+```python
+from lib.watch import add_widget
+
+script = '''
+from datetime import datetime, timedelta
+from lib.data import (fetch_twmarket_index, fetch_twmarket_institutional,
+                      fetch_twmarket_margin, fetch_twmarket_turnover)
+from lib.report_templates import TPE, headers_from_env, kpi, kpi_row
+from lib.watch import write_data
+
+hdrs = headers_from_env()
+today = datetime.now(TPE)
+start, end = (today - timedelta(days=30)).strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
+
+def series(df, col):                     # 有值的那一欄;空的、缺欄的都回 None
+    if df is None or col not in getattr(df, "columns", []):
+        return None
+    s = df[col].dropna()
+    return s if len(s) else None
+
+items, days = [], []
+s = series(fetch_twmarket_index(start, end, hdrs), "Close")          # 大盤指數只有 OHLC
+if s is not None and len(s) > 1:
+    close = float(s.iloc[-1])
+    chg = (close / float(s.iloc[-2]) - 1) * 100
+    items.append(kpi("加權指數", f"{close:,.2f}",
+                     "pos" if chg > 0 else "neg" if chg < 0 else "neutral",
+                     delta=f"{chg:+.2f}% · {s.index[-1]:%m/%d} 收"))
+    days.append(s.index[-1])
+
+s = series(fetch_twmarket_turnover(start, end, hdrs), "value")       # 成交金額,元
+if s is not None:
+    val, avg5 = float(s.iloc[-1]), float(s.tail(5).mean())
+    items.append(kpi("成交值", f"{val / 1e12:.2f}", "neutral", unit="兆",
+                     delta=f"{(val / avg5 - 1) * 100:+.1f}% vs 5 日均 · {s.index[-1]:%m/%d}"))
+    days.append(s.index[-1])
+
+s = series(fetch_twmarket_institutional(start, end, hdrs), "foreign")  # 淨買賣超金額,元
+if s is not None:
+    v = float(s.iloc[-1])
+    items.append(kpi("外資買賣超", f"{v / 1e8:+,.1f}",
+                     "pos" if v > 0 else "neg" if v < 0 else "neutral",
+                     unit="億", delta=f"{s.index[-1]:%m/%d}"))
+    days.append(s.index[-1])
+
+s = series(fetch_twmarket_margin(start, end, hdrs), "margin_balance")  # 融資餘額,張
+if s is not None and len(s) > 1:
+    v, prev = float(s.iloc[-1]), float(s.iloc[-2])
+    items.append(kpi("融資餘額", f"{v / 1e4:,.1f}", "neutral", unit="萬張",
+                     delta=f"{(v - prev) / 1e4:+,.1f} 萬張 · {s.index[-1]:%m/%d}"))
+    days.append(s.index[-1])
+
+if len(items) == 4:                      # 缺一格就不發,卡片留上一次的數字——三格的溫度列
+                                         # 會被讀成「那一項沒有」,不是「沒抓到」
+    ds = sorted({d.strftime("%Y-%m-%d") for d in days})   # 各欄資料日不一定同一天
+    block = kpi_row(items)
+    block["caption"] = ("TWSE 盤後統計,非即時;**各格資料日可能不同**——融資餘額當日約 21:00 才\n"
+                        "公布,傍晚跑的話那一格是前一個交易日(所以每格 delta 都帶自己的日期)。資料日 "
+                        + (ds[-1] if len(ds) == 1 else ds[0] + "~" + ds[-1] + ",見各格日期"))
+    write_data("tw-temp", block)
+'''
+add_widget("tw-temp", "block", "台股大盤溫度 · 盤後", block_type="kpi_row",
+           refresh_cron="10 8 * * *", refresh_human="每天 16:10(台北)", script=script)
+```
+
+Four `lib.data` calls, all month-file cached, on a series that changes once a day — so the card
+runs once a day and nothing is gained by running it more often. `report_templates.tw_market_brief`
+computes the same four numbers for the morning report; this is that row, on the board.
+
+**The cron is the machine's local clock, and the Linux fleet runs on UTC** (that is why the
+strategy-health example below imports `TPE`), so 16:10 Taipei is `10 8 * * *` there and
+`10 16 * * *` on a box whose clock is Taipei — check `date` before you pick one, and restate
+「每天 16:10(台北)」 to the user, which is the only form they see. `M H * * *` is inside the
+Windows subset (`references/reports.md` §8).
+
+**Two of the four numbers are a day behind when you run this at 16:10.** Margin balance is
+published around 21:00 Taipei, so an afternoon run gets the previous session's figure; that is why
+every cell carries its own date in `delta` and the caption says the dates can differ. If you would
+rather have all four on the same day, schedule it the next morning instead (`0 22 * * *` UTC =
+06:00 Taipei) and title it 昨日盤後 — say which one you chose. Never let a stale cell sit under a
+fresh-looking timestamp without its date.
+
+**Say the day, in a place that cannot be cut off.** The tile's own timestamp is the *run* time, so
+on a holiday this card republishes yesterday's close with a fresh "updated at" — the title carries
+`盤後` and the index cell's `delta` carries the trading day for exactly that reason; the caption
+holds the 口徑 line but is the first thing a short tile clips. A card that reads "13:10 更新" over a
+09/03 close is the misreading this one must not create. For the intraday number use the stream
+tile instead — `add_widget("taiex", "price", "加權指數", symbol="TAIEX")` — the two complement each
+other: live index above, after-hours context below.
+
+**漲跌家數 is not a cell.** There is no market-wide breadth function on the machine;
+`fetch_twstock_quote_batch` takes 50 ids per call, so the whole market is ~48 calls per run and
+anything cheaper is an approximation. If the user wants it, offer the Top-200 version and put the
+pool in the label (「漲跌家數(權值 200)」) — never a number that looks like the whole market.
+**If one fetch fails, publish nothing.** `series()` turns a failed or empty fetch into `None` and
+the cell is skipped, so `if items:` alone would still publish a half row — a three-cell 大盤溫度
+reads as "外資沒買賣超" rather than "那一格沒抓到". Require all four (`if len(items) == 4:`) and
+let the tile keep its previous numbers, marking itself stale after 3× the period.
 
 ### A `table` strategy-health widget every 15 minutes (machine)
 
