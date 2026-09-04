@@ -747,11 +747,17 @@ things to tell the user about rather than work around:
   them is fine; telling the user it is *his symbol's* data is not. The api response carries a
   `scope` field and that is the authority — verified on prod: those five rows really are
   `scope = market`, so the card labels them for you.
-- **Some indicators are coarser than the candles and degrade to a few points.**
-  `squeeze_momentum`'s finest period is 1d: measured against a 1m chart it comes back with
-  **one point**, 5m three, 15m seven, 60m fourteen. Nothing errors — there is simply no line to
-  look at. Match the indicator's resolution to the interval; a 1d indicator belongs under 60m
-  or 1d candles.
+- **An indicator follows the card's interval — except when its own floor is coarser.** The
+  platform resamples to whatever the card asks for, down to that indicator's `min_period`.
+  Read off prod (`indicators.min_period`), the floors are: **`squeeze_momentum` 1d**,
+  **`capital_shortage` 1h**, and **every other line indicator 5min** — so on a 60m card
+  `holder_concentration` really is one point per hour, not per day. **Do not tell the user an
+  indicator is "daily" unless it is one of those two**; measured on prod, `holder_concentration`
+  on a 60m card returns 336 points spaced exactly 3600s apart. If you have not checked, say you
+  have not checked.
+  A floor coarser than the card degrades quietly: `squeeze_momentum` against a 1m chart comes
+  back with **one point**, 5m three, 15m seven, 60m fourteen. Nothing errors — there is simply
+  no line to look at, so a 1d indicator belongs under 60m or 1d candles.
 - **Parameters are the platform's defaults, and v1 cannot change them.** `funding_rate`
   (exchange), `liquidation` / `taker_intensity` / `unusual_movement` (time frame) and
   `whale_hunter` (time frame and score type) all take parameters on the platform, but `panes`
