@@ -1,0 +1,10 @@
+# Secret scanning at commit time. Activate once per clone:
+#   pip install pre-commit && pre-commit install
+# The hook auto-downloads the pinned gitleaks binary; blocks a commit that
+# introduces a detectable secret. To bypass a false positive:
+#   SKIP=gitleaks git commit ...   (or add an inline gitleaks:allow comment)
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
