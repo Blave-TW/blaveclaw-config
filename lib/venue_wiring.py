@@ -53,10 +53,11 @@ def read_env(path=".env"):
 
 
 # Deployment redline L2 (spec §3.2): manager/credentials.ui.json is written by
-# the platform runtime on every UI bind — the venue ids (paper included) whose
-# credentials the user confirmed through the web. When it exists, only those
-# ids can route; keys an agent hand-writes into .env never become a live
-# venue. Missing/corrupt manifest = fail-open (pre-manifest machines
+# the platform runtime on every bind — a web bind, or the chat bind through
+# lib.venue.bind (AGENTS.md › Exchange API Keys) — the venue ids (paper
+# included) whose credential pair went through that writer. When it exists,
+# only those ids can route; keys an agent hand-writes into .env never become a
+# live venue. Missing/corrupt manifest = fail-open (pre-manifest machines
 # unchanged). Warn-once set is process-lifetime — official_venues runs every
 # reconcile round and must not spam the log; the USER notify (spec §3.2, a
 # filtered venue means "looks bound, will not trade" and staying silent hides

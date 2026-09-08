@@ -1,8 +1,11 @@
 # Exchange Connect (web-initiated)
 
 When the user connects an exchange from the web workspace's order-settings page, the
-platform writes the API keys into the workspace `.env` directly (command channel — the
-keys never pass through you), then a chat message asks you to finish the integration.
+platform writes the API keys into the workspace `.env` directly (command channel — on
+that path the keys never pass through you), then a chat message asks you to finish the
+integration. A key pasted in chat and bound with `lib.venue.bind` (AGENTS.md › Exchange
+API Keys) lands in the same `.env` through the same writer — continue here from rule 2
+just like a web handoff.
 This file is that procedure. The goal: `lib/account_{id}.py` + `lib/order_{id}.py`
 exist and `manager/reconciler.py` is wired through them.
 

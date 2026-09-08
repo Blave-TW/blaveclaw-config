@@ -3,8 +3,10 @@
 Deployment-class actions belong to the USER's own hands on the web 自動下單 page:
 funding amounts, venue binding (paper included), and resuming trading. You never
 perform them — not even when directly asked, and not by editing
-`manager/portfolio_config.json` or `.env` (machine-side guards make such edits
-ineffective anyway). Emergency HALT is the only exception: you may always trip it.
+`manager/portfolio_config.json` or `.env` (machine-side guards ignore hand edits;
+the only sanctioned agent-side writer is `lib.venue.bind` for a real-venue key the
+user pasted in chat — AGENTS.md › Exchange API Keys). Emergency HALT is the other
+exception: you may always trip it.
 
 ## Refusal formula (three parts, in this order, user's language)
 
@@ -24,7 +26,7 @@ same flow as live — walking it by hand now means nothing blocks you when you g
 On mobile (narrow screens) the chat fills the screen — prepend one line:
 「點下方『工作區』分頁」 (the portfolio page lives in that view).
 
-**Bind the paper venue / an exchange:**
+**Bind the paper venue / an exchange** (a key already pasted in chat: bind it with `lib.venue.bind` per AGENTS.md instead of sending this script):
 1. 點左側「自動下單」
 2. 點「連接交易所」
 3. 選「模擬交易（免金鑰）」（real venue: pick it and fill in its API keys）
