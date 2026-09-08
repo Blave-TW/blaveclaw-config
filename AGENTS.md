@@ -166,6 +166,12 @@ When writing any process that runs continuously (live monitors, scanners, paper-
 
 Full memory-discipline checklist: `references/deployment.md` › *Long-running processes — memory discipline*.
 
+## Long Jobs (> ~2 min: param scans, deep-history / big-universe backtests, cold cache)
+
+- **Say how long it will take and how you will report BEFORE starting.** Text you write before a tool call is not a chat message (web: activity log only; Telegram: dropped) — on Telegram send that one line with `lib.notify.send_text` first, then run.
+- **≤ 10 min → foreground with an explicit `timeout`; longer or unknown → background to `tmp/<job>.log`, poll every 2–3 min and relay the newest `[scan]` / `[mcpt]` / `[fetch]` line** (lib prints `done/total, ~N left` at every 10 %); a stale log = hang → report, don't restart.
+- **Report with elapsed time**; cut short by timeout/error → say where it got to (last progress line) and what you propose — Iteration Brakes apply. Commands and examples: `references/deployment.md` › *Long jobs — progress reporting*.
+
 ## Billing — when the user asks what costs what
 
 Three meters, all drawn from the prepaid credit wallet; numbers and code sources live in `references/billing.md` — read it before answering, never quote a price from memory.

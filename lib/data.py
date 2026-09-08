@@ -11,6 +11,12 @@ import pyarrow.parquet as pq
 from datetime import datetime, timedelta
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+try:
+    from lib.progress import Progress
+except ImportError:  # half-updated workspace (lib/progress.py not copied yet) — fail open, no progress lines
+    class Progress:
+        def __init__(self, *a, **k): pass
+        def tick(self, n=1): pass
 
 
 class _RateLimiter:
@@ -798,10 +804,12 @@ def _fetch_kline_raw(symbol, interval, start, end, headers):
         return r.json()
 
     rows = []
+    progress = Progress(f'fetch {symbol} {interval}', len(chunks), 'chunks')  # cold deep history → ETA lines
     with ThreadPoolExecutor(max_workers=10) as pool:
         futures = {pool.submit(_fetch_one, cs, ce): (cs, ce) for cs, ce in chunks}
         for future in as_completed(futures):
             rows.extend(future.result())
+            progress.tick()
 
     if not rows:
         return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume'])
@@ -986,12 +994,14 @@ def _fetch_alpha_raw(endpoint, params, headers, start, end):
         return data.get('timestamp', []), data.get('alpha', [])
 
     ts_list, alpha_list = [], []
+    progress = Progress(f'fetch {endpoint}', len(chunks), 'chunks')
     with ThreadPoolExecutor(max_workers=10) as pool:
         futures = {pool.submit(_fetch_one, cs, ce): (cs, ce) for cs, ce in chunks}
         for future in as_completed(futures):
             ts, alpha = future.result()
             ts_list.extend(ts)
             alpha_list.extend(alpha)
+            progress.tick()
 
     df = pd.DataFrame({
         'time':  pd.to_datetime(ts_list, unit='s', utc=True),

@@ -213,70 +213,81 @@ def scan_grid(data, compute_signals_fn, row_vals, col_vals,
     warnings.filterwarnings('ignore', category=FutureWarning)
     import pandas as pd
     from lib.analysis import precise_pnl, compute_stats
+    try:
+        from lib.progress import Progress
+    except ImportError:  # half-updated workspace (lib/progress.py not copied yet) — fail open, no progress lines
+        class Progress:
+            def __init__(self, *a, **k): pass
+            def tick(self, n=1): pass
 
     row_vals = list(row_vals)
     col_vals = list(col_vals)
     grid     = np.full((len(row_vals), len(col_vals)), np.nan)
 
-    for i, rv in enumerate(row_vals):
-        for j, cv in enumerate(col_vals):
-            # an explicit valid_fn is checked BEFORE compute_signals — an invalid
-            # combo (entry ≤ exit) used to pay the full signal pass and then be
-            # dropped; that is ~40% of a threshold grid. Without one, the default
-            # depends on the result's type (Type A: row > col; Type C: all valid).
-            if valid_fn is not None and not valid_fn(rv, cv):
+    # an explicit valid_fn is checked BEFORE compute_signals — an invalid combo
+    # (entry ≤ exit) used to pay the full signal pass and then be dropped; that is
+    # ~40% of a threshold grid. Without one, the default depends on the result's
+    # type (Type A: row > col; Type C: all valid). Cells are listed up front (valid_fn
+    # called once per cell) so the progress total matches the cells actually run.
+    cells    = [(i, rv, j, cv) for i, rv in enumerate(row_vals) for j, cv in enumerate(col_vals)
+                if valid_fn is None or valid_fn(rv, cv)]
+    # Progress lines (stdout, every 10 % of the cells) so a long scan shows an ETA in
+    # its log and a call cut short by its timeout still shows where it got to.
+    progress = Progress('scan', len(cells), 'cells')
+
+    for i, rv, j, cv in cells:
+        result = compute_signals_fn(data, **{row_param: rv, col_param: cv})
+        progress.tick()
+
+        # ── Type C: (weights_mat, price_df[, exec_at_close]) ──────────────
+        if isinstance(result, tuple) and isinstance(result[0], np.ndarray):
+            weights_orig, price_df, *_opt = result
+            w_orig = weights_orig[warmup:]
+            pf     = price_df.iloc[warmup:]
+            cl     = pf['close'].values
+            op     = pf['open'].values
+            n, k   = w_orig.shape
+            w_curr = np.vstack([np.zeros((1, k)), w_orig[:-1]])
+            w_prev = np.vstack([np.zeros((2, k)), w_orig[:-2]])
+            exec_s = np.zeros(n, dtype=bool)
+            if _opt:  # honour exec_at_close, same shift as lib/runner.py
+                ea = np.asarray(_opt[0], dtype=bool)[warmup:]
+                exec_s[1:] = ea[:-1]
+            pf_ret, _, delta_w, _ = precise_pnl(cl, op, w_curr, w_prev, exec_s, fee)
+            if not np.count_nonzero(np.nan_to_num(delta_w)):
+                continue  # 0 trades → leave NaN; Sharpe 0.0 would beat losing cells
+            sharpe, *_ = compute_stats(pf_ret, pf['close'].index)
+
+        # ── Type A: pd.Series or (pd.Series, exec_at_close) ──────────────
+        else:
+            if valid_fn is None and not rv > cv:
                 continue
-            result = compute_signals_fn(data, **{row_param: rv, col_param: cv})
-
-            # ── Type C: (weights_mat, price_df[, exec_at_close]) ──────────────
-            if isinstance(result, tuple) and isinstance(result[0], np.ndarray):
-                weights_orig, price_df, *_opt = result
-                w_orig = weights_orig[warmup:]
-                pf     = price_df.iloc[warmup:]
-                cl     = pf['close'].values
-                op     = pf['open'].values
-                n, k   = w_orig.shape
-                w_curr = np.vstack([np.zeros((1, k)), w_orig[:-1]])
-                w_prev = np.vstack([np.zeros((2, k)), w_orig[:-2]])
-                exec_s = np.zeros(n, dtype=bool)
-                if _opt:  # honour exec_at_close, same shift as lib/runner.py
-                    ea = np.asarray(_opt[0], dtype=bool)[warmup:]
-                    exec_s[1:] = ea[:-1]
-                pf_ret, _, delta_w, _ = precise_pnl(cl, op, w_curr, w_prev, exec_s, fee)
-                if not np.count_nonzero(np.nan_to_num(delta_w)):
-                    continue  # 0 trades → leave NaN; Sharpe 0.0 would beat losing cells
-                sharpe, *_ = compute_stats(pf_ret, pf['close'].index)
-
-            # ── Type A: pd.Series or (pd.Series, exec_at_close) ──────────────
+            if isinstance(result, tuple):
+                sig, settle = result[0], result[1]
             else:
-                if valid_fn is None and not rv > cv:
-                    continue
-                if isinstance(result, tuple):
-                    sig, settle = result[0], result[1]
-                else:
-                    sig, settle = result, None
-                df_scan = data.iloc[warmup:] if warmup else data
-                cl      = df_scan['Close'].values
-                op      = df_scan['Open'].values
-                n       = len(df_scan)
-                sig_s   = sig.iloc[warmup:] if warmup else sig
-                pos     = sig_s.ffill().fillna(0).values
-                w_curr  = np.empty(n); w_curr[0] = 0.0; w_curr[1:] = pos[:-1]
-                w_prev  = np.zeros(n)
-                if n >= 2: w_prev[2:] = pos[:-2]
-                if settle is not None:
-                    settle_s = settle.iloc[warmup:] if warmup else settle
-                    exec_s   = np.zeros(n, dtype=bool)
-                    exec_s[1:] = settle_s.values.astype(bool)[:-1]
-                else:
-                    exec_s = np.zeros(n, dtype=bool)
-                pf_ret, _, delta_w, _ = precise_pnl(cl, op, w_curr, w_prev, exec_s, fee)
-                if not np.count_nonzero(np.nan_to_num(delta_w)):
-                    continue  # 0 trades → leave NaN; Sharpe 0.0 would beat losing cells
-                sharpe, *_ = compute_stats(pf_ret, df_scan.index)
+                sig, settle = result, None
+            df_scan = data.iloc[warmup:] if warmup else data
+            cl      = df_scan['Close'].values
+            op      = df_scan['Open'].values
+            n       = len(df_scan)
+            sig_s   = sig.iloc[warmup:] if warmup else sig
+            pos     = sig_s.ffill().fillna(0).values
+            w_curr  = np.empty(n); w_curr[0] = 0.0; w_curr[1:] = pos[:-1]
+            w_prev  = np.zeros(n)
+            if n >= 2: w_prev[2:] = pos[:-2]
+            if settle is not None:
+                settle_s = settle.iloc[warmup:] if warmup else settle
+                exec_s   = np.zeros(n, dtype=bool)
+                exec_s[1:] = settle_s.values.astype(bool)[:-1]
+            else:
+                exec_s = np.zeros(n, dtype=bool)
+            pf_ret, _, delta_w, _ = precise_pnl(cl, op, w_curr, w_prev, exec_s, fee)
+            if not np.count_nonzero(np.nan_to_num(delta_w)):
+                continue  # 0 trades → leave NaN; Sharpe 0.0 would beat losing cells
+            sharpe, *_ = compute_stats(pf_ret, df_scan.index)
 
-            if np.isfinite(sharpe):
-                grid[i, j] = sharpe
+        if np.isfinite(sharpe):
+            grid[i, j] = sharpe
 
     return grid
 

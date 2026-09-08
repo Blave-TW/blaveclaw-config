@@ -78,6 +78,31 @@ RAM on the machine is limited and shared with the agent runtime itself (check wi
 - After starting a long-running process, check its memory once (`ps -o rss= -p <pid>`) and tell the user roughly how much it uses; if it grows run over run, treat that as a bug and fix it before leaving it running.
 - Every daemon must heartbeat: touch `state/heartbeat/<name>` at the top of each loop iteration, and register the daemon in `state/deployments.json` so `manager/healthcheck.py` alerts the user when it dies (see *Deployment Healthcheck* above). A daemon nobody watches WILL die silently and the user finds out weeks later.
 
+## Long jobs — progress reporting
+
+Real users have asked "are you still running?", "it's been two hours", "did it finish or crash?" during parameter scans and deep-history backtests. The fix is procedure, not code: say what is coming, keep the run observable, report with the elapsed time.
+
+**What the user actually sees while a tool runs** (runtime facts — do not assume otherwise):
+- Web workspace: an activity block with a per-second elapsed clock and one receipt row per tool call (running → done). The text you write *before* a tool call goes into that block's collapsible reasoning log, never into the chat bubble or the history.
+- Telegram: only the typing indicator. Text you write before a tool call is dropped. The one channel that reaches the user mid-turn is a real message via `lib.notify.send_text`.
+- Tool stdout never reaches the user on either surface — you relay it.
+- The Bash tool's default timeout is 120 s; an explicit `timeout` goes up to 30 min. A call that hits its timeout is NOT killed — the runtime moves it to the background and it keeps running (still writing `scan.json` / `stats.json`) until the turn ends. So after a timeout: read that command's output / `tail` its log until the final line appears; never start a second run (two copies would overwrite each other's output, and it breaks the Iteration Brakes). Any backgrounded process is killed when the turn ends.
+
+**Procedure**
+1. **Estimate** before running: a scan is cells × one `compute_signals` pass (numbers in `references/strategy-code.md` › *Grid size*); a cold 1-min fetch is 30-day chunks, 10 in parallel. Cannot estimate → treat it as long (step 3b) and let the first `[…] ~N left` line give the number.
+2. **Notice — one line, before the run:** the estimate and how you will report, e.g. 「開始掃 15×15=225 格,約 6 分鐘,跑完回報」. Telegram: `python3 -c "from lib.notify import send_text; send_text('開始掃 225 格,約 6 分鐘,跑完回報')"` as its own tool call first. Web: write the line as the narration right before the run's Bash call (it lands in the activity log).
+3. **Run:**
+   - **a. ≤ 10 min** — foreground, `timeout` = 2× the estimate (≤ 30 min). The `[scan]` / `[mcpt]` / `[fetch]` lines come back in the output. If the call still hits its timeout, the run is now in the background and still going: keep reading its output (the tool says where) until the final line — never launch it again.
+   - **b. > 10 min or unknown** — background with the output in a log, then poll:
+     `nohup python3 strategies/<name>/scan.py > tmp/<name>_scan.log 2>&1 &` (same line on Windows — the Bash tool there is Git Bash), then repeat the single command `timeout 150 tail -f -n 3 tmp/<name>_scan.log` (Bash tool `timeout` 180000; no `;`/`&&` chaining — it prints new lines as they land and exits by itself). Jobs past ~30 min: poll every 5 min (`timeout 300`, tool timeout 360000) to keep the turn's step count down. After each poll relay the newest progress line in one short sentence (web: narration; Telegram: `send_text`, at most once per ~10 min or when the ETA changes a lot). Done = the log shows the final line (`Scan written:` / `Heatmap saved:` / the stats block; a Python traceback = crashed). Two polls with no new line = hang: report it with the last line, do not restart on your own.
+4. **Final report** = result + elapsed, e.g. 「掃描 15×15,耗時 7 分 40 秒:穩健點 …」. Timeout / crash / user Stop: what happened, the last progress line, and what you propose — the Iteration Brakes apply (no silent re-run, no widening).
+
+**Progress lines lib prints** (stdout, one per 10 % of the work, with elapsed and ETA; silent when the whole job projects under 5 s — 30 s for MCPT, so the automatic backtest MCPT inside the runner's budget adds nothing to the output):
+- `[scan] 36/120 cells, 2m10s elapsed, ~5m03s left` / `[scan] 120/120 cells done in 7m40s` — `lib/param_scan.scan_grid` (cells = combos that actually run `compute_signals`)
+- `[mcpt] 800/2000 permutations, 12s elapsed, ~18s left` — `lib/validation.mcpt`
+- `[fetch BTCUSDT 1min] 12/61 chunks, 1m02s elapsed, ~4m15s left` — `lib/data` cold deep-history kline / alpha fetches
+Formatting lives in `lib/progress.py` (`Progress(tag, total, unit)` + `tick()`); reuse it in any new long loop rather than hand-rolling a counter.
+
 ## Cron Job Format (Linux)
 **The `cd` is mandatory in every cron entry — and doubly so now that there are two possible starting points.** Cron starts in the home directory of the user whose crontab the entry lives in, and that user differs by RUNTIME: on old BlaveClaw machines the agent runs as `root`, so its entries land in root's crontab and cron starts from `/root` (workspace: `/root/.openclaw/workspace`); on Blave Agent machines the agent runs as `blaveagent`, so its entries land in that user's crontab and cron starts from `/opt/blave-agent` (workspace: `/opt/blave-agent/workspace`). Neither start directory is the workspace — both sit above it. All scripts in this repo use relative paths (`manager/`, `strategies/`, `lib/`, `cache/`), so without `cd`, every relative path resolves from whichever home cron happened to start in → `FileNotFoundError` → the script crashes silently before sending any Telegram notification. Never write an entry that leans on the start directory being what you expect: with two fleets in play, a hardcoded assumption is guaranteed wrong on one of them.
 

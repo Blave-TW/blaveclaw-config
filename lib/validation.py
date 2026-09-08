@@ -14,6 +14,12 @@ import os
 import tempfile
 import numpy as np
 import pandas as pd
+try:
+    from lib.progress import Progress
+except ImportError:  # half-updated workspace (lib/progress.py not copied yet) — fail open, no progress lines
+    class Progress:
+        def __init__(self, *a, **k): pass
+        def tick(self, n=1): pass
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -91,7 +97,12 @@ def mcpt(
 
     actual  = _sharpe(fwd_ret)
     permute = np.random.permutation if rng is None else rng.permutation
-    dist    = np.array([_sharpe(permute(fwd_ret)) for _ in range(n)])
+    dist    = np.empty(n)
+    # stdout ETA lines only past the runner's 30 s automatic-MCPT budget (manual big n)
+    progress = Progress('mcpt', n, 'permutations', min_seconds=30)
+    for k in range(n):
+        dist[k] = _sharpe(permute(fwd_ret))
+        progress.tick()
     p_value = float((dist >= actual).mean())
     return actual, p_value, dist
 
