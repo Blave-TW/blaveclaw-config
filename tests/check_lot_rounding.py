@@ -91,10 +91,10 @@ def entry(order, usd):
 # the residual that used to loop forever: 0.000897 BTC floors to 0, rounds to one lot
 check(abs(entry(fake, 70.25) - 0.001) < 1e-12,
       "$70.25 residual (0.9 lot) rounds UP to one lot instead of flooring to zero")
-# and the round-trip closes: 157 held + 78.3 bought = 235 vs a 227.3 target, and
-# the next diff (-8) is inside reconcile's THRESHOLD of 10, so no re-order
-check(abs((157.04 + LOT_USD) - 227.30) < 10,
-      "after rounding, the next round's diff falls inside THRESHOLD (no re-order)")
+# What happens to the leftover is NOT this file's claim to make: rounding leaves
+# up to half a lot ($39 here), which no flat threshold converges — the entry-side
+# gate does (manager/reconciler._symbol_threshold, asserted behaviourally in
+# tests/check_reconcile_threshold.py).
 
 check(entry(fake, 30.0) == 0.0,
       "$30 (under half a lot) still rounds to nothing — no trade, no order")

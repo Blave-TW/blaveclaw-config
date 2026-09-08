@@ -114,7 +114,7 @@ params['quantity'] = format(qty, 'f')   # plain string — never 1e-05 notation
 
 After flooring: if qty < min qty or `qty * price` < min notional → `return False` (skip, no phantom-trade notification). Never guess precision from memory — read it from the exchange API or the relevant `skills/blave-quant/references/` file.
 
-**The order lib floors; the auto-wiring decides the lot count.** `lib/venue_wiring.py` sizes every leg to a whole lot BEFORE it reaches `format_qty`, so the floor above is a safety net, not the sizing rule: reduce legs CEIL and cap at the position (`_reduce_qty`), entry legs ROUND half-up (`_entry_qty`). Entries used to inherit the floor, which strands the sub-lot remainder forever whenever an allocation is only a few lots wide — measured 2026-09-08 on uid 32321, `$289` on BTC perps is 3.7 lots of ~`$78`, so a `$227` target floored to `$157` and left a `$70` gap that was over reconcile's `$10` `THRESHOLD` but under one lot: every round re-dispatched an order the venue could never accept, and the gap could not shrink because the next fillable size was a whole lot away. Rounding lands the position on the nearest grid point, so the leftover is at most half a lot and the next round's diff falls inside `THRESHOLD`. The trade-off is deliberate: a position can sit up to half a lot OVER its target (`$289` allocated, up to ~`$313` held on BTC), the same round-half-up capital lots have always used.
+**The order lib floors; the auto-wiring decides the lot count.** `lib/venue_wiring.py` sizes every leg to a whole lot BEFORE it reaches `format_qty`, so the floor above is a safety net, not the sizing rule: reduce legs CEIL and cap at the position (`_reduce_qty`), entry legs ROUND half-up (`_entry_qty`). Entries used to inherit the floor, which strands the sub-lot remainder forever whenever an allocation is only a few lots wide — measured 2026-09-08 on uid 32321, `$289` on BTC perps is 3.7 lots of ~`$78`, so a `$227` target floored to `$157` and left a `$70` gap that was over reconcile's `$10` `THRESHOLD` but under one lot: every round re-dispatched an order the venue could never accept, and the gap could not shrink because the next fillable size was a whole lot away. Rounding lands the position on the nearest grid point, so the leftover is at most half a lot — and the leftover is converged by the PER-SYMBOL **entry** gate, not by the flat `THRESHOLD` (half a BTC lot is ~`$39`, well over `10`: on its own the next round would ceil-sell a whole lot back and the one after would buy it again — real fills, real fees, every 300s). `manager/reconciler.py::_symbol_threshold` gates ENTRY legs at `max(THRESHOLD, venue minimum)`, so a leftover under one lot is never bought back; REDUCE legs (shrink / close / the close leg of a flip) keep the flat `THRESHOLD`, because `_reduce_qty` ceils+caps them into placeable size and a one-lot position must always be closable. The trade-off is deliberate: a position can sit up to half a lot OVER its target (`$289` allocated, up to ~`$313` held on BTC), the same round-half-up capital lots have always used.
 
 ```
 bash manager/start_reconciler.sh
@@ -359,9 +359,10 @@ branch (`_is_capital_routed()` / `exchange == 'capital'`) that:
   semantics* below)
 - round-half-up's the target/actual lot diff to a whole lot (`math.floor(raw_lots + 0.5)`, not
   Python's `round()` — that does banker's rounding, which rounds a `0.5` tie down; a diff below
-  0.5 lot rounds to 0 and places nothing. reconcile()'s account-currency `THRESHOLD` is
+  0.5 lot rounds to 0 and places nothing. reconcile()'s account-currency gate — per symbol on
+  ENTRY legs, `max(THRESHOLD, that instrument's venue minimum)`, see `_symbol_threshold` — is
   crypto-notional scale and meaningless at lot count, so `lib.portfolio.compute_diff` skips it
-  entirely for `futures_contracts` rows — this round-half-up is the only gate) and calls
+  entirely for `futures_contracts` rows; this round-half-up is the only gate on capital) and calls
   `lib.order_capital.place_futures_market_order()` with the near-month alias
   (`TX00`/`MTX00`/`TM0000`)
 - is scoped to `asset_specs[strategy]["type"] == "futures_contracts"` only — a capital strategy

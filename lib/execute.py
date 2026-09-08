@@ -512,13 +512,18 @@ def resolve_execution(contributors, config=None):
     return spec if isinstance(spec, dict) else {"type": "market"}
 
 
-def _venue_min_slice_usd(symbol):
+def _venue_min_slice_usd(symbol, floor=_MIN_SLICE_USD):
     """Smallest USD a slice can be on the bound venue: our floor, the
     instrument's min qty valued at mark (BTC perps: $100+ — the floor alone
     caused an abort/re-dispatch loop), and its min notional. Best-effort: a
     failed lookup returns the floor — a too-small slice then just falls back
-    to one market order at placement instead of blocking dispatch."""
-    floor = _MIN_SLICE_USD
+    to one market order at placement instead of blocking dispatch.
+
+    `floor` is the caller's own idea of "too small to bother with": slicing
+    uses _MIN_SLICE_USD, manager/reconciler passes its THRESHOLD so a failed
+    lookup degrades to exactly the flat gate it had before (and so a spot
+    symbol, which returns the floor unchanged below, keeps the gate
+    lib.portfolio.spot_scope's own default is pinned to)."""
     try:
         import importlib as _il
         from lib import venue_wiring as vw
@@ -535,8 +540,13 @@ def _venue_min_slice_usd(symbol):
         mark = float(order.get_mark_price(env, sym))
         min_qty_usd = (float(r.get("min_qty") or 0)
                        * float(r.get("contract_value") or 1) * mark)
-        # 1.05: the mark moves between sizing and placement — a slice sized
-        # exactly at the minimum floors to zero the moment price ticks up
+        # 1.05 is a STALE-MARK buffer, not a placement-slippage one: this
+        # value is cached by the caller (manager/reconciler, up to
+        # MIN_ORDER_TTL_S) while the gap compared against it is priced now, so
+        # a 2% tick inside that window would let a 0.99-lot shortfall past a
+        # 1.0x gate — which venue_wiring._entry_qty then rounds UP to a whole
+        # lot, and the next reduce ceils it back off. 5% covers the drift a
+        # 60s window sees.
         return max(floor, min_qty_usd * 1.05, float(r.get("min_notional") or 0))
     except Exception as e:
         logging.warning(f"[execute] venue min lookup failed for {symbol} ({e}) — "

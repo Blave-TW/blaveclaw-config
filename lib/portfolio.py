@@ -693,6 +693,16 @@ def aggregate_portfolio():
     return result
 
 
+def _resolve_threshold(threshold, symbol, reduce_only=False):
+    """`threshold` is either a flat number or a callable(symbol, reduce_only).
+    manager/reconciler passes the callable so ENTRY legs can be gated at the
+    venue's own minimum order size (an entry under one lot rounds UP to a whole
+    lot and then gets sold back — real fees, every round). It answers with the
+    flat gate for reduce legs, which must never be blocked. The callable owns
+    its own fallback."""
+    return threshold(symbol, reduce_only) if callable(threshold) else threshold
+
+
 def compute_diff(target, actual, threshold=10):
     """
     Compute required position adjustments.
@@ -703,7 +713,8 @@ def compute_diff(target, actual, threshold=10):
       signed_diff < 0 → need to sell/short
       asset_spec → passed through from portfolio_config for place_order to use
 
-    `threshold` is account-currency scale (crypto notional) and meaningless
+    `threshold` is a flat number or a callable(symbol, reduce_only) (see
+    _resolve_threshold); it is account-currency scale (crypto notional) and meaningless
     for a symbol whose 'size' is a LOT COUNT (asset_specs[strategy]["type"] ==
     "futures_contracts", e.g. capital/TW futures — see strategy_amounts):
     diffs there are single/low-double-digit lots, so a currency threshold of
@@ -730,7 +741,15 @@ def compute_diff(target, actual, threshold=10):
         asset_spec = t.get('asset_spec')
         is_lot_based = ((asset_spec or {}).get('type') == 'futures_contracts'
                          or t.get('exchange') == 'capital' or a.get('exchange') == 'capital')
-        if not is_lot_based and abs(diff) < threshold:
+        # A row whose |target| is SMALLER than what is held carries a reduce
+        # leg (shrink, or a close when the target is gone) — those are gated
+        # flat, never at venue scale: gating them is how a position of exactly
+        # one lot becomes impossible to close. A flip is over both legs' gates
+        # by construction (|actual| + |target|); its legs are gated per side
+        # below.
+        reduces = abs(t_signed) < abs(a_signed)
+        if (not is_lot_based
+                and abs(diff) < _resolve_threshold(threshold, symbol, reduces)):
             continue
 
         orders.append({
@@ -907,7 +926,6 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
         # live 2026-08-14 — "Converged, nothing filled" with zero attempts).
         is_lot_based = ((asset_spec or {}).get('type') == 'futures_contracts'
                          or order.get('exchange') == 'capital')
-        leg_threshold = 0 if is_lot_based else threshold
 
         # Detect position flip: split into reduce-only close + directional open
         # to avoid simultaneous long+short on hedge-mode exchanges. Must use
@@ -939,6 +957,8 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
         failed = False
         legs = []  # per-leg exchange-confirmed fills for orders.jsonl / the web 交易歷史
         for sub_diff, reduce_only, is_entry in sub_orders:
+            leg_threshold = (0 if is_lot_based else
+                             _resolve_threshold(threshold, symbol, reduce_only))
             if abs(sub_diff) < leg_threshold:
                 continue
 

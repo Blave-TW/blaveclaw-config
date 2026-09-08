@@ -289,7 +289,12 @@ def _entry_qty(order, env, sym, qty):
     re-dispatched an order the venue could never accept, and the gap could not
     shrink: the next fillable size is a whole $78 lot away. Rounding lands the
     position on the NEAREST grid point instead, so the leftover is at most half
-    a lot and the following round's diff falls inside THRESHOLD.
+    a lot — which is NOT inside a flat THRESHOLD of 10 on its own (half a BTC
+    lot is ~$39: left there, the next round sells a whole lot back and the one
+    after that buys it again). What converges it is the per-symbol ENTRY gate:
+    manager/reconciler._symbol_threshold gates entries at the venue's own
+    minimum, so a leftover under one lot is not bought back. Reduce legs stay
+    on the flat gate — a close must never be gated out.
 
     math.floor(x + 0.5), not round() — Python rounds a .5 tie to even. Same
     round-half-up reconciler._capital_place_order has always used for capital

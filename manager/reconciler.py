@@ -11,10 +11,70 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 POLL_INTERVAL  = 5    # seconds between polls
 THRESHOLD = 10   # minimum diff (in account currency) to place an order
                  # (lib/portfolio.spot_scope's threshold default tracks this)
+MIN_ORDER_TTL_S = 60  # how long a symbol's venue minimum stays cached: the LOT
+                      # is static for the session, its account-currency VALUE
+                      # is not (it is the lot valued at mark). Shorter than the
+                      # heartbeat on purpose — this dedupes the lookups WITHIN
+                      # a round, it is not a cross-round cache
 DISCONNECT_HALT_AFTER = 3  # 連續 N 次讀不到持倉=交易所鏈路斷了,自動 HALT
 RECONCILE_EVERY_S = 300  # 定期心跳對帳:就算沒有任何 mtime 變動也要每 5 分鐘
                          # 對一次帳——斷鏈、金鑰失效、倉位漂移不能等下一次訊號
                          # 變動(可能一小時後)才被發現
+
+
+_min_order_gate = {}  # symbol -> (expires_at, entry-side gate)
+
+
+def _symbol_threshold(symbol, reduce_only=False):
+    """The reconcile gate for ONE symbol on ONE side.
+
+    ENTRY legs: THRESHOLD, or the venue's own minimum order size when larger.
+    venue_wiring._entry_qty rounds an entry half-up to a whole lot, so a gap
+    under one lot buys a WHOLE lot and lands the position over target; the
+    reduce leg that follows ceils to a whole lot and sells it back — on a
+    coarse instrument (one BTC perp lot ≈ $78, against a flat gate of 10) that
+    is a real buy/sell round trip every 300s, fees included. Gating entries at
+    the venue's own minimum converges the leftover instead. Deliberately the
+    ONE-LOT scale and not the half-lot rounding boundary: the boundary is not
+    stable under a moving mark (a leftover of 0.53 lots would pass a half-lot
+    gate and restart the churn).
+
+    The 1.05 inside that minimum (lib.execute._venue_min_slice_usd) is there
+    for THIS cache: the gate carries a mark up to MIN_ORDER_TTL_S old while the
+    gap it judges is priced now. After a ceil-sell leaves the position 0.99
+    lots short, a 2% rise inside the cache window would put the gap over a 1.0x
+    gate — _entry_qty rounds it up to a whole lot, the next reduce ceils it back
+    off, and the churn is back. Do not "simplify" it to 1.0 (pinned in
+    tests/check_reconcile_threshold.py).
+
+    REDUCE legs (shrink, close, and the close leg of a flip): the flat
+    THRESHOLD, always. They do not round half-up — venue_wiring._reduce_qty
+    ceils to a whole lot and caps at the position, so any size is placeable;
+    under self_ledger it floors instead and a sub-lot reduce is a quiet no-op.
+    Gating them would save that one no-op round trip and cost the only thing we
+    must never do: a position of exactly one lot could then not be closed or
+    flipped AT ALL, while the reconciler printed "Converged" every round.
+
+    Lot-based (capital/TW futures) rows never reach here — lib.portfolio skips
+    the account-currency threshold for them entirely.
+    """
+    if reduce_only:
+        return THRESHOLD
+    now = time.time()
+    cached = _min_order_gate.get(symbol)
+    if cached and cached[0] > now:
+        return cached[1]
+    try:
+        from lib.execute import _venue_min_slice_usd
+        gate = _venue_min_slice_usd(symbol, floor=THRESHOLD)
+    except Exception as e:
+        # _venue_min_slice_usd already degrades to the floor internally; this
+        # only catches the import. Either way the fallback is the flat gate =
+        # the behaviour before this function existed.
+        logging.warning(f"[reconciler] venue minimum unavailable for {symbol} ({e})")
+        gate = THRESHOLD
+    _min_order_gate[symbol] = (now + MIN_ORDER_TTL_S, gate)
+    return gate
 
 
 def _active_state_mtimes():
@@ -406,7 +466,8 @@ HEARTBEAT_PATH = Path('state/heartbeat/reconciler')
 
 
 if __name__ == '__main__':
-    logging.info(f"Reconciler started (poll={POLL_INTERVAL}s, threshold={THRESHOLD})")
+    logging.info(f"Reconciler started (poll={POLL_INTERVAL}s, "
+                 f"threshold=max({THRESHOLD}, per-symbol venue minimum))")
 
     # A crash mid-chase strands a resting limit order on the venue (market/TWAP
     # slices die clean — only chase posts resting orders). Sweep our own
@@ -458,7 +519,7 @@ if __name__ == '__main__':
                 orders = reconcile(
                     get_positions_fn=_get_positions_guarded,
                     place_order_fn=place_order,
-                    threshold=THRESHOLD,
+                    threshold=_symbol_threshold,
                     send_telegram_fn=send_telegram,
                 )
                 if not orders:
