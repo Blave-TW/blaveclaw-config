@@ -49,7 +49,7 @@ def _notify_best_effort(msg):
         logging.error(f"[notify-unavailable] {msg}")
 
 
-def _write_reconcile_snapshot(target, actual, orders, ledger=None):
+def _write_reconcile_snapshot(target, actual, orders, ledger=None, gates=None):
     """Record what this reconcile actually saw, for anything that needs to show
     live positions without querying the exchange itself.
 
@@ -62,6 +62,12 @@ def _write_reconcile_snapshot(target, actual, orders, ledger=None):
     off) is recorded alongside `actual` so a future workspace view can show
     "bot's own book" vs "exchange's real position" side by side instead of only
     ever seeing whichever one reconcile() happened to diff against.
+
+    `gates` (compute_diff's out-param, {symbol: {usd, diff}}) is the only way
+    the workspace can explain the silent case: target 100 / actual 78 / diff 22
+    with no order and no error, because 22 is under that instrument's ENTRY
+    gate. The number is not recomputable off-machine — it is the venue's own
+    minimum valued at mark, read with the user's keys.
 
     Best-effort: a failure here must never stop a reconcile that already placed
     orders.
@@ -76,6 +82,8 @@ def _write_reconcile_snapshot(target, actual, orders, ledger=None):
         }
         if ledger is not None:
             doc['ledger'] = ledger
+        if gates is not None:
+            doc['gates'] = gates
         with open('manager/last_reconcile.json', 'w') as f:
             json.dump(doc, f, indent=2)
     except Exception as e:
@@ -703,7 +711,7 @@ def _resolve_threshold(threshold, symbol, reduce_only=False):
     return threshold(symbol, reduce_only) if callable(threshold) else threshold
 
 
-def compute_diff(target, actual, threshold=10):
+def compute_diff(target, actual, threshold=10, gates=None):
     """
     Compute required position adjustments.
     target:  output of aggregate_portfolio()
@@ -722,6 +730,13 @@ def compute_diff(target, actual, threshold=10):
     (target absent, asset_spec None — checked via `exchange` too). Those rows
     skip `threshold` entirely; their own place_order_fn applies the real
     minimum (e.g. reconciler.py's _capital_place_order round-half-up gate).
+
+    `gates` is an optional OUT dict (return value unchanged — hand-written
+    callers exist): entry-side rows whose gate is above the flat threshold are
+    recorded as {symbol: {'usd': gate, 'diff': signed_diff}}, placed or not, so
+    the workspace can show the number instead of leaving "diff 22, no order,
+    no error" unexplained. Flat-gate rows are left out — there is nothing to
+    explain there.
     """
     orders = []
     all_symbols = set(target) | set(actual)
@@ -748,9 +763,20 @@ def compute_diff(target, actual, threshold=10):
         # by construction (|actual| + |target|); its legs are gated per side
         # below.
         reduces = abs(t_signed) < abs(a_signed)
-        if (not is_lot_based
-                and abs(diff) < _resolve_threshold(threshold, symbol, reduces)):
-            continue
+        if not is_lot_based:
+            # Resolved once and reused: on the reconciler's callable this is a
+            # venue round-trip (cached, but only per symbol per round).
+            gate = _resolve_threshold(threshold, symbol, reduces)
+            # "above flat" means above the REDUCE-side gate, which is the flat
+            # threshold by definition (resolving it costs no venue round-trip)
+            # — not a hard-coded 10, which would be wrong for any caller
+            # passing a different flat threshold.
+            if gates is not None and not reduces:
+                flat = _resolve_threshold(threshold, symbol, True)
+                if gate > flat:
+                    gates[symbol] = {'usd': gate, 'diff': diff}
+            if abs(diff) < gate:
+                continue
 
         orders.append({
             'symbol':           symbol,
@@ -865,14 +891,18 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
         target = {k: v for k, v in target.items() if k not in gated_symbols}
         diff_actual = {k: v for k, v in diff_actual.items() if k not in gated_symbols}
 
-    orders = compute_diff(target, diff_actual, threshold)
+    # entry-side venue gates, for the snapshot (unrelated to gated_symbols
+    # above — that is the SIGNAL gate)
+    entry_gates = {}
+    orders = compute_diff(target, diff_actual, threshold, gates=entry_gates)
 
     # Written before placing, so it records the state that WAS acted on. A
     # reconcile that crashes mid-loop still leaves the observation behind.
     # full_target, not the filtered dict (audit #8): a gated strategy's target
     # must stay visible to the workspace view — carrying 'gated': True — not
     # vanish while it waits for its signal.
-    _write_reconcile_snapshot(full_target, actual, orders, ledger=ledger)
+    _write_reconcile_snapshot(full_target, actual, orders, ledger=ledger,
+                              gates=entry_gates)
 
     # Checked once via signature inspection (not a runtime try/except TypeError) so a
     # TypeError raised *after* place_order_fn already submitted the order — e.g. while
