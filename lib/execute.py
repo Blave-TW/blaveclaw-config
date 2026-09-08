@@ -749,12 +749,25 @@ def _make_slice_fn(symbol, asset_spec, reduce_only, exchange, side, stop, venue_
 
 
 def _finish(symbol, signed_diff, asset_spec, reduce_only, exchange, contributors,
-            style, filled_usd, vwap, aborted):
+            style, filled_usd, vwap, aborted, below_min=False):
     """Async completion: one orders.jsonl entry (the web 交易歷史 source of
-    truth) mirroring the synchronous reconcile entry shape."""
+    truth) mirroring the synchronous reconcile entry shape.
+
+    below_min=True means the venue would not accept ANY size for this leg. That
+    is a no-op, not a failure — the market path has always answered it with a
+    log line and `continue` (lib.portfolio.reconcile on place_order → False),
+    and place_limit_order's own contract calls small residuals expected.
+    Recording it as an order_error instead made it the loudest thing on the
+    workspace: measured 2026-09-08, 76% of the whole fleet's 30-day
+    order_error events were this one non-failure, one every reconcile round,
+    forever."""
     from lib.portfolio import _append_reconciler_log, _record_order_error
     if filled_usd <= 0:
-        _record_order_error(symbol, exchange, f"{style}: no slices filled")
+        if below_min:
+            logging.info(f"[execute] {symbol} {style}: nothing the venue would "
+                         f"accept at this size — skipped")
+        else:
+            _record_order_error(symbol, exchange, f"{style}: no slices filled")
         return
     leg = {"signed_diff": round(filled_usd if signed_diff > 0 else -filled_usd, 2),
            "reduce_only": reduce_only, "exchange": exchange}
@@ -771,7 +784,14 @@ def _finish(symbol, signed_diff, asset_spec, reduce_only, exchange, contributors
         "legs": [leg],
         "execution": style,
     }
-    if aborted or abs(signed_diff) - filled_usd > _RESIDUAL_USD:
+    # Residual vs the venue's own granularity, not a flat $10: entries round to
+    # the nearest whole lot (venue_wiring._entry_qty), so a leg that filled
+    # everything it possibly could still lands up to half a lot short — on BTC
+    # perps that is ~$39, which used to mark a fully-executed chase as failed in
+    # the web 交易歷史 (measured on uid 32321's 08:20 fill). `aborted`/`crashed`
+    # still flags unconditionally: that path really does need the re-reconcile.
+    if aborted or (abs(signed_diff) - filled_usd
+                   > max(_RESIDUAL_USD, _venue_min_slice_usd(symbol))):
         entry["failed"] = True  # partial — the residual re-reconciles
     _append_reconciler_log(entry)
 
@@ -818,7 +838,8 @@ def _twap_thread(symbol, signed_diff, asset_spec, reduce_only, exchange,
             # placed False = even one market order is under the minimum:
             # nothing to do, stay quiet (matches the market path's semantics)
         _finish(symbol, signed_diff, asset_spec, reduce_only, venue_seen["id"],
-                contributors, style, filled, vwap, aborted)
+                contributors, style, filled, vwap, aborted,
+                below_min=why.get("stop") == "below_min")
     except Exception as e:
         logging.error(f"[execute] {key} {style} crashed: {e}")
         from lib.portfolio import _record_order_error
@@ -878,6 +899,7 @@ def _chase_thread(symbol, signed_diff, asset_spec, reduce_only, exchange,
     aborted = False
     crashed = False
     reason = None
+    below_min = False       # venue refused every size — a no-op, not a failure
 
     active_oid = None       # resting order, if the thread dies mid-flight
     cancel_uncertain = False
@@ -942,6 +964,7 @@ def _chase_thread(symbol, signed_diff, asset_spec, reduce_only, exchange,
             placed = tools["place"](remaining, px, None, buy)
             if placed is False:
                 reason = "below venue minimum"
+                below_min = True
                 break
             if not start_notified:
                 # only after the venue accepts working this size — a below-min
@@ -1052,7 +1075,8 @@ def _chase_thread(symbol, signed_diff, asset_spec, reduce_only, exchange,
             vwap = (round(sum(f["fill_price"] * f["fill_qty"] for f in fills) / filled, 8)
                     if filled > 0 else None)
             _finish(symbol, signed_diff, asset_spec, reduce_only, tools.get("venue"),
-                    contributors, "chase", filled, vwap, aborted or crashed)
+                    contributors, "chase", filled, vwap, aborted or crashed,
+                    below_min=below_min)
         except Exception as e2:
             logging.error(f"[execute] {key} chase completion record failed: {e2}")
         _reap_own(key)

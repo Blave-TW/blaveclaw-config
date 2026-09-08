@@ -233,7 +233,7 @@ The web workspace sends two fixed prompts (bilingual — the zh or en version de
 - `close_position(env, symbol, direction, qty)` — confirmed reduce-only market close
 - `get_order` / `get_open_orders` / `cancel_order` / `cancel_all_orders`
 - `get_fills(env, symbol, start_ms, end_ms)` — fill history (≤30 days; handles BingX's startTs/endTs + fill_orders quirks)
-- `format_qty` / `format_price` — precision flooring + min-qty/min-notional validation (raises instead of sending a doomed order)
+- `format_qty` / `format_price` — precision flooring + min-qty/min-notional validation (raises instead of sending a doomed order). Sizing to a whole lot happens upstream in `lib/venue_wiring.py` (`_entry_qty` rounds, `_reduce_qty` ceils+caps) — this floor is the backstop, see `references/manager.md` › *Order library*
 - `get_leverage` / `set_leverage`, `get_position_mode`, `claim_demo_funds` (VST)
 - Set `BINGX_DEMO=true` in `.env` to run the same code against VST paper trading
 - **Spot layer** (strategies declaring `MARKET = "spot"`): `place_spot_market_order(env, symbol, 'buy'|'sell', base_qty=, quote_qty=, client_order_id=)` — BUYs sized in QUOTE currency (`quoteOrderQty`), SELLs in base qty floored to the spot step (`get_spot_rules`/`format_spot_qty` — spot rules differ from swap: sizes not digit counts, and minimums are ASYMMETRIC: BTC sell-min ≈ $12 vs buy-min $0.5, a small buy can be unsellable dust → returns False); polls to terminal (placement can report PENDING); guard buy=entry / sell=reduce; spot client-id param is `newClientOrderId` (swap uses `clientOrderID`). Plus `get_spot_balances` / `get_spot_price` / `get_spot_order` for reconciler wirings.

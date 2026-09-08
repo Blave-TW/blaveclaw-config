@@ -277,6 +277,33 @@ def _reduce_qty(env, vid, order, sym, direction, qty):
     return qty
 
 
+def _entry_qty(order, env, sym, qty):
+    """Entry legs ROUND to the nearest whole lot — the mirror of _reduce_qty's
+    ceil on the close side.
+
+    Flooring (what every order lib's format_qty does) strands the sub-lot
+    remainder forever whenever an allocation is only a few lots wide. Measured
+    live 2026-09-08 (uid 32321): $289 on BTC perps is 3.7 lots of ~$78, so a
+    $227 target floored to 0.002 BTC ($157) and left a $70 residual — above
+    reconcile's $10 THRESHOLD, below the venue's min qty. Every round
+    re-dispatched an order the venue could never accept, and the gap could not
+    shrink: the next fillable size is a whole $78 lot away. Rounding lands the
+    position on the NEAREST grid point instead, so the leftover is at most half
+    a lot and the following round's diff falls inside THRESHOLD.
+
+    math.floor(x + 0.5), not round() — Python rounds a .5 tie to even. Same
+    round-half-up reconciler._capital_place_order has always used for capital
+    lots; this brings crypto in line. A failed rules read returns qty untouched
+    (the order lib then floors as before — understate, never overshoot)."""
+    try:
+        lot = _lot_base(order, env, sym)
+        if lot > 0:
+            return math.floor(qty / lot + 0.5) * lot
+    except Exception as e:
+        logging.warning(f"[venue_wiring] entry lot rounding skipped ({e}) — floor path")
+    return qty
+
+
 _TERMINAL_FILLED = {"filled"}
 # every venue's own terminal-dead states must be here — a missing one makes the
 # chase loop treat a dead order as open and idle out its whole window
@@ -358,6 +385,7 @@ def auto_limit_toolkit(symbol, reduce_only=False):
             qty = _reduce_qty(env, vid, order, sym, direction, qty)
         else:
             direction = "long" if _buy else "short"
+            qty = _entry_qty(order, env, sym, qty)
         return order.place_limit_order(
             env, sym, direction, qty, price, client_order_id=cid or _cid(),
             reduce_only=reduce_only, post_only=True)
@@ -489,6 +517,7 @@ def auto_place_order(symbol, signed_diff, asset_spec=None, reduce_only=False,
             qty = _reduce_qty(env, vid, order, sym, direction, qty)
         else:
             direction = "long" if signed_diff > 0 else "short"
+            qty = _entry_qty(order, env, sym, qty)
         try:
             result = order.place_market_order(env, sym, direction, qty,
                                               client_order_id=cid,

@@ -114,6 +114,8 @@ params['quantity'] = format(qty, 'f')   # plain string — never 1e-05 notation
 
 After flooring: if qty < min qty or `qty * price` < min notional → `return False` (skip, no phantom-trade notification). Never guess precision from memory — read it from the exchange API or the relevant `skills/blave-quant/references/` file.
 
+**The order lib floors; the auto-wiring decides the lot count.** `lib/venue_wiring.py` sizes every leg to a whole lot BEFORE it reaches `format_qty`, so the floor above is a safety net, not the sizing rule: reduce legs CEIL and cap at the position (`_reduce_qty`), entry legs ROUND half-up (`_entry_qty`). Entries used to inherit the floor, which strands the sub-lot remainder forever whenever an allocation is only a few lots wide — measured 2026-09-08 on uid 32321, `$289` on BTC perps is 3.7 lots of ~`$78`, so a `$227` target floored to `$157` and left a `$70` gap that was over reconcile's `$10` `THRESHOLD` but under one lot: every round re-dispatched an order the venue could never accept, and the gap could not shrink because the next fillable size was a whole lot away. Rounding lands the position on the nearest grid point, so the leftover is at most half a lot and the next round's diff falls inside `THRESHOLD`. The trade-off is deliberate: a position can sit up to half a lot OVER its target (`$289` allocated, up to ~`$313` held on BTC), the same round-half-up capital lots have always used.
+
 ```
 bash manager/start_reconciler.sh
 ```
@@ -232,9 +234,10 @@ real capital `self_ledger` deployment.
 
 **Fixed (2026-08-20, audit P0-2):** `reconcile()` used to log the leg's
 PRE-rounding `sub_diff`, not what actually filled — on capital this drifted
-the ledger by up to half a lot every round, permanently (crypto had the same
-gap in principle, but its rounding is far below `threshold` so it was not a
-practical issue there). It now prefers the exchange-confirmed `executed_qty`
+the ledger by up to half a lot every round, permanently (crypto was thought to
+be immune because "its rounding is far below `threshold`" — wrong, and measured
+so on 2026-09-08: one BTC perp lot is ~`$78`, nearly 8× the `$10` threshold).
+It now prefers the exchange-confirmed `executed_qty`
 when `place_order_fn` returns one — lots directly for `futures_contracts`/
 capital rows, `executed_qty × fill_price` (base currency → account currency)
 otherwise — falling back to `sub_diff` only when `executed_qty` is absent.
