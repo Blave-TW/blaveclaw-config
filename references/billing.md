@@ -24,14 +24,33 @@ A flat hourly rate for the machine, charged once per hour by a platform cron
 (`cron_deduct_server_credit.py`). Description on the usage page reads
 `Server hourly (<tier>, data included): 1h`.
 
-| OS | Tier | vCPU / RAM | TWD per hour |
-|---|---|---|---|
-| Linux | Starter (default) | 2 / 4 GB | 2.0 |
-| Linux | Premium | 4 / 16 GB | 6.0 |
-| Linux | Max | 8 / 32 GB | 11.5 |
-| Windows | Starter (default) | 2 / 8 GB | 5.5 |
-| Windows | Premium | 4 / 16 GB | 8.5 |
-| Windows | Max | 8 / 32 GB | 16.5 |
+**Lead with the month, not the hour** — `month = hour x 720` (30 days). Answer "what does this
+machine cost?" with the monthly figure and give the hourly rate beside it as the mechanism.
+Billing itself is unchanged: still one deduction per clock hour.
+**Use the hourly figure instead** when explaining a specific deduction row, the usage page, or a
+stop/start question — the month is only for "what does this cost" questions.
+**This rule is the server fee only.** Never multiply the 3 TWD data fee (Meter 2) by 720: it is
+charged per *active* hour, so a monthly figure for it would be fiction.
+Amounts here are TWD, which is what the wallet holds and what every deduction is in; the English,
+Japanese, Vietnamese, Spanish and Portuguese site faces display USD at 30 TWD/USD
+(48 / 144 / 276 per month on Linux, 132 / 204 / 396 on Windows).
+
+| OS | Tier | vCPU / RAM | TWD per month (30 d) | TWD per hour |
+|---|---|---|---|---|
+| Linux | Starter (default) | 2 / 4 GB | 1,440 | 2.0 |
+| Linux | Premium | 4 / 16 GB | 4,320 | 6.0 |
+| Linux | Max | 8 / 32 GB | 8,280 | 11.5 |
+| Windows | Starter (default) | 2 / 8 GB | 3,960 | 5.5 |
+| Windows | Premium | 4 / 16 GB | 6,120 | 8.5 |
+| Windows | Max | 8 / 32 GB | 11,880 | 16.5 |
+
+- **The monthly figure is exact, not an estimate** — the meter runs whether the machine is
+  running or stopped (see next bullet), so a machine that exists for a full 30 days costs exactly
+  that. Say "per 30 days" rather than "about"; a 31-day calendar month is 24 hours more.
+  **Exceptions that make a month short of full** — check before quoting a month to someone who
+  just signed up: the 14-day card-bound free trial waives the server fee entirely (last bullet of
+  this section, Linux Starter only, so a new user's first 30 days is 768 TWD not 1,440); a machine
+  still `installing` is not yet metered; and a balance under 50 TWD stops the machine.
 
 - **Billed while the machine exists — running OR stopped.** The cron selects
   `status IN ('running', 'stopped')`. Stopping the machine does not stop the meter; only deleting

@@ -176,7 +176,7 @@ Full memory-discipline checklist: `references/deployment.md` › *Long-running p
 
 Three meters, all drawn from the prepaid credit wallet; numbers and code sources live in `references/billing.md` — read it before answering, never quote a price from memory.
 - **LLM** (`usage_llm`): every chat turn on any surface, per token at the current model's rate (plus web search on Claude models). On this runtime nothing else calls an LLM.
-- **Server** (`usage_vm`): a flat hourly rate for the machine, running or stopped, until it is deleted. **Blave data is included** — `lib/data.py` fetches, backtests, param scans, cron-scheduled strategies, watchboard scripts and scheduled reports add nothing beyond the hour already paid.
+- **Server** (`usage_vm`): a flat rate quoted per month (hour x 720, 30 days) and billed once per clock hour, running or stopped, until it is deleted — quote the month, the hour only when explaining a deduction. **Blave data is included** — `lib/data.py` fetches, backtests, param scans, cron-scheduled strategies, watchboard scripts and scheduled reports add nothing beyond the hour already paid.
 - **Data** (`usage_blave`): a per-active-hour fee for external API-key callers only; a machine owner never sees it.
 So: chatting costs tokens, letting code run costs nothing extra. Bunching crons into one hour "to avoid data fees" saves nothing; a cheaper model for talk and a stronger one for code is a real saving (per-session switch, see Model Switching). Point them to the web usage page (`/agent/<lang>/usage`) for the itemised list, and say you are not sure for anything the reference does not cover.
 
