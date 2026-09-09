@@ -31,6 +31,8 @@ Usage:
     add_widget("btc-k", "kline", "BTC 1 小時 K", symbol="BTC", venue="binance",  # indicator pane
                interval="60m", panes=[{"id": "holder_concentration"}])   # id = the slug
     update_widget("btc-k", panes=[])                       # drop the pane, keep the chart
+    add_widget("txf-exec", "strategy_chart", "txf_composite_60m · 進出場",   # a strategy's chart
+               strategy="txf_composite_60m")
     add_widget("risk", "block", "持倉風險",                              # machine widget
                block_type="kpi_row", refresh_cron="*/5 * * * *",
                refresh_human="每 5 分鐘", script=script_text)
@@ -104,8 +106,12 @@ CATALOGUE = {
     "kline": ("stream", 4, 3),
     "book": ("stream", 2, 3),
     "watchlist": ("stream", 3, 2),
+    "strategy_chart": ("strategy", 6, 5),
     "block": ("machine", 2, 2),
 }
+# The strategy's backtest output, read to check it has trades before the card is made
+# (contract §3.3, door 2 of three). Same file the runtime reports from.
+STRATEGIES_DIR = os.path.join(WORKSPACE, "strategies")
 CHART_BLOCKS = ("line_chart", "drawdown", "heatmap", "bar_chart", "histogram", "box",
                 "scatter", "image")
 CHART_MIN_W, CHART_MIN_H = 4, 3
@@ -184,6 +190,48 @@ def _check_crypto_symbol(symbol):
     return bare
 
 
+def _check_strategy(name):
+    """`strategy_chart`'s source (contract §3.3): one of this machine's own strategies,
+    and it must have trades. This is **door 2 of three** — the agent calls this lib
+    directly, not only through the web panel, so checking here is what turns a bad card
+    into a message now instead of an api 400 sitting in `ops/failed/` minutes later.
+
+    Reading `stats.json` (a few MB on a minute-bar strategy) costs a parse, but adding a
+    card is rare and there is no cheaper place to learn whether a backtest produced any
+    trades — the machine keeps no index of that.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError('strategy_chart needs strategy="<strategy name>"')
+    name = name.strip()
+    if name != os.path.basename(name) or name in (os.curdir, os.pardir):
+        raise ValueError(f"strategy {name!r} must be a strategy name, not a path")
+    path = os.path.join(STRATEGIES_DIR, name, "stats.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            stats = json.load(f)
+    except FileNotFoundError:
+        raise ValueError(f"strategy {name!r} has no backtest output "
+                         f"(strategies/{name}/stats.json is missing) — back-test it first; "
+                         "this card draws that backtest's entries and exits") from None
+    except (OSError, ValueError) as e:
+        raise ValueError(f"strategies/{name}/stats.json is unreadable ({e}) — "
+                         "re-run the backtest") from None
+    stats = stats if isinstance(stats, dict) else {}
+    trades = stats.get("trades")
+    if not isinstance(trades, list) or not trades:
+        raise ValueError(f"strategy {name!r} has no trades in its backtest — there is "
+                         "nothing to mark on the chart. Pick a strategy that traded.")
+    # The card draws the candles the backtest carries with it (contract §3.3: first paint is
+    # zero requests). A backtest run before the candle tail was kept has trades but nothing to
+    # draw them on, and the tile would sit on "chart data unavailable" for good — refuse here,
+    # where the message can say what fixes it.
+    candles = stats.get("candles")
+    if not isinstance(candles, list) or len(candles) < 2:
+        raise ValueError(f"strategy {name!r}'s backtest carries no candles to draw the trades "
+                         "on (an older run kept none) — back-test it again, then add the card")
+    return name
+
+
 # Default sizes when the caller gives none (contract §3). The minimum is a floor —
 # below it the card cannot draw its content — and is NOT the default: measured at
 # 1440 wide with the chat pane open the canvas is only ~750px (12 cols ≈ 62px), and
@@ -194,6 +242,7 @@ _DEFAULT_WH = {
     "kline": (6, 3),      # candles need room to read; with indicator panes see _KLINE_PANE_WH
     "book": (3, 3),       # 2×3 squeezes the volume bars to a slit and clips the spread
     "watchlist": (4, 3),  # fits 5 rows; more than that scrolls
+    "strategy_chart": (8, 6),  # 4 series plus a sub-pane; 6×5 leaves the candles cramped
 }
 # kline carrying indicator sub-panes (contract §3.5): one row taller per pane. At 6×3 the
 # sub-pane is left ~40px once the card head and the time axis are gone — the failure mode
@@ -458,13 +507,14 @@ def _register_watch_job(id, title, refresh, block_type, script):
 
 def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None, venue=None,
                levels=None, panes=None, block_type=None, refresh_cron=None, refresh_human=None,
-               script=None, w=None, h=None):
+               script=None, strategy=None, w=None, h=None):
     """Add one widget to the board. Returns the op file path.
 
     id            `[A-Za-z0-9_-]{1,32}`, unique on the board — yours to pick. A machine
                   widget's id is also its `report_jobs/<id>/` directory, so it must be a
                   slug `[a-z0-9][a-z0-9-]{0,31}`.
-    type          `price` / `kline` / `book` / `watchlist` (stream) or `block` (machine).
+    type          `price` / `kline` / `book` / `watchlist` (stream), `strategy_chart`
+                  (one of your strategies' entry/exit chart) or `block` (machine).
     title         1–40 chars, the tile header.
     symbol        stream, all but watchlist: a stock id (4–8 letters/digits), `TAIEX`,
                   `TXF` or `MXF`; `book` accepts only `TXF` / `MXF` (or a crypto
@@ -492,6 +542,14 @@ def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None, ven
                   §3.1; refused on book / watchlist / block). A crypto K-line is always
                   this widget, never a block + line_chart drawn by a script — the live
                   candles come from the platform stream.
+    strategy      strategy_chart only: the name of one of this machine's strategies,
+                  and it must have trades in its backtest. The card is the strategy tab's
+                  進出場點位 chart — candles, entry/exit arrows, position lines and the
+                  live price. Everything else about it is the strategy's own: **never
+                  pass symbol / interval / venue / block_type or a script** (refused
+                  here), and there is no `props` to set — the period is the one the
+                  strategy was back-tested on. The platform serves the data from the
+                  strategy it already holds; this machine sends nothing and runs no job.
     block_type    machine: the report block the script will send (see BLOCK_TYPES).
     refresh_cron  machine: 5-field cron, this machine's local time; `*/1 * * * *` is
                   the densest schedule there is — no seconds field. Only the grammar is
@@ -506,7 +564,8 @@ def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None, ven
                   and publishes by calling `write_data(id, block)`.
     w, h          initial size in grid units; omit them for the type's default (price 4×2,
                   kline 6×3 — 6×4 with one indicator pane, 6×5 with two; book 3×3;
-                  watchlist 4×3; a block goes by its block_type, 6×3 for a chart-like one).
+                  watchlist 4×3; strategy_chart 8×6; a block goes by its block_type,
+                  6×3 for a chart-like one).
                   The minimum is a floor, not the default, and a size you pass is taken as
                   given. Position is the user's — the platform appends the tile to the
                   bottom row.
@@ -519,6 +578,8 @@ def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None, ven
     props = {}
 
     if kind == "stream":
+        if strategy is not None:
+            raise ValueError(f"strategy= is only for a strategy_chart, not {type}")
         for name, v in (("block_type", block_type), ("refresh_cron", refresh_cron),
                         ("refresh_human", refresh_human), ("script", script)):
             if v is not None:
@@ -561,7 +622,25 @@ def add_widget(id, type, title, *, symbol=None, symbols=None, interval=None, ven
             for name, v in (("interval", interval), ("levels", levels), ("panes", panes)):
                 if v is not None:
                     raise ValueError(f"{name} is only for kline widgets, not {type}")
+    elif kind == "strategy":
+        # 「策略已經知道的東西,agent 一律不送」(contract §3.3): the symbol, the period, the
+        # venue and the live-price feed are all read from the strategy's own backtest by the
+        # platform. Passing any of them can only disagree with it.
+        for name, v in (("symbol", symbol), ("symbols", symbols), ("interval", interval),
+                        ("venue", venue), ("levels", levels), ("panes", panes),
+                        ("block_type", block_type)):
+            if v is not None:
+                raise ValueError(f"{name} is not for a strategy_chart — the strategy already "
+                                 f"knows it (its backtest holds the symbol and the period)")
+        for name, v in (("refresh_cron", refresh_cron), ("refresh_human", refresh_human),
+                        ("script", script)):
+            if v is not None:
+                raise ValueError(f"{name} is for machine widgets; a strategy_chart runs no job "
+                                 "— the platform serves it from the strategy it already holds")
+        source = {"kind": "strategy", "name": _check_strategy(strategy)}
     else:
+        if strategy is not None:
+            raise ValueError("strategy= is only for a strategy_chart, not a block widget")
         for name, v in (("symbol", symbol), ("symbols", symbols), ("interval", interval),
                         ("venue", venue), ("levels", levels), ("panes", panes)):
             if v is not None:
@@ -615,6 +694,10 @@ def update_widget(id, *, title=None, props=None, levels=None, panes=None, refres
     and, for `panes`, whether it is a *crypto* kline — is not checked here: a stream widget
     leaves no record on this machine. Sending either to the wrong widget is refused by the
     api (400, `status` shows `failed` naming it).
+
+    A `strategy_chart` takes **`title` only**: it has no props, and its source is the
+    strategy (a different strategy is a different card). Anything else is refused by the
+    api. To point the card at another strategy, remove it and add the new one.
 
     Changing a block's `block_type` to a chart-like one (CHART_BLOCKS, minimum 4×3) is
     not size-checked here — this machine has no view of the board. If the tile is

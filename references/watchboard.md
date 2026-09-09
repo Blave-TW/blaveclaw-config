@@ -88,6 +88,7 @@ scheduled report. Fix the call; nothing was written.
 | `kline` | stream | 4×3 (default 6×3, 6×4 with one indicator pane, 6×5 with two) | `interval`: `1m` `5m` `15m` `60m` `1d`; `levels`: 0–4 `{price, side, label?}` — the price monitor, drawn as lines on the chart (§5); `panes`: 0–2 `{id}` — indicator sub-panes under the candles, **crypto only**, `id` is the indicator's slug (`holder_concentration`), not a number (§5) | candlestick chart; history from the platform, the forming bar from ticks (Taiwan) or the Binance kline stream (crypto with `venue="binance"`) |
 | `book` | stream | 2×3 (default 3×3) | none | 5-level order book — Taiwan futures `TXF` / `MXF`, or a crypto perpetual with `venue="binance"`. Stocks have no book |
 | `watchlist` | stream | 3×2 (default 4×3) | none; `symbols` 1–20 | table of symbol, last, change %, time. One watchlist beats three `price` tiles: same information, fewer cells, fewer stream slots |
+| `strategy_chart` | strategy | 6×5 (default 8×6) | none (`strategy=` names it) | one of **this machine's own strategies** drawn as the workspace's 進出場點位 chart: candles, entry/exit arrows, position lines, one indicator sub-pane, live price top-right. The strategy must have trades in its backtest |
 | `block` | machine | 2×2; chart-like `block_type` 4×3 | `block_type` | one report block, drawn by the report renderer from your `write_data` payload. Chart-like = `line_chart` `drawdown` `heatmap` `bar_chart` `histogram` `box` `scatter` `image` (min 4×3, default 6×3); `kpi_row` and `table` default 6×3, `callout` 4×2, the rest stay 2×2 |
 
 **The minimum is a floor, not a default.** Below it the card cannot draw its content; the
@@ -109,6 +110,16 @@ a chart.
   optional `/`), never a list of what Binance trades. Each crypto widget is its own connection in
   the browser, so keep to **at most 6 crypto widgets on a board**. `venue` on `watchlist` / `block` is
   refused — a watchlist is Taiwan-only and a block is a machine widget.
+- **`strategy_chart`**: pass `strategy="<name>"` and nothing else. **Everything about the card
+  the strategy already knows is refused** — `symbol`, `interval`, `venue`, `block_type`, and the
+  machine-widget arguments (`script`, `refresh_*`): the platform reads the symbol, the period and
+  the live-price feed from that strategy's own backtest, so a value you pass can only disagree
+  with it. There are no `props`. The strategy must have **trades** in its backtest (`lib/watch.py`
+  reads `strategies/<name>/stats.json` and refuses on the spot) **and the candles that backtest
+  kept** — a strategy that never traded would draw an empty chart, and one whose run kept no
+  candles has nothing to draw them on (re-run the backtest, then add the card). It is not a machine widget: no job, no cron, nothing to `write_data`;
+  it does not count against the 12 machine widgets. To point a card at a different strategy,
+  remove it and add a new one — `update_widget` takes only `title` here.
 - **Sizes**: 12-column grid, `w` 1–12, `h` 1–12, at least the type's minimum (for a `block`, the
   minimum follows its `block_type`); omit `w`/`h` for the default. Position is never yours: the
   platform places new tiles, the user moves them.
@@ -217,15 +228,18 @@ in this order — and stop at four or five cards. A crowded board is read by nob
    thing people hand-roll most, and it is now zero-script, second-level and free.
 3. **Strategy health** (`table`) — the only card that tells them something *broke*. Reads local
    state, costs nothing.
-4. **A scanner** (`table`) — the largest single use we see on real machines, and it replaces the
+4. **A strategy's entry/exit chart** (`strategy_chart`) — the workspace chart on the board, one
+   argument, no script. Reach for it whenever the user says they want to *watch a strategy*; it
+   only works on one that has traded.
+5. **A scanner** (`table`) — the largest single use we see on real machines, and it replaces the
    hourly push notification people complain about.
-5. **Funds and exposure** (`kpi_row`) — reads local state; one account read on top when a venue
+6. **Funds and exposure** (`kpi_row`) — reads local state; one account read on top when a venue
    is bound, and three honest cells when it is not.
-6. **Positions** (`table`) — the same band one level down: what the account actually holds, read
+7. **Positions** (`table`) — the same band one level down: what the account actually holds, read
    from the reconcile snapshot. Zero fetch, no keys.
-7. **Taiwan market temperature** (`kpi_row`) — one run a day, after-hours numbers; the intraday
+8. **Taiwan market temperature** (`kpi_row`) — one run a day, after-hours numbers; the intraday
    index is a `price` tile, not this card.
-8. **A chart** (`kline`) without levels — confirmation, not discovery, so it comes after. For
+9. **A chart** (`kline`) without levels — confirmation, not discovery, so it comes after. For
    crypto it can carry one or two indicator sub-panes (`panes`), also script-free.
 
 ### A TXF price tile and its 5-minute chart (stream — no script)
@@ -239,6 +253,22 @@ add_widget("txf-k5", "kline", "台指期 5 分 K", symbol="TXF", interval="5m", 
 
 Two ops, no job directory, nothing to schedule — the browser subscribes to the quote stream
 itself. Tell the user both tiles are on the board and can be dragged into place.
+
+### A strategy's entry/exit chart (strategy — no script)
+
+```python
+from lib.watch import add_widget
+
+add_widget("txf-exec", "strategy_chart", "txf_composite_60m · 進出場",   # 8×6 by default
+           strategy="txf_composite_60m")
+```
+
+One op, no job, nothing scheduled: the platform draws it from the backtest it already holds for
+that strategy, and puts the live price in the top-right corner. `strategy=` is the only argument —
+the symbol and the period come from the strategy itself. If it refuses with "no trades", the
+strategy has not traded in its backtest: say that, and offer a card that does exist rather than
+back-testing it again unasked. If it refuses with "no candles", that backtest is an old one that
+kept none — there re-running it is the fix, so say so and ask.
 
 ### BTC hourly candles (stream, crypto — no script)
 
