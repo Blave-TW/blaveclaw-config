@@ -524,6 +524,16 @@ def _venue_min_slice_usd(symbol, floor=_MIN_SLICE_USD):
     lookup degrades to exactly the flat gate it had before (and so a spot
     symbol, which returns the floor unchanged below, keeps the gate
     lib.portfolio.spot_scope's own default is pinned to)."""
+    return _venue_sizes_usd(symbol, floor)[0]
+
+
+def _venue_sizes_usd(symbol, floor):
+    """(min slice USD, one LOT USD) off one venue round trip — the reconciler
+    gates its two sides off these and must not pay two mark lookups for them.
+    The lot is venue_wiring._lot_base × mark: the step _reduce_qty ceils to,
+    NOT min_qty (equal on most perps, not by contract). 0 when there is no
+    lot to speak of (spot, unbound venue, failed lookup) so a caller falls
+    back to its floor."""
     try:
         import importlib as _il
         from lib import venue_wiring as vw
@@ -531,11 +541,11 @@ def _venue_min_slice_usd(symbol, floor=_MIN_SLICE_USD):
         env = vw.read_env()
         vid = vw.detect_venue(env)
         if not vid:
-            return floor
+            return floor, 0.0
         order = _il.import_module(f"lib.order_{vid}")
         sym, market = split_key(symbol)
         if market == "spot":
-            return floor  # spot minimums are far below the floor everywhere we ship
+            return floor, 0.0  # spot minimums are far below the floor everywhere we ship
         r = order.get_contract_rules(env, sym)
         mark = float(order.get_mark_price(env, sym))
         min_qty_usd = (float(r.get("min_qty") or 0)
@@ -547,11 +557,23 @@ def _venue_min_slice_usd(symbol, floor=_MIN_SLICE_USD):
         # 1.0x gate — which venue_wiring._entry_qty then rounds UP to a whole
         # lot, and the next reduce ceils it back off. 5% covers the drift a
         # 60s window sees.
-        return max(floor, min_qty_usd * 1.05, float(r.get("min_notional") or 0))
+        entry = max(floor, min_qty_usd * 1.05, float(r.get("min_notional") or 0))
     except Exception as e:
         logging.warning(f"[execute] venue min lookup failed for {symbol} ({e}) — "
                         f"using ${floor} floor")
-        return floor
+        return floor, 0.0
+    # The lot reads a SECOND rules dialect (step, else qty_precision) and gets
+    # its own try on purpose: sharing one would let a lot-only failure drop the
+    # entry gate — already computed and correct — back to the flat floor, which
+    # is the churn 54120db shipped this function to close. A missing lot only
+    # costs the reduce side its venue scale.
+    try:
+        lot_usd = vw._lot_base(order, env, sym, r) * mark
+    except Exception as e:
+        logging.warning(f"[execute] lot size unavailable for {symbol} ({e}) — "
+                        f"reduce side stays on the ${floor} floor")
+        lot_usd = 0.0
+    return entry, lot_usd
 
 
 def _fallback_market(symbol, reason, signed_diff, asset_spec, reduce_only, exchange):

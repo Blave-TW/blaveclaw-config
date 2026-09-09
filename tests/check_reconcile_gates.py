@@ -10,7 +10,12 @@ off-machine: venue minimum × mark, read with the user's keys).
 Asserts: a diff stuck between the flat 10 and the venue gate places nothing yet
 IS recorded with its gate and its signed diff; a diff over the gate trades and
 is recorded all the same (the form prompt needs the number either way); a
-flat-gate symbol (spot) trades and stays OUT; reduce legs and lot-based rows
+flat-gate symbol (spot) trades and stays OUT; a reduce leg is recorded with its
+own (half-lot) gate and `side: "reduce"` — entry rows carry no `side`, their
+shape is unchanged; EVERY recorded row carries both sides (`entry_usd` /
+`reduce_usd`, same values whichever side the round took) because the page
+colours a live diff that may have flipped sign since; a row whose reduce side
+is the flat 10 is recorded anyway when its entry side is not; lot-based rows
 stay out; the key is present-but-empty when nothing qualifies.
 
 Run: cd blaveclaw-config && python3 tests/check_reconcile_gates.py
@@ -40,11 +45,13 @@ SPOT = "BTCUSDT@spot"    # spot minimums sit under the floor → the flat gate
 MARK = 78312.0
 LOT_USD = 0.001 * MARK   # 78.31
 GATE = LOT_USD * 1.05    # 82.23 — venue minimum plus the stale-mark buffer
+RGATE = LOT_USD * 0.5    # 39.16 — the reduce side: half a lot
 
 
 class _FakeOrder:
     """Stands in for lib/order_<venue>.py: only the two reads are exercised."""
     def __init__(self):
+        self.mark = MARK
         self.rules = {"step": 0.001, "min_qty": 0.001, "min_notional": 5.0,
                       "contract_value": 1}
 
@@ -52,10 +59,11 @@ class _FakeOrder:
         return self.rules
 
     def get_mark_price(self, env, sym):
-        return MARK
+        return self.mark
 
 
-sys.modules["lib.order_binance"] = _FakeOrder()
+fake = _FakeOrder()
+sys.modules["lib.order_binance"] = fake
 venue_wiring.read_env = lambda path=".env": {"BINANCE_API_KEY": "k"}
 venue_wiring.detect_venue = lambda env: "binance"
 portfolio._record_order_error = lambda s, x, e: None
@@ -101,6 +109,13 @@ check(legs == {}, "a half-lot buy-back places nothing (unchanged)")
 check(near((gates.get(SYM) or {}).get("usd"), GATE)
       and near((gates.get(SYM) or {}).get("diff"), LOT_USD * 0.5),
       f"...and is recorded: gate ${GATE:.2f}, diff ${LOT_USD * 0.5:.2f}")
+check("side" not in gates[SYM], "...with no 'side' — the entry row's shape is unchanged")
+# Both sides, on an entry row: the page colours the LIVE diff, whose sign can
+# have flipped since this round — with only the side that round used it would
+# colour a buy-back green against the reduce gate (39) it stored last time.
+check(near((gates.get(SYM) or {}).get("entry_usd"), GATE)
+      and near((gates.get(SYM) or {}).get("reduce_usd"), RGATE),
+      f"...and carries BOTH gates: entry ${GATE:.2f} / reduce ${RGATE:.2f}")
 
 # ② recorded whether or not it trades — the form prompt needs the same number
 #    on a symbol that is currently converging fine.
@@ -117,10 +132,34 @@ check(legs == {SPOT: [60.0]}, "a spot entry over the flat 10 trades")
 check(gates == {}, "a flat-gate (spot) symbol is not recorded, and the key is "
                    "present-but-empty rather than missing")
 
-# ④ reduce legs are gated flat, so their gate is not the reason for anything
-legs, gates = run({SYM: (LOT_USD * 2, LOT_USD * 2.5)})
-check(legs == {SYM: [-39.16]}, "a half-lot shrink still places (reduce leg)")
-check(gates == {}, "a reduce leg is not recorded — it is gated flat")
+# ④ reduce legs are gated at half a lot, so an over-target under that is the
+#    same silent case in the other direction — recorded, and told apart by side
+legs, gates = run({SYM: (LOT_USD * 2, LOT_USD * 2.4)})
+check(legs == {}, "a 0.4-lot shrink places nothing")
+check(near((gates.get(SYM) or {}).get("usd"), RGATE)
+      and near((gates.get(SYM) or {}).get("diff"), -LOT_USD * 0.4)
+      and gates[SYM].get("side") == "reduce",
+      f"...and is recorded as a reduce gate: ${RGATE:.2f}, diff ${-LOT_USD * 0.4:.2f}")
+check(near((gates.get(SYM) or {}).get("entry_usd"), GATE)
+      and near((gates.get(SYM) or {}).get("reduce_usd"), RGATE),
+      "...carrying the same two gates as the entry row — a symbol's two "
+      "thresholds do not depend on which side this round took")
+legs, gates = run({SYM: (LOT_USD * 2, LOT_USD * 2.6)})
+check(legs == {SYM: [round(-LOT_USD * 0.6, 2)]} and gates[SYM].get("side") == "reduce",
+      "a 0.6-lot shrink places, and is recorded as a reduce gate all the same")
+
+# ④b a row whose REDUCE side is the flat 10 while its entry side is not (a $15
+#     lot: entry 15.75, reduce 10) is still recorded — the round the diff flips
+#     sign is exactly when the page needs that 15.75, and it has no other
+#     source for it.
+fake.mark = 15000.0
+legs, gates = run({SYM: (15.0 * 2, 15.0 * 2.5)})
+check(legs == {} and near((gates.get(SYM) or {}).get("usd"), 10)
+      and near((gates.get(SYM) or {}).get("entry_usd"), 15.75)
+      and near((gates.get(SYM) or {}).get("reduce_usd"), 10)
+      and (gates.get(SYM) or {}).get("side") == "reduce",
+      "a reduce row sitting on the flat 10 is recorded for its entry side's sake")
+fake.mark = MARK
 
 # ⑤ lot-based rows never resolve an account-currency gate (they skip the
 #    threshold entirely), so they must not leak into gates either

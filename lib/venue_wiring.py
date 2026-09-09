@@ -227,11 +227,12 @@ def auto_get_positions():
     return out
 
 
-def _lot_base(order, env, sym):
+def _lot_base(order, env, sym, rules=None):
     """One qty step in BASE units, across both rules dialects: new libs return
     'step' (+contract_value); the older bingx lib returns qty_precision
-    (decimal places, contract_value 1)."""
-    r = order.get_contract_rules(env, sym)
+    (decimal places, contract_value 1). `rules` skips the read when the caller
+    already holds them."""
+    r = rules if rules is not None else order.get_contract_rules(env, sym)
     step = r.get("step")
     if step is None and "qty_precision" in r:
         step = 10 ** -int(r["qty_precision"])
@@ -293,8 +294,9 @@ def _entry_qty(order, env, sym, qty):
     lot is ~$39: left there, the next round sells a whole lot back and the one
     after that buys it again). What converges it is the per-symbol ENTRY gate:
     manager/reconciler._symbol_threshold gates entries at the venue's own
-    minimum, so a leftover under one lot is not bought back. Reduce legs stay
-    on the flat gate — a close must never be gated out.
+    minimum, so a leftover under one lot is not bought back; and the REDUCE
+    gate at half a lot, so an over-target under that is not ceil-sold either
+    (never a whole lot — a close must never be gated out).
 
     math.floor(x + 0.5), not round() — Python rounds a .5 tie to even. Same
     round-half-up reconciler._capital_place_order has always used for capital

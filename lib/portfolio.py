@@ -63,11 +63,14 @@ def _write_reconcile_snapshot(target, actual, orders, ledger=None, gates=None):
     "bot's own book" vs "exchange's real position" side by side instead of only
     ever seeing whichever one reconcile() happened to diff against.
 
-    `gates` (compute_diff's out-param, {symbol: {usd, diff}}) is the only way
-    the workspace can explain the silent case: target 100 / actual 78 / diff 22
-    with no order and no error, because 22 is under that instrument's ENTRY
-    gate. The number is not recomputable off-machine — it is the venue's own
-    minimum valued at mark, read with the user's keys.
+    `gates` (compute_diff's out-param, {symbol: {usd, diff, entry_usd,
+    reduce_usd[, side]}}) is the only way the workspace can explain the silent
+    case: target 100 / actual 78 / diff 22 with no order and no error, because
+    22 is under that instrument's ENTRY gate (or, with side "reduce", an
+    over-target under half a lot). `usd` is the side this round actually used;
+    the two per-side values are for a reader whose live diff has since crossed
+    zero. The numbers are not recomputable off-machine — they are the venue's
+    own minimum / lot valued at mark, read with the user's keys.
 
     Best-effort: a failure here must never stop a reconcile that already placed
     orders.
@@ -705,9 +708,10 @@ def _resolve_threshold(threshold, symbol, reduce_only=False):
     """`threshold` is either a flat number or a callable(symbol, reduce_only).
     manager/reconciler passes the callable so ENTRY legs can be gated at the
     venue's own minimum order size (an entry under one lot rounds UP to a whole
-    lot and then gets sold back — real fees, every round). It answers with the
-    flat gate for reduce legs, which must never be blocked. The callable owns
-    its own fallback."""
+    lot and then gets sold back — real fees, every round) and REDUCE legs at
+    half a lot (an over-target under that would ceil-sell a whole lot and get
+    bought straight back). A reduce gate must stay under one lot so a one-lot
+    position is always closable. The callable owns its own fallback."""
     return threshold(symbol, reduce_only) if callable(threshold) else threshold
 
 
@@ -732,11 +736,15 @@ def compute_diff(target, actual, threshold=10, gates=None):
     minimum (e.g. reconciler.py's _capital_place_order round-half-up gate).
 
     `gates` is an optional OUT dict (return value unchanged — hand-written
-    callers exist): entry-side rows whose gate is above the flat threshold are
-    recorded as {symbol: {'usd': gate, 'diff': signed_diff}}, placed or not, so
-    the workspace can show the number instead of leaving "diff 22, no order,
-    no error" unexplained. Flat-gate rows are left out — there is nothing to
-    explain there.
+    callers exist): a row with either side above the flat threshold is recorded
+    as {symbol: {'usd': gate this round, 'diff': signed_diff,
+    'entry_usd': .., 'reduce_usd': ..[, 'side': 'reduce']}}, placed or not, so
+    the workspace can show the number instead of leaving "diff 22, no order, no
+    error" unexplained. `usd`/`diff`/`side` are the shipped shape and do not
+    move; BOTH sides are carried because the live diff a reader colours can
+    have flipped sign since this round — with one side only it would colour a
+    buy against the reduce gate. Flat-gate rows are left out on both sides —
+    there is nothing to explain there.
     """
     orders = []
     all_symbols = set(target) | set(actual)
@@ -757,24 +765,42 @@ def compute_diff(target, actual, threshold=10, gates=None):
         is_lot_based = ((asset_spec or {}).get('type') == 'futures_contracts'
                          or t.get('exchange') == 'capital' or a.get('exchange') == 'capital')
         # A row whose |target| is SMALLER than what is held carries a reduce
-        # leg (shrink, or a close when the target is gone) — those are gated
-        # flat, never at venue scale: gating them is how a position of exactly
-        # one lot becomes impossible to close. A flip is over both legs' gates
-        # by construction (|actual| + |target|); its legs are gated per side
+        # leg (shrink, or a close when the target is gone) — gated on its own
+        # side (the reconciler's callable answers half a lot there, never a
+        # whole one: that is how a position of exactly one lot becomes
+        # impossible to close). A flip is over both legs' gates by
+        # construction (|actual| + |target|); its legs are gated per side
         # below.
         reduces = abs(t_signed) < abs(a_signed)
         if not is_lot_based:
             # Resolved once and reused: on the reconciler's callable this is a
             # venue round-trip (cached, but only per symbol per round).
             gate = _resolve_threshold(threshold, symbol, reduces)
-            # "above flat" means above the REDUCE-side gate, which is the flat
-            # threshold by definition (resolving it costs no venue round-trip)
-            # — not a hard-coded 10, which would be wrong for any caller
-            # passing a different flat threshold.
-            if gates is not None and not reduces:
-                flat = _resolve_threshold(threshold, symbol, True)
-                if gate > flat:
-                    gates[symbol] = {'usd': gate, 'diff': diff}
+            # Recorded only when above the flat threshold — the workspace
+            # reads absence as "the flat gate, nothing to explain". The
+            # reconciler's callable carries its flat value as `.flat`; a bare
+            # number is its own, and an older hand-written callable still
+            # answers flat on the reduce side (what used to be asked here).
+            if gates is not None:
+                # The other side too: this snapshot is read against a LIVE
+                # diff, which drifts across the gate's own sign — recording one
+                # side is what let the page colour a buy-back green against the
+                # reduce gate it happened to store last round.
+                other = _resolve_threshold(threshold, symbol, not reduces)
+                entry_gate, reduce_gate = (other, gate) if reduces else (gate, other)
+                flat = getattr(threshold, 'flat', None)
+                if flat is None:
+                    flat = reduce_gate
+                # Either side, not just this round's: a symbol whose reduce gate
+                # is flat still needs its entry gate on record for the round the
+                # diff flips sign. (Not equivalent to `gate > flat` — that is
+                # only this round's side.)
+                if entry_gate > flat or reduce_gate > flat:
+                    gates[symbol] = {'usd': gate, 'diff': diff,
+                                     'entry_usd': entry_gate,
+                                     'reduce_usd': reduce_gate}
+                    if reduces:
+                        gates[symbol]['side'] = 'reduce'
             if abs(diff) < gate:
                 continue
 
@@ -891,7 +917,7 @@ def reconcile(get_positions_fn, place_order_fn, threshold=10, send_telegram_fn=N
         target = {k: v for k, v in target.items() if k not in gated_symbols}
         diff_actual = {k: v for k, v in diff_actual.items() if k not in gated_symbols}
 
-    # entry-side venue gates, for the snapshot (unrelated to gated_symbols
+    # per-symbol venue gates, for the snapshot (unrelated to gated_symbols
     # above — that is the SIGNAL gate)
     entry_gates = {}
     orders = compute_diff(target, diff_actual, threshold, gates=entry_gates)

@@ -22,7 +22,7 @@ RECONCILE_EVERY_S = 300  # 定期心跳對帳:就算沒有任何 mtime 變動也
                          # 變動(可能一小時後)才被發現
 
 
-_min_order_gate = {}  # symbol -> (expires_at, entry-side gate)
+_min_order_gate = {}  # symbol -> (expires_at, entry-side gate, reduce-side gate)
 
 
 def _symbol_threshold(symbol, reduce_only=False):
@@ -43,38 +43,50 @@ def _symbol_threshold(symbol, reduce_only=False):
     for THIS cache: the gate carries a mark up to MIN_ORDER_TTL_S old while the
     gap it judges is priced now. After a ceil-sell leaves the position 0.99
     lots short, a 2% rise inside the cache window would put the gap over a 1.0x
-    gate — _entry_qty rounds it up to a whole lot, the next reduce ceils it back
-    off, and the churn is back. Do not "simplify" it to 1.0 (pinned in
+    gate — _entry_qty rounds it up to a whole lot, the next reduce ceils it
+    back off, and the churn is back. Do not "simplify" it to 1.0 (pinned in
     tests/check_reconcile_threshold.py).
 
-    REDUCE legs (shrink, close, and the close leg of a flip): the flat
-    THRESHOLD, always. They do not round half-up — venue_wiring._reduce_qty
-    ceils to a whole lot and caps at the position, so any size is placeable;
-    under self_ledger it floors instead and a sub-lot reduce is a quiet no-op.
-    Gating them would save that one no-op round trip and cost the only thing we
-    must never do: a position of exactly one lot could then not be closed or
-    flipped AT ALL, while the reconciler printed "Converged" every round.
+    REDUCE legs (shrink, close, and the close leg of a flip): THRESHOLD, or
+    HALF a lot when larger. The entry gate alone only shuts one direction of
+    the churn — measured 2026-09-09 (uid 32321, 3 lots vs a $227 target): the
+    mark drifted the position $10 over target, _reduce_qty ceiled that to a
+    whole $79 lot, the flat gate let it through, and the resulting $69 gap was
+    bought straight back. 442 real fills. Half a lot is the one value that
+    converges on its own: an over-target under 0.5 lot is left alone; over it
+    the ceil-sell leaves a gap of ceil(x) − x, i.e. < 1 lot, which is under the
+    1.05-lot entry gate, so nothing buys it back. Anything ≥ one lot is fatal here: a
+    position of exactly one lot could then not be closed or flipped AT ALL
+    (the flat-10 rule this replaces was itself the fix for that P0), and any
+    stale-mark buffer on top pushes toward that line — so none. 0.5 leaves a
+    50% margin on a 60s-old mark. Under self_ledger _reduce_qty floors, so a
+    sub-lot reduce was already a quiet no-op; the gate only saves its round
+    trip. Spot and a failed lookup stay on the flat THRESHOLD.
 
     Lot-based (capital/TW futures) rows never reach here — lib.portfolio skips
     the account-currency threshold for them entirely.
     """
-    if reduce_only:
-        return THRESHOLD
     now = time.time()
     cached = _min_order_gate.get(symbol)
-    if cached and cached[0] > now:
-        return cached[1]
-    try:
-        from lib.execute import _venue_min_slice_usd
-        gate = _venue_min_slice_usd(symbol, floor=THRESHOLD)
-    except Exception as e:
-        # _venue_min_slice_usd already degrades to the floor internally; this
-        # only catches the import. Either way the fallback is the flat gate =
-        # the behaviour before this function existed.
-        logging.warning(f"[reconciler] venue minimum unavailable for {symbol} ({e})")
-        gate = THRESHOLD
-    _min_order_gate[symbol] = (now + MIN_ORDER_TTL_S, gate)
-    return gate
+    if not (cached and cached[0] > now):
+        try:
+            from lib.execute import _venue_sizes_usd
+            entry, lot_usd = _venue_sizes_usd(symbol, THRESHOLD)
+        except Exception as e:
+            # _venue_sizes_usd already degrades to the floor internally; this
+            # only catches the import. Either way the fallback is the flat gate =
+            # the behaviour before this function existed.
+            logging.warning(f"[reconciler] venue minimum unavailable for {symbol} ({e})")
+            entry, lot_usd = THRESHOLD, 0.0
+        cached = (now + MIN_ORDER_TTL_S, entry, max(THRESHOLD, 0.5 * lot_usd))
+        _min_order_gate[symbol] = cached
+    return cached[2] if reduce_only else cached[1]
+
+
+# lib.portfolio.compute_diff records a gate for the workspace only when it is
+# above the flat one; with both sides venue-scaled now, neither side IS the
+# flat value any more, so the callable carries it.
+_symbol_threshold.flat = THRESHOLD
 
 
 def _active_state_mtimes():

@@ -8,14 +8,20 @@ flat gate of 10 that is a real buy/sell round trip every heartbeat — one BTC
 perp lot is ~$78, so every leg clears 10 easily. Gating ENTRIES at the venue's
 own minimum converges the leftover instead.
 
-The gate must NOT apply to reduce legs: they ceil and cap at the position, so a
-position of exactly one lot has to stay closable and flippable.
+Reduce legs get HALF a lot (measured 2026-09-09, uid 32321: the entry gate
+alone left the other direction open — a $10 over-target was ceil-sold as a
+whole $79 lot and bought straight back, 442 fills). Never a whole lot: they
+ceil and cap at the position, so a position of exactly one lot has to stay
+closable and flippable — and that holds on a stale mark too.
 
-Asserts: a one-lot position closes and flips out; sub-lot buy-backs (half a
-lot, and a drifted 0.6 lot) place nothing while a shrink of the same size still
-does; an entry over the gate still trades; capital/lot rows pass untouched with
-zero venue lookups; the gate is cached per round and expires; a failed lookup
-degrades to the flat 10.
+Asserts: a one-lot position closes and flips out, incl. against a ±2%-stale
+gate; sub-lot buy-backs (half a lot, and a drifted 0.6 lot) place nothing; a
+shrink under half a lot places nothing while one over it does, and the sell it
+ceils to converges the next round; an entry over the gate still trades;
+spot / fine-grained instruments / a failed lookup keep the flat 10 on the
+reduce side; a failed LOT read alone costs the reduce side only and leaves the
+entry gate standing; capital/lot rows pass untouched with zero venue lookups;
+the gate is cached per round and expires.
 
 Run: cd blaveclaw-config && python3 tests/check_reconcile_threshold.py
 """
@@ -43,6 +49,7 @@ SYM = "BTCUSDT"         # coarse on purpose: one lot ($78) is what breaks a flat
 MARK = 78312.0
 LOT_USD = 0.001 * MARK  # 78.31
 GATE = LOT_USD * 1.05   # 82.23 — the venue minimum plus the stale-mark buffer
+RGATE = LOT_USD * 0.5   # 39.16 — the reduce side: half a lot, no buffer
 
 
 class _FakeOrder:
@@ -78,11 +85,16 @@ def gate(symbol=SYM, reduce_only=False):
 # ── the gate itself ────────────────────────────────────────────────────────
 check(abs(gate() - GATE) < 0.01,
       f"entry gate follows the venue minimum (${gate():.2f}), not the flat $10")
+check(abs(gate(reduce_only=True) - RGATE) < 0.01,
+      f"reduce gate is half a lot (${gate(reduce_only=True):.2f}) — under one "
+      "lot, over the flat 10")
+check(gate(SYM + "@spot") == gate(SYM + "@spot", reduce_only=True) == 10
+      == inspect.signature(portfolio.spot_scope).parameters["threshold"].default,
+      "a spot symbol's gate stays at 10 on both sides, matching spot_scope's default")
+fake.mark = 4000.0   # an ETH-like lot: $4
 check(gate(reduce_only=True) == reconciler.THRESHOLD,
-      "reduce legs keep the flat 10 — a close is never gated at venue scale")
-check(gate(SYM + "@spot") == 10 == inspect.signature(
-          portfolio.spot_scope).parameters["threshold"].default,
-      "a spot symbol's gate stays at 10, matching spot_scope's default")
+      "a fine-grained instrument (lot $4) keeps the flat 10 on the reduce side")
+fake.mark = MARK
 
 reconciler._min_order_gate.clear()
 fake.rule_calls = 0
@@ -99,9 +111,22 @@ check(fake.rule_calls == 2,
       "an expired entry is re-read — the lot is static, its USD value is not")
 
 fake.raises = True
-check(gate() == reconciler.THRESHOLD,
-      "an unreadable venue degrades to the flat 10 (the behaviour before this)")
+check(gate() == gate(reduce_only=True) == reconciler.THRESHOLD,
+      "an unreadable venue degrades to the flat 10 on both sides (the behaviour "
+      "before this)")
 fake.raises = False
+
+# the LOT is read out of a second rules dialect (step, else qty_precision) —
+# rules that parse for the minimum can still fail there. That failure must cost
+# the reduce side only: sharing one try/except with the entry gate would drop a
+# gate we already computed correctly back to the flat 10 and reopen the churn.
+_rules = fake.rules
+fake.rules = {"qty_precision": "n/a", "min_qty": 0.001, "min_notional": 5.0,
+              "contract_value": 1}   # int("n/a") raises inside _lot_base only
+check(abs(gate() - GATE) < 0.01 and gate(reduce_only=True) == reconciler.THRESHOLD,
+      f"an unreadable LOT keeps the entry gate (${GATE:.2f}) and drops only the "
+      "reduce side to the flat 10")
+fake.rules = _rules
 
 
 # ── whole rounds: what actually reaches place_order_fn ─────────────────────
@@ -179,10 +204,43 @@ check(stale_gate < shortfall * 1.05 and run(LOT_USD * 3, LOT_USD * 3 - shortfall
       f"a 0.99-lot shortfall (${shortfall:.2f}) against a 2%-stale gate "
       f"(${stale_gate:.2f}) is still blocked — at 1.0x it would pass")
 
-# a shrink is a reduce leg: gated flat, not at venue scale
-check(run(LOT_USD * 2, LOT_USD * 2.5) == [-39.16],
-      "a half-lot SHRINK still places — reduce legs keep the flat gate")
+# ⑤ the other direction of the churn (2026-09-09): an over-target under half a
+#    lot is left alone — the ceil-sell would take a whole lot, and that sell
+#    was the loss whether or not anything bought it back.
+check(run(LOT_USD * 3, LOT_USD * 3.13) == [],
+      "3 lots drifted $10 over a 3-lot target places nothing (the 442-fill event)")
+check(run(LOT_USD * 2, LOT_USD * 2.4) == [],
+      "a 0.4-lot SHRINK places nothing")
+check(run(LOT_USD * 2, LOT_USD * 2.6) == [round(-LOT_USD * 0.6, 2)],
+      "a 0.6-lot SHRINK still places (reduce gate is half a lot, not one)")
+# two steps and done: 1.5 lots over → placed → _reduce_qty ceils it to two
+# whole lots → 0.5 lot short, which is under the entry gate → converged.
+check(run(LOT_USD * 3, LOT_USD * 4.5) == [round(-LOT_USD * 1.5, 2)]
+      and run(LOT_USD * 3, LOT_USD * 2.5) == [],
+      "a 1.5-lot over-target sells, and the half-lot gap it leaves is not bought back")
+
+# ⑥ the reduce gate carries a stale mark too. Half a lot leaves 50% headroom
+#    under a one-lot close — a whole-lot gate would shut it on any uptick.
+for drift in (1.02, 0.98):
+    reconciler._min_order_gate.clear()
+    fake.mark = MARK * drift
+    stale_rgate = reconciler._symbol_threshold(SYM, reduce_only=True)
+    fake.mark = MARK
+    check(run(0, LOT_USD, keep_gate=True) == [-78.31]
+          and run(-LOT_USD, LOT_USD, keep_gate=True) == [-78.31],
+          f"a one-lot position still closes and flips against a {drift:.2f}x-stale "
+          f"reduce gate (${stale_rgate:.2f})")
 check(errors == [], "none of the above recorded an order_error")
+
+# ⑦ and the same, end to end: with no lot to be read the entry gate still holds
+#    the sub-lot buy-back shut (on a shared try it would be the flat 10 and the
+#    $39 buy would go out).
+_rules = fake.rules
+fake.rules = {"qty_precision": "n/a", "min_qty": 0.001, "min_notional": 5.0,
+              "contract_value": 1}
+check(run(LOT_USD * 3, LOT_USD * 2.5) == [],
+      "a half-lot buy-back is still blocked when only the LOT read fails")
+fake.rules = _rules
 
 
 # ④ capital / lot rows: untouched, and never trigger a venue lookup
