@@ -20,6 +20,7 @@ VENUES = {
     "bingx": ("API_KEY", "SECRET_KEY"),
     "okx": ("API_KEY", "SECRET_KEY", "PASSPHRASE"),
     "gateio": ("API_KEY", "SECRET_KEY"),
+    "bybit": ("API_KEY", "SECRET_KEY"),
 }
 _ELSEWHERE = {
     "capital": "references/capital-broker.md",

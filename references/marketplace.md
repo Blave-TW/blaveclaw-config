@@ -193,7 +193,7 @@ Example: `台股動能輪動：每週從跨產業台股中選出動能最強的�
 
 If the strategy uses a **custom lib** (not standard lib), append a brief note:
 ```
-Custom lib: lib/orders_bybit.py — place_order("BUY"|"SELL"|"SHORT"|"COVER"). Requires BYBIT_API_KEY, BYBIT_SECRET_KEY.
+Custom lib: lib/orders_kraken.py — place_order("BUY"|"SELL"|"SHORT"|"COVER"). Requires KRAKEN_API_KEY, KRAKEN_SECRET_KEY.
 ```
 
 ## Submit a strategy for sale
