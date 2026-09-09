@@ -107,9 +107,9 @@ a chart.
 - **Crypto** (`price` / `kline` / `book`): add `venue="binance"` and give `symbol` as a Binance USD-M
   perpetual — `BTC`, `BTCUSDT` or `BTC/USDT` all work; it is written uppercased with `/` removed and
   the api normalises from there. `lib/watch.py` checks the shape only (3–20 letters/digits, one
-  optional `/`), never a list of what Binance trades. Each crypto widget is its own connection in
-  the browser, so keep to **at most 6 crypto widgets on a board**. `venue` on `watchlist` / `block` is
-  refused — a watchlist is Taiwan-only and a block is a machine widget.
+  optional `/`), never a list of what Binance trades. There is **no separate cap on crypto widgets** —
+  the board's 24 is the cap. `venue` on `watchlist` / `block` is refused — a watchlist is Taiwan-only
+  and a block is a machine widget.
 - **`strategy_chart`**: pass `strategy="<name>"` and nothing else. **Everything about the card
   the strategy already knows is refused** — `symbol`, `interval`, `venue`, `block_type`, and the
   machine-widget arguments (`script`, `refresh_*`): the platform reads the symbol, the period and
@@ -124,7 +124,8 @@ a chart.
   minimum follows its `block_type`); omit `w`/`h` for the default. Position is never yours: the
   platform places new tiles, the user moves them.
 - **Board limits** (the api refuses beyond them): 24 widgets, 20 distinct stream symbols across
-  the board, 12 machine widgets. `title` 1–40 characters.
+  the board, 12 machine widgets. Crypto widgets and strategy charts have no cap of their own — the
+  24 covers them. `title` 1–40 characters.
 - **`block_type`**: any content block from `references/reports.md` §3 — `kpi_row`, `line_chart`,
   `drawdown`, `heatmap`, `bar_chart`, `histogram`, `box`, `scatter`, `metric_table`, `table`,
   `text`, `quote`, `code`, `callout`, `image`. Not `meta` / `footnote` / `divider` (report
