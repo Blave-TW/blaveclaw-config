@@ -95,6 +95,12 @@ def _manifest_filtered_alert(vid):
             f"[venue_wiring] {vid} has keys+libs but is not in the web bind "
             f"manifest ({_CRED_MANIFEST_PATH}) — not routed; bind it from the "
             f"投資組合 page")
+    # 事件在 24h stamp 之前落檔:那個 stamp 是給 Telegram 那一半的,平台自己去重。
+    try:
+        from lib.events import emit
+        emit("venue_unbound", venue=vid)
+    except Exception:
+        pass
     try:
         if os.path.exists(_MANIFEST_ALERT_STAMP_PATH) and \
                 time.time() - os.path.getmtime(_MANIFEST_ALERT_STAMP_PATH) \

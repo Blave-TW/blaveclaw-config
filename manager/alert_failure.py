@@ -22,6 +22,20 @@ MAX_OUTPUT_CHARS = 1500
 
 
 def alert(strategy_name, exit_code, output):
+    # 事件落檔在冷卻檢查「之前」——冷卻(24h)是給 Telegram 那一半用的,平台會自己
+    # 依級別去重(P2 同因 6 小時)。機器先壓過一輪,平台就永遠看不到那些事實。
+    # exit_code 從 argv 進來是字串,平台的欄位白名單要數值,轉不動就不送那一格。
+    try:
+        from lib.events import emit
+        try:
+            _code = int(exit_code)
+        except (TypeError, ValueError):
+            _code = None
+        emit("strategy_failed", strategy=strategy_name, exit_code=_code,
+             error=str(output)[-500:])
+    except Exception:
+        pass
+
     state_path = f"strategies/{strategy_name}/failure_alert_state.json"
     now = time.time()
     if os.path.exists(state_path):

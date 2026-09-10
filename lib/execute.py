@@ -407,6 +407,14 @@ def reap_dead_inflight():
         # exits the process instead of trading on a book known to be missing
         # fills (the in-memory flag halts this process either way; exiting
         # also keeps the markers for the next boot to retry).
+        # 事件落檔與下面的 Telegram 並行(dual-write)——見 lib/events。兩個分支
+        # (halt 寫成功/寫失敗)是同一件事,事件只發一則。
+        try:
+            from lib.events import emit
+            emit("execution_interrupted", keys=str(labels)[:200])
+        except Exception:
+            pass
+
         from lib import guard
         try:
             if not guard.halted():
@@ -583,6 +591,12 @@ def _fallback_market(symbol, reason, signed_diff, asset_spec, reduce_only, excha
     msg = f"⚠️ {symbol}: execution style unusable ({reason}) — placed a market order instead"
     logging.error(f"[execute] {msg}")
     try:
+        from lib.events import emit
+        emit("execution_fallback_market", symbol=symbol,
+             exchange=exchange, reason=str(reason)[:200])
+    except Exception:
+        pass
+    try:
         _get_notify()(msg)
     except Exception:
         pass
@@ -617,6 +631,12 @@ def dispatch_order(symbol, signed_diff, asset_spec=None, reduce_only=False,
                     msg = (f"⚠️ {symbol}: {run['style']} execution overdue — stop "
                            f"requested; orders for this symbol wait until it exits")
                     logging.error(f"[execute] {msg}")
+                    try:
+                        from lib.events import emit
+                        emit("execution_stuck", symbol=symbol,
+                             style=str(run["style"])[:32], kind="overdue")
+                    except Exception:
+                        pass
                     _get_notify()(msg)
             elif not run["reduce_only"] and new_sign != run["sign"]:
                 # signal flipped while an ENTRY execution runs: stop before the
@@ -641,6 +661,12 @@ def dispatch_order(symbol, signed_diff, asset_spec=None, reduce_only=False,
                 msg = (f"⚠️ {symbol}: abandoning wedged {run['style']} run to "
                        f"let a close order through")
                 logging.error(f"[execute] {msg}")
+                try:
+                    from lib.events import emit
+                    emit("execution_stuck", symbol=symbol,
+                         style=str(run["style"])[:32], kind="abandoned")
+                except Exception:
+                    pass
                 _get_notify()(msg)
             if not abandoned:
                 if run["stop"].is_set():
@@ -887,6 +913,11 @@ def _twap_thread(symbol, signed_diff, asset_spec, reduce_only, exchange,
             from lib.portfolio import load_portfolio_config
             from lib import guard
             if load_portfolio_config().get("self_ledger") and not guard.halted():
+                try:
+                    from lib.events import emit
+                    emit("execution_interrupted", keys=f"{symbol}(twap)"[:200])
+                except Exception:
+                    pass
                 guard.trip_halt(
                     f"TWAP crashed mid-run for {symbol} — its fills may be missing "
                     f"from the ledger; verify positions before resuming", "execute")

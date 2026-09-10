@@ -477,6 +477,12 @@ def _ui_override_alert():
     written BEFORE sending so a slow send can't spam; a failed stamp write
     still sends (a broken disk already alerts loudly elsewhere — silence here
     would hide that the agent's change didn't take)."""
+    # 事件在 24h stamp 之前落檔:那個 stamp 是給 Telegram 那一半的,平台自己去重。
+    try:
+        from lib.events import emit
+        emit("ui_override")
+    except Exception:
+        pass
     try:
         if os.path.exists(_UI_ALERT_STAMP_PATH) and \
                 time.time() - os.path.getmtime(_UI_ALERT_STAMP_PATH) < _UI_ALERT_COOLDOWN_S:

@@ -353,6 +353,13 @@ def _run_strategy_protected(name):
 
 
 def _alert_stale(name, expected, minutes_waited, straggler_symbol):
+    # 事件落檔與 Telegram 並行(dual-write)——見 lib/events。冷卻交給平台。
+    try:
+        from lib.events import emit
+        emit("bar_stale", strategy=name, symbol=straggler_symbol,
+             minutes=minutes_waited)
+    except Exception:
+        pass
     who = f"（卡住的是 {straggler_symbol}，若已下市/長期停牌請從 UNIVERSE 移除）" if straggler_symbol is not None else ""
     try:
         from lib.notify import send_text
@@ -375,6 +382,15 @@ def _alert_wrapper_error(name, exc):
         state = json.load(open(state_path)) if os.path.exists(state_path) else {}
     except Exception:
         state = {}
+    # 事件在冷卻檢查之前落檔:冷卻(6h)是給 Telegram 那一半的,平台自己會去重。
+    try:
+        from lib.events import emit
+        emit("scheduler_error", strategy=name,
+             error="".join(traceback.format_exception(
+                 type(exc), exc, exc.__traceback__))[-500:])
+    except Exception:
+        pass
+
     last = state.get("wrapper_error_alerted_at") or 0
     if now - last < WRAPPER_ERROR_COOLDOWN_SECONDS:
         return
