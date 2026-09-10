@@ -92,16 +92,17 @@ def _carry_over(out_dir, mode):
         return {}
 
 
-def _write_stats(out_dir, stats):
-    """stats.json via tmp + os.replace (same pattern as lib.param_scan.write_scan): a live
-    tick rewrites the file every bar, and a reader that lands mid-write — the reporter's
-    upload, or _carry_over on the next tick — would otherwise see a truncated file and
-    drop the MCPT / Generated At keys for good."""
-    path = Path(out_dir) / 'stats.json'
-    tmp  = path.with_name('stats.json.tmp')
+def _write_json_atomic(path, obj, indent=2):
+    """JSON via tmp + os.replace (same pattern as lib.param_scan.write_scan): these files
+    are rewritten while the reporter reads them — stats.json every bar in live mode, the
+    versions index while a backtest mints into it — and a reader landing mid-write would
+    otherwise see a truncated file and drop keys for good (MCPT / Generated At carry-over,
+    or the whole version list)."""
+    path = Path(path)
+    tmp  = path.with_name(path.name + '.tmp')
     try:
         with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump(stats, f, indent=2)
+            json.dump(obj, f, indent=indent)
         os.replace(tmp, path)
     except Exception:
         try:
@@ -109,6 +110,10 @@ def _write_stats(out_dir, stats):
         except OSError:
             pass
         raise
+
+
+def _write_stats(out_dir, stats):
+    return _write_json_atomic(Path(out_dir) / 'stats.json', stats)
 
 
 def _mcpt_n_effective(n_perm, bars):
@@ -432,6 +437,123 @@ def _chart_refresh_due(out_dir, tail_first_ts, tail_last_ts):
     return time.time() - mtime >= CHART_LIVE_REFRESH_MIN_AGE
 
 
+def _version_fields(stats):
+    """The six numbers plus the backtest window a version carries, read straight off the
+    stats.json just written — canon §4 is explicit that nothing here is recomputed. A key
+    the branch never writes (Sortino and MCPT on Type C) stays null, never 0: the UI shows
+    "—" for missing, and a 0 Sortino is a claim about the strategy."""
+    return {
+        'ret':     stats.get('Total Return [%]'),
+        'sharpe':  stats.get('Sharpe Ratio'),
+        'sortino': stats.get('Sortino Ratio'),
+        'mdd':     stats.get('Max Drawdown [%]'),
+        'trades':  stats.get('Trades'),
+        'mcpt_p':  stats.get(MCPT_KEYS[0]),
+        'start':   stats.get('start'),
+        'end':     stats.get('end'),
+    }
+
+
+def _mint_version(config, stats, mode):
+    """Freeze this backtest as strategies/<name>/versions/v<N>.json and refresh index.json
+    (.claude/docs/strategy-versions.md). Returns the version number, or None.
+
+    BACKTEST ONLY. run() is also the live/cron tick, which rewrites stats.json every bar
+    with the same code — minting there would give a deployed 1h strategy 24 versions a day
+    and push every real one out of the 20-version window within a day.
+
+    The blob is written before the index: the reporter walks the index to find what to
+    upload, so a blob can never be listed before it exists. Version numbers come off a
+    counter that only ever increases — pruning the oldest never frees its number (canon §3:
+    restoring v5 produces v8, not v5 again)."""
+    if mode != 'backtest':
+        return None
+    src_path = config.get('__file__')
+    if not src_path:
+        logging.warning("version not minted: no __file__ in config — call run(locals(), …)")
+        return None
+    from lib.strategy import VERSIONS_KEEP, code_hash, load_index, versions_dir
+    name = config['STRATEGY_NAME']
+    src  = Path(src_path).read_bytes()
+    vdir = versions_dir(name)
+    os.makedirs(vdir, exist_ok=True)
+
+    idx   = load_index(name) or {}
+    items = [i for i in (idx.get('items') or []) if isinstance(i, dict)]
+    n     = int(idx.get('counter') or 0) + 1
+    note  = config.get('VERSION_NOTE')
+    note  = note.strip() if isinstance(note, str) else ''
+    # Unchanged note = the agent edited the code and forgot the note; store nothing rather
+    # than a sentence describing the PREVIOUS change (canon §4, no restore exemption).
+    # Compared against the last mint's RAW note, not the stored one — comparing against the
+    # stored one makes an unchanged note reappear every other version (A → "" → A).
+    entry_note = '' if note and note == idx.get('last_note') else note
+    at     = int(stats.get(GENERATED_AT_KEY) or time.time())
+    digest = code_hash(src)
+    entry  = {'n': n, 'at': at, 'note': entry_note, 'code_hash': digest, **_version_fields(stats)}
+
+    # Compact (indent=None): the daily curve is thousands of numbers and this blob is
+    # uploaded as-is.
+    _write_json_atomic(vdir / f'v{n}.json',
+                       {'v': 1, 'strategy': name, **entry,
+                        'code':          src.decode('utf-8', 'replace'),
+                        'daily_dates':   stats.get('daily_dates') or [],
+                        'daily_returns': stats.get('daily_returns') or []},
+                       indent=None)
+
+    items.append(entry)
+    for old in items[:-VERSIONS_KEEP]:  # canon §8: keep 20; the api sweeps its own copy
+        try:
+            os.remove(vdir / f"v{old.get('n')}.json")
+        except OSError:
+            pass
+    _write_json_atomic(vdir / 'index.json',
+                       {'v': 1, 'counter': n, 'current': n, 'last_note': note,
+                        'items': items[-VERSIONS_KEEP:]})
+    # strategy.py is now exactly what v<n> stored, so any drift flag is stale.
+    try:
+        os.remove(vdir / 'drift.json')
+    except OSError:
+        pass
+    return n
+
+
+def _drift_flag(config, mode):
+    """Live/cron tick: does strategy.py still match the code the current version stored?
+
+    Mismatch writes versions/drift.json for the reporter to carry to the web (canon §6/§7:
+    the badge reads 「上線中 · 檔案已改」 instead of a clean 「上線中」); a match removes it.
+    A FLAG, never a refusal — refusing to run would leave state.json frozen on a stale
+    signal, so the reconciler holds a position it can neither add to nor exit, and it would
+    misfire on the two legitimate ways a file diverges (an older config on the machine, a
+    user or BYO agent editing by hand). Backtests are not checked at all: fork-and-switch
+    backtests the funded original side by side with its fork, and a gate there breaks it."""
+    if mode == 'backtest' or not config.get('__file__'):
+        return
+    from lib.strategy import code_hash, load_index, versions_dir
+    name  = config['STRATEGY_NAME']
+    items = (load_index(name) or {}).get('items') or []
+    if not items:
+        return  # never versioned on this machine (older config) — nothing to compare against
+    current = items[-1]
+    digest  = code_hash(Path(config['__file__']).read_bytes())
+    path    = versions_dir(name) / 'drift.json'
+    if digest == current.get('code_hash'):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return
+    try:  # only rewrite when the state actually changed — a 1m strategy ticks 1,440×/day
+        with open(path, encoding='utf-8') as f:
+            if json.load(f).get('code_hash') == digest:
+                return
+    except (OSError, ValueError):
+        pass
+    _write_json_atomic(path, {'code_hash': digest, 'version': current.get('n'),
+                              'at': int(time.time())})
+
+
 def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
     """
     Unified runner for Type A and Type C strategies.
@@ -507,6 +629,11 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         filename=str(out_dir / 'strategy.log'),
         level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s'
     )
+
+    try:  # visibility only — never blocks the tick (see _drift_flag)
+        _drift_flag(config, mode)
+    except Exception as e:
+        logging.warning("version drift check skipped: %s", e)
 
     data   = fetch_data_fn(hdrs)
     result = compute_fn(data)
@@ -698,6 +825,10 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         stats.update(_carry_over(out_dir, mode))  # live tick keeps MCPT + Generated At; backtest drops/restamps
         stats.setdefault(GENERATED_AT_KEY, int(time.time()))
         _write_stats(out_dir, stats)
+        try:  # a version is a record of the run, not part of it — never fail the backtest
+            _mint_version(config, stats, mode)
+        except Exception as e:
+            logging.warning("version mint failed: %s", e)
 
         # Full chart export on every user-run backtest; a live/cron tick rewrites stats.json
         # every few minutes and re-serializing years of bars each time would burn the VM for
@@ -819,21 +950,25 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         # No automatic MCPT for Type C — see _auto_mcpt's docstring (mcpt() is single-series).
         carried = _carry_over(out_dir, mode)  # live tick keeps MCPT + Generated At; backtest drops/restamps
         carried.setdefault(GENERATED_AT_KEY, int(time.time()))
-        _write_stats(out_dir,
-            {'strategy': strategy_name, 'interval': interval,
-             'start': close_df.index[0].strftime('%Y-%m-%d'),
-             'end':   close_df.index[-1].strftime('%Y-%m-%d'),
-             'fee': fee,
-             'Total Return [%]':    _v(total_ret * 100),
-             'Ann. Return [%]':     _v(ann_ret   * 100),
-             'Sharpe Ratio':        _v(sharpe),
-             'Max Drawdown [%]':    _v(mdd       * 100),
-             'Total Fees Paid [%]': round(float(tc_daily.sum()) * 100, 4),
-             'Trades':              n_trades,
-             **bench_stats,
-             'daily_dates': d_dates, 'daily_returns': d_rets,
-             **carried,
-             })
+        stats = {'strategy': strategy_name, 'interval': interval,
+                 'start': close_df.index[0].strftime('%Y-%m-%d'),
+                 'end':   close_df.index[-1].strftime('%Y-%m-%d'),
+                 'fee': fee,
+                 'Total Return [%]':    _v(total_ret * 100),
+                 'Ann. Return [%]':     _v(ann_ret   * 100),
+                 'Sharpe Ratio':        _v(sharpe),
+                 'Max Drawdown [%]':    _v(mdd       * 100),
+                 'Total Fees Paid [%]': round(float(tc_daily.sum()) * 100, 4),
+                 'Trades':              n_trades,
+                 **bench_stats,
+                 'daily_dates': d_dates, 'daily_returns': d_rets,
+                 **carried,
+                 }
+        _write_stats(out_dir, stats)
+        try:  # same as Type A: the record must not be able to fail the run
+            _mint_version(config, stats, mode)
+        except Exception as e:
+            logging.warning("version mint failed: %s", e)
 
         if not quiet:
             plot_pnl_portfolio(pf_series, close_df, title=strategy_name,

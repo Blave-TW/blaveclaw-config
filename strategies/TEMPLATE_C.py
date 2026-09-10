@@ -13,6 +13,9 @@ MODE          = "backtest"
 STRATEGY_NAME = "[strategy_name]"
 DISPLAY_NAME  = "[human-facing name, user's language — what it trades + does]"
 DESCRIPTION   = "[one plain sentence]"
+VERSION_NOTE  = ""                # one line on what changed since the last backtest;
+                                  # every backtest freezes a version and reads this. Leave it
+                                  # "" rather than stale — an unchanged note is stored as empty
 MARKET        = "spot"          # "spot" | "swap" — ask the user at creation; fixed once deployed
 INTERVAL      = "1d"            # '1d' for equities, '1h'/'4h' for crypto; the platform's signal-refresh schedule follows this
 START         = "2015-01-01"

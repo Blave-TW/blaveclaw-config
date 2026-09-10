@@ -82,6 +82,56 @@ auto-closed, the web's picker showed a ghost entry, and the user read all of
 it as breakage). An identity change IS a new strategy — same fork-and-switch
 flow, same warning before the save.
 
+## Versions (backtest history of one strategy)
+
+Every **backtest** freezes the strategy as a version: `strategies/<name>/versions/v<N>.json`
+(the full code, the note, the six headline numbers, the backtest window and the daily equity
+curve) plus a summary line in `versions/index.json`. The workspace shows them, and the user
+can ask to go back to one. Nothing to run by hand — `run()` does it.
+
+- **Backtests only.** A live / cron tick rewrites `stats.json` every bar but mints no
+  version; a deployed 1h strategy would otherwise produce 24 a day.
+- **`VERSION_NOTE`** (a string constant next to `DISPLAY_NAME` / `DESCRIPTION`): one line on
+  what changed in THIS run — a parameter, a rule, a data source. Update it whenever you
+  change the code, before the backtest. Leave it `""` when nothing changed rather than
+  leaving a stale line: a note identical to the last version's is stored as empty on
+  purpose, so a forgotten note shows no summary instead of a wrong one.
+- **Numbers are never reused.** Restoring v5 and re-running produces v8, not v5 again.
+- **20 versions per strategy** are kept on the machine; older ones are deleted. Never quote
+  a version the index no longer lists.
+- `from lib.strategy import list_versions` → `list_versions(name)` returns those summary
+  entries (`n`, `at`, `note`, `ret`, `sharpe`, `sortino`, `mdd`, `trades`, `mcpt_p`,
+  `start`, `end`, `code_hash`). Answer 「這支策略有哪些版本」/「哪一版 Sharpe 最好」 from
+  it — one small file, no need to open the blobs; open `versions/v<N>.json` only when you
+  need the actual code.
+- Entry / exit records and parameter-scan grids are NOT stored per version — do not offer
+  to show them for an old version.
+
+### Restoring a version
+
+The web workspace sends one fixed prompt in the user's interface language. It has three
+forms — recognise all of them; every other locale falls back to the English one:
+
+- zh (traditional)「請把策略「{display_name}」({name}) 還原到第 {n} 版,重跑回測 —— 不用再確認」
+- zh (simplified)「请把策略「{display_name}」({name}) 还原到第 {n} 版,重跑回测 —— 不用再确认」
+- en "Please restore strategy {display_name} ({name}) to version {n} and re-run the
+  backtest — no further confirmation needed."
+
+The user has already chosen on the web: no confirmation question, no counter-proposal.
+Do these four, in this order:
+
+1. `from lib.strategy import restore` → `restore(name, n)`, **run from the workspace root**
+   (it refuses elsewhere: the live-strategy gate reads `manager/` relative to the working
+   directory). It refuses — raises — when the strategy is funded (`amounts > 0`), because
+   overwriting a live strategy's file flips a real position on the next bar. If it refuses, STOP: tell the user the strategy is live
+   and offer the fork-and-switch flow above (fork it, restore the old code into the fork,
+   backtest, switch the funding), never edit the file anyway.
+2. Only if it returned: the old code is now in `strategy.py`.
+3. Set `VERSION_NOTE = "還原自 v{n}"` (the user's language) in that file.
+4. Re-run the backtest. That run is what produces the new version and rewrites
+   `stats.json` — without it the workspace would show the old version's code beside the
+   previous run's numbers, which is worse than not restoring at all.
+
 ## Signal Contract
 
 `compute_signals(df)` receives the DataFrame returned by `fetch_data` and returns either a **pd.Series** or a **(pd.Series, exec_at_close)** tuple:

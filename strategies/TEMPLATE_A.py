@@ -14,6 +14,9 @@ MODE          = "backtest"        # "backtest" | "live"
 STRATEGY_NAME = "[strategy_name]"
 DISPLAY_NAME  = "[human-facing name, user's language — what it trades + does]"
 DESCRIPTION   = "[one plain sentence]"
+VERSION_NOTE  = ""                # one line on what changed since the last backtest;
+                                  # every backtest freezes a version and reads this. Leave it
+                                  # "" rather than stale — an unchanged note is stored as empty
 SYMBOL        = "BTCUSDT"
 MARKET        = "swap"            # "swap" | "spot" — part of the instrument's identity; ask the user, fixed once deployed
 INTERVAL      = "1h"              # the platform's signal-refresh schedule follows this
