@@ -17,6 +17,10 @@ MIN_ORDER_TTL_S = 60  # how long a symbol's venue minimum stays cached: the LOT
                       # heartbeat on purpose — this dedupes the lookups WITHIN
                       # a round, it is not a cross-round cache
 DISCONNECT_HALT_AFTER = 3  # 連續 N 次讀不到持倉=交易所鏈路斷了,自動 HALT
+ERROR_NOTIFY_COOLDOWN_S = 3600  # 對帳失敗通知最多每小時一則。計時是 per-process、
+                               # 不分錯誤種類(一小時內換一種失敗也一樣被壓下,
+                               # log 與 workspace 的 order_errors 照記):失敗會
+                               # 持續到有人處理為止,每 5 分鐘一則只是洗到不看
 RECONCILE_EVERY_S = 300  # 定期心跳對帳:就算沒有任何 mtime 變動也要每 5 分鐘
                          # 對一次帳——斷鏈、金鑰失效、倉位漂移不能等下一次訊號
                          # 變動(可能一小時後)才被發現
@@ -87,6 +91,49 @@ def _symbol_threshold(symbol, reduce_only=False):
 # above the flat one; with both sides venue-scaled now, neither side IS the
 # flat value any more, so the callable carries it.
 _symbol_threshold.flat = THRESHOLD
+
+
+# ── 該不該對帳 ───────────────────────────────────────────────────────────────
+# 這支 daemon 每輪先確認自己的前提,而不是靠外面把它停掉(level-triggered:
+# 每輪重讀現況,不依賴收到某個事件)。實例 2026-09-09 uid 29026:web 解綁了
+# 交易所,平台端 _stop_reconciler() 沒能確認停掉這支 daemon,於是它連續 16 小時
+# 每 5 分鐘 raise 一次 "no officially-supported venue bound" 並各送一則 Telegram
+# (190 則),而用戶正是刻意解綁的——那些通知沒有任何可採取的行動。
+#
+# 沒綁交易所 = 沒有可對帳的對象:跳過整輪(不讀持倉、不下單、不送通知),心跳照
+# 打,重新綁定後下一輪自己恢復。這讓「daemon 還活著」從一天 288 則通知降級成
+# 一支閒置 process,平台端停不停得掉不再是正確性問題。
+#
+# 刻意「只」擋沒綁 venue,不擋「amounts 全空」:把 下單設定 的金額設成 0 正是
+# references/manager.md 教的平倉手法(「set the strategies' amounts to 0 from
+# the web 下單設定 and let the reconciler close them」),擋掉會讓部位永遠關不掉。
+_idle_logged = False
+
+
+def _venue_bound():
+    """這台機器現在有沒有綁著任何交易所/券商。
+
+    讀的是綁定 manifest(manager/credentials.ui.json),不是 detect_venue()。
+    detect_venue 走 official_venues(),而那支會跳過 venue_wiring._NON_AUTO
+    ({sinopac, president, capital} —— 台灣券商走 signed-diff 契約、由本檔自己的
+    capital 區塊接手,刻意不進自動接線),所以一台只綁群益期貨的機器 detect_venue
+    會回 None —— 拿它當閘門會把整批台灣券商機器永遠鎖成閒置。manifest 沒有這個
+    問題:它是平台在每次綁定/解綁時寫的 credential pair 清單,台灣券商與 paper
+    都在裡面(_venue_cred_ids「TW brokers same pool」)。
+
+    順帶:detect_venue 在綁了多個 venue 時每次呼叫都會 log 一則 WARNING,而這裡
+    是每 5 秒一輪 —— 拿它當閘門等於一天多印一萬七千行。
+
+    manifest 不存在或壞掉 → _ui_bound_ids() 回 None → 當成有綁(fail-open,與
+    venue_wiring 自己的 routing 同一個方向):寧可多跑一輪對帳,也不要因為讀不到
+    一個檔案就悄悄停掉一台真的在下單的機器。"""
+    try:
+        from lib.venue_wiring import _ui_bound_ids
+        ids = _ui_bound_ids()
+        return ids is None or bool(ids)
+    except Exception as e:
+        logging.warning(f"[reconciler] venue check failed ({e}) — assuming bound")
+        return True
 
 
 def _active_state_mtimes():
@@ -505,13 +552,28 @@ if __name__ == '__main__':
 
     last_mtimes = {}
     last_reconcile_at = 0.0
+    last_error_notify_at = 0.0  # ERROR_NOTIFY_COOLDOWN_S 的計時起點
     force_next = False  # 下單後強制再對帳一輪:把成交後的實際部位寫進快照,
                         # 不然「實際/差額」會停在下單前的狀態直到下次訊號變動
 
     while True:
-        # heartbeat for manager/healthcheck.py — a stale file means this daemon died
+        # heartbeat for manager/healthcheck.py — a stale file means this daemon died.
+        # Touched BEFORE the idle gate below on purpose: an idling daemon is alive
+        # and healthy, and must not look dead to the healthcheck.
         HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
         HEARTBEAT_PATH.touch()
+
+        # 沒綁交易所就整輪跳過 —— 見 _venue_bound。轉態時各記一行,不刷 log。
+        if not _venue_bound():
+            if not _idle_logged:
+                logging.info("[reconciler] no venue bound — idling (no positions "
+                             "read, no orders, no notifications) until one is bound")
+                _idle_logged = True
+            time.sleep(POLL_INTERVAL)
+            continue
+        if _idle_logged:
+            logging.info("[reconciler] venue bound again — resuming reconciliation")
+            _idle_logged = False
 
         try:
             # Inside the try: this json-loads portfolio_config.json, which the
@@ -554,9 +616,17 @@ if __name__ == '__main__':
                 # something to page the user for.
                 logging.info(f"[reconciler] round skipped: {e}")
             except Exception as e:
-                err_msg = f"[reconciler] ERROR: {e}"
-                logging.error(err_msg)
-                send_telegram(err_msg)
+                logging.error(f"[reconciler] ERROR: {e}")
+                # 冷卻:失敗會一直失敗到有人處理,每 5 分鐘一則只是洗版。訊息寫成
+                # 用戶看得懂的後果 + 原始錯誤(原本只丟 raw exception,用戶收到的是
+                # "no officially-supported venue bound (keys + lib/account_*.py ...)"
+                # 這種工程師黑話)。
+                if time.time() - last_error_notify_at > ERROR_NOTIFY_COOLDOWN_S:
+                    last_error_notify_at = time.time()
+                    send_telegram(
+                        "⚠️ 自動下單這一輪沒跑完，部位維持原狀，系統會繼續重試。"
+                        f"錯誤持續的話這則訊息每 {ERROR_NOTIFY_COOLDOWN_S // 3600} "
+                        f"小時提醒一次。\n\n原因：{e}")
                 # A persistent failure (dead key, network) must retreat to the
                 # heartbeat cadence, not retry+Telegram every poll tick. BOTH
                 # lines are needed: last_reconcile_at throttles the heartbeat
