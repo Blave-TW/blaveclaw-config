@@ -56,9 +56,10 @@ def compute_signals(df, entry_th=0.0, exit_th=0.0):
 
 
 # ── default windows: floor, never round ───────────────────────────────────────
-check(default_windows(730) == (240, 60), f"730 天 → 240/60(round 會給 61 → 只切 7 輪)→ {default_windows(730)}")
-check(default_windows(973) == (324, 81) and default_windows(365) == (120, 30)
-      and default_windows(1095) == (364, 91), "973 / 365 / 1095 天的預填照 spec")
+check(default_windows(730) == (365, 30) and default_windows(455) == (365, 30)
+      and default_windows(1700) == (365, 30), f"≥ 455 天一律 365/30 → {default_windows(730)}")
+check(default_windows(454) == (148, 37) and default_windows(365) == (120, 30),
+      "不夠切 3 輪的短資料退回比例公式(4:1、floor)")
 check(default_windows(120) == (120, 30), "短資料仍守 30 天步長下限")
 
 # ── seam: run k's first test bar carries run k's own position ─────────────────
