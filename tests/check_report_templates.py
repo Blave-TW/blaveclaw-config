@@ -41,7 +41,7 @@ d.fetch_twstock_ohlcv = lambda sid, sch, h, start=None, end=None, adjust=False: 
 d.fetch_twstock_institutional = lambda sid, s, e, h: pd.DataFrame({"foreign_net": rng.normal(0, 5e6, n)}, index=days)
 
 H = {"api-key": "x", "secret-key": "y"}
-NAR = {"lead": "一句可證偽的主張。", "read": "判讀。", "action": "操作。", "risk": "推翻條件。"}
+NAR = {"lead": "一句可證偽的主張。", "read": "判讀。", "watch": "觀察條件。", "risk": "推翻條件。"}
 # name → (title of the one price chart, or None; line_chart titles that must stay line charts)
 PRICE = {"tw": ("加權指數", {"融資餘額", "外資期貨淨多單"}), "crypto": (None, {"BTC 資金費率", "Blave 市場指標(z-score)"}),
          "2330": ("2330 日 K", set()), "btc": ("BTC 日 K", {"資金費率", "Blave 指標(z-score)"})}
@@ -91,14 +91,18 @@ for name, pack in (("tw", T.tw_market_brief("2026-09-02", H)), ("crypto", T.cryp
                 want.pop("前 20 日低", None)   # 大盤晨報只畫前 20 日高
             check(bool(want) and ref == want,
                   f"{tag}: 參考線恰為 {sorted(want)},值 = 倒數第 2–21 根的最高價/最低價")
-            levels = {r["level"]: r["price"] for x in b if x["type"] == "table" and x.get("title") == "關鍵價位" for r in x["rows"]}
+            levels = {r["level"]: r["price"] for x in b if x["type"] == "table" and x.get("title") == "近期高低與均線" for r in x["rows"]}
             check(bool(want) and all(f"{k} {v:,.2f}" in pack.describe() for k, v in want.items())
                   and (name == "tw" or all(levels.get(k) == f"{v:,.2f}" for k, v in want.items())),
-                  f"{tag}: 參考線、關鍵價位表、describe() 的前 20 日高/低同名同值")
+                  f"{tag}: 參考線、近期高低與均線表、describe() 的前 20 日高/低同名同值")
         else:
             check(not ks and doc["schema_version"] == "1.1", f"{tag}: 沒有 K 線 → 維持 1.1")
         check(not re.search(r"(?<!前 )20 日[高低]", json.dumps(doc, ensure_ascii=False) + pack.describe()),
               f"{tag}: 沒有不帶「前」的 20 日高/低標籤(同名不同口徑)")
+        body = json.dumps(doc, ensure_ascii=False) + pack.describe()
+        check(not re.search("操作建議|支撐|壓力|關鍵價位", body.replace("非支撐壓力", "")),
+              f"{tag}: 範本不自帶操作建議/支撐壓力/關鍵價位字眼")
+        check(("## 觀察重點" in body) == bool(nar), f"{tag}: watch 槽標題為「觀察重點」")
         titles = {x.get("title") for x in b if x["type"] == "line_chart"}
         check(lines <= titles and not any("收盤" in (t or "") for t in titles), f"{tag}: 非價格圖仍是 line_chart,沒有收盤折線")
     check(pack.context and "narrative slots" in pack.describe(), f"{name}: describe() 列出數字與槽位")
@@ -127,7 +131,8 @@ except ValueError:
 check(len([b for b in json.load(open(T.publish(T.tw_market_brief("2026-09-02", H), None, report_id="tw-k")))["blocks"] if b["type"] == "kpi_row"][0]["items"]) == 6
       and any(i["label"] == "台指期夜盤" for i in json.load(open(os.path.join(os.environ["BLAVE_AGENT_WORKSPACE"], "reports", "tw-k.json")))["blocks"][1]["items"]),
       "台股晨報六格 KPI 含台指期夜盤")
-for bad, why in (({"lead": "x" * 601}, "超過字數上限"), ({"summary": "x"}, "未知槽位"), ({"read": "見 [^nope]"}, "不存在的註腳引用")):
+for bad, why in (({"lead": "x" * 601}, "超過字數上限"), ({"summary": "x"}, "未知槽位"), ({"action": "x"}, "舊的 action 槽位"),
+                 ({"read": "見 [^nope]"}, "不存在的註腳引用")):
     try:
         T.publish(pack, bad); check(False, f"publish 拒絕{why}")
     except ValueError:

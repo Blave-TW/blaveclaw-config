@@ -22,11 +22,11 @@ Usage:
 
     path = write_report(
         "mcpt-2317-20260901",
-        "2317 MCPT 檢定",
+        "2317 策略績效勝過 98.8% 的隨機排列",
         [
             {"type": "text", "variant": "lead", "markdown": "p = 0.012..."},
             {"type": "kpi_row", "items": [
-                {"label": "p-value", "value": "0.012", "tone": "pos"}]},
+                {"label": "p-value", "value": "0.012", "tone": "neutral"}]},
             {"type": "image", "file": "perm.png", "alt": "permutation histogram"},
         ],
         type="research",
@@ -46,6 +46,7 @@ import os
 import re
 import shutil
 import time
+import unicodedata
 
 # The uploader scans $BLAVE_AGENT_WORKSPACE/reports, so that env var wins when it
 # is set. It is often absent though: scheduled strategy subprocesses are started
@@ -66,6 +67,28 @@ _ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 # the uploader's call, and it reports through reports/upload_errors.log.
 _FILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}")
 FILES_SUFFIX = ".files"
+# ≈ 40 CJK / 80 Latin: the share card cuts a title at ~50 CJK, so this leaves a margin.
+RESEARCH_TITLE_WIDTH = 80
+
+
+def _research_warnings(title, blocks):
+    """The two share-card points of the research skeleton (references/reports.md §7b).
+    Advisory only: a refused report is lost, a weak one can be rewritten. `blocks[0]`
+    is the meta block by the time this runs, and its `title` is the one the web renders —
+    a caller-supplied meta may differ from the envelope title."""
+    out = []
+    shown = blocks[0].get("title", title) if blocks and isinstance(blocks[0], dict) else title
+    width = sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in str(shown))
+    if width > RESEARCH_TITLE_WIDTH:
+        out.append(f"research title is {width} wide (CJK counts 2), over {RESEARCH_TITLE_WIDTH}; "
+                   "the share card truncates it, state the claim shorter (references/reports.md 7b)")
+    i = 1
+    if i < len(blocks) and isinstance(blocks[i], dict) and blocks[i].get("variant") == "lead":
+        i += 1
+    if not (i < len(blocks) and isinstance(blocks[i], dict) and blocks[i].get("type") == "kpi_row"):
+        out.append("research report has no kpi_row right after the lead; the share card takes "
+                   "its first item as the key number (references/reports.md 7b)")
+    return out
 
 
 def _write_bytes(path, data):
@@ -115,6 +138,8 @@ def write_report(report_id, title, blocks, type="research", report_type=None,
     and a second copy of the rules on this side would drift and start refusing reports
     the platform accepts. A rejected report lands in `reports/failed/` with the
     api's message (it names the offending field path) in `upload_errors.log`.
+    For `type="research"` two points of the §7b skeleton (title width, a `kpi_row`
+    right after the lead) are printed as `WARNING:` lines — advice, never a refusal.
     """
     if not isinstance(report_id, str) or not _ID_RE.fullmatch(report_id):
         raise ValueError(f"report id {report_id!r} must match [A-Za-z0-9_-]{{1,64}}")
@@ -163,6 +188,11 @@ def write_report(report_id, title, blocks, type="research", report_type=None,
         except OSError:
             pass
         raise
+    # ASCII only: a report job's stdout goes to run.log in the Windows locale codec (cp950),
+    # and an unencodable advisory line would fail a run whose report is already written.
+    if type == "research":
+        for w in _research_warnings(title, blocks):
+            print(f"WARNING: {w}")
     return path
 
 

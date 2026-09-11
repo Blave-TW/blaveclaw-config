@@ -4,7 +4,7 @@ Report templates — the deterministic half of a report, built from `lib.data`.
 A template returns a `Pack`: the data blocks (KPI row, charts, tables, footnote)
 already in contract shape, plus the numbers behind them (`pack.context`) and the
 narrative slots left for you to fill (`pack.slots`). You write the judgement —
-lead / read / action / risk — and `publish()` assembles and drops the report.
+lead / read / watch / risk — and `publish()` assembles and drops the report.
 You never build a chart block by hand for these report types, and you never
 recompute a number the pack already carries.
 
@@ -15,8 +15,8 @@ recompute a number the pack already carries.
     publish(pack, narrative={
         "lead":   "...one falsifiable claim...",
         "read":   "...what the numbers say and why...",
-        "action": "...what to do about it...",
-        "risk":   "...the level that would prove the lead wrong...",
+        "watch":  "...which conditions / indicators to watch, at what thresholds...",
+        "risk":   "...the indicator threshold that would prove the lead wrong...",
     })
 
     publish(pack)                          # no narrative = data pack only, id gets "-auto"
@@ -47,7 +47,8 @@ _FNREF_RE = re.compile(r"\[\^([A-Za-z0-9_-]{1,32})\]")
 SLOTS = {
     "lead": ("", 600),
     "read": ("## 判讀", 2400),
-    "action": ("## 操作建議", 1500),
+    # 不叫「操作建議」:對不特定人給支撐壓力、買賣價位是投顧法規點名的態樣,這格只寫條件與門檻。
+    "watch": ("## 觀察重點", 1500),
     "risk": ("推翻這份解讀的訊號", 900),
 }
 
@@ -563,8 +564,8 @@ def symbol_brief(symbol, date=None, headers=None, lookback_days=90):
 
 def _prior20(bars, notes):
     """(前 20 日高, 前 20 日低) = 倒數第 2–21 根的最高價/最低價,或 (None, None) 並記 notes。"""
-    # 不含當日:含當日時收盤永遠不可能在前高之上,判讀會寫出與事實相反的「仍在 20 日高之下」;
-    # 不含當日,只有今天那根可能穿線,穿線本身就是突破訊號。不足 21 根就不算,不拿短窗口頂替。
+    # 不含當日:含當日時收盤永遠不可能高於這個值,判讀會寫出與事實相反的「仍在 20 日高之下」;
+    # 不含當日,今日收盤才可能高於(或低於)這個值。不足 21 根就不算,不拿短窗口頂替。
     if len(bars) < 21:
         notes.append(f"日 K 只有 {len(bars)} 根,不足 21 根,前 20 日高/低省略")
         return None, None
@@ -582,6 +583,9 @@ def _levels(bars, notes):
     return lv
 
 
+_LEVELS_TITLE = "近期高低與均線"
+
+
 def _level_lines(lv):
     return [(lv[k], k, em) for k, em in (("前 20 日高", False), ("前 20 日低", True)) if k in lv]
 
@@ -589,8 +593,8 @@ def _level_lines(lv):
 def _levels_table(lv, last):
     rows = [{"level": k, "price": _num(v, 2), "dist": _pct((last / v - 1) * 100)} for k, v in lv.items()]
     # 距現價是方向不是損益,不走 percent 的上色閘門。
-    return table("關鍵價位", [("level", "價位", "left"), ("price", "價格", "right"), ("dist", "距現價", "right")],
-                 rows, caption="距現價 = 現價相對該價位的百分比,正值表示現價在其上")
+    return table(_LEVELS_TITLE, [("level", "項目", "left"), ("price", "數值", "right"), ("dist", "距現價", "right")],
+                 rows, caption="歷史統計值,非支撐壓力或進出場價。距現價 = 現價相對該數值的百分比,正值表示現價在其上")
 
 
 def _tw_symbol_brief(stock_id, date, headers, lookback_days):
@@ -610,7 +614,7 @@ def _tw_symbol_brief(stock_id, date, headers, lookback_days):
     kpis.append(kpi("收盤", _num(last, 2), _tone(chg), delta=_pct(chg * 100)))
     kpis.append(kpi("成交量", _num(vol), "neutral", unit="張", delta=_pct((vol / vol5 - 1) * 100) + " vs 5日均"))
     lv = _levels(df, notes)
-    ctx["關鍵價位"] = ", ".join(f"{k} {_num(v, 2)}" for k, v in lv.items())
+    ctx[_LEVELS_TITLE] = ", ".join(f"{k} {_num(v, 2)}" for k, v in lv.items())
 
     inst = None
     try:
@@ -659,7 +663,7 @@ def _crypto_symbol_brief(sym, date, headers, lookback_days):
     ctx["價格"] = f"{_num(last, 2)} USDT({_pct(chg * 100)})"
     kpis.append(kpi(label, _num(last, 2), _tone(chg), unit="USDT", delta=_pct(chg * 100)))
     lv = _levels(df, notes)
-    ctx["關鍵價位"] = ", ".join(f"{k} {_num(v, 2)}" for k, v in lv.items())
+    ctx[_LEVELS_TITLE] = ", ".join(f"{k} {_num(v, 2)}" for k, v in lv.items())
 
     args = (s, "1d", start, None, headers)
     fund = _indicator(_data.fetch_funding_rate, args, "資金費率", ctx, kpis, notes, fmt=lambda v: f"{v:+.4f}%")
@@ -695,13 +699,16 @@ def _crypto_symbol_brief(sym, date, headers, lookback_days):
 def publish(pack, narrative=None, report_id=None, title=None, origin=None):
     """Assemble the pack and the narrative into a report and drop it. Returns the path.
 
-    narrative: {"lead", "read", "action", "risk"} — any subset, markdown, each capped
+    narrative: {"lead", "read", "watch", "risk"} — any subset, markdown, each capped
     by `pack.slots`. `lead` becomes the opening conclusion card (right after meta),
-    `read`/`action` become sections after the data blocks, `risk` a warning callout
+    `read`/`watch` become sections after the data blocks, `risk` a warning callout
     just before the footnote. No narrative = a data-only report — the honest form
     for a scheduled run, never a place for a made-up view.
     origin: "chat" (default) or "scheduled" — shown in the report header."""
     narrative = dict(narrative or {})
+    if "action" in narrative:
+        raise ValueError("'action' was renamed to 'watch' (觀察重點): conditions and indicator thresholds "
+                         "only, no trade instruction, see references/reports.md §1b")
     unknown = set(narrative) - set(pack.slots)
     if unknown:
         raise ValueError(f"unknown narrative slot(s): {sorted(unknown)}; allowed: {sorted(pack.slots)}")
@@ -717,7 +724,7 @@ def publish(pack, narrative=None, report_id=None, title=None, origin=None):
     if narrative.get("lead", "").strip():
         out.append(text(narrative["lead"].strip(), lead=True))
     out += blocks
-    for key in ("read", "action"):
+    for key in ("read", "watch"):
         body = narrative.get(key, "").strip()
         if body:
             heading = pack.slots[key][0]

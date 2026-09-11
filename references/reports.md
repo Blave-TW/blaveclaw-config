@@ -12,7 +12,9 @@ Telegram message about a report as well, that duplicates every alert.
 
 §1–§6 are the **format** contract; **§7 is the content bar** — what a report has to
 actually say to be worth reading. A report can satisfy every rule in §1–§6 and still
-be worthless, so read §7 before you write the prose.
+be worthless, so read §7 before you write the prose. A report you write by hand also
+follows §7b: its presentation rules apply to every type but `performance`, and `research`
+adds its own rules on top.
 
 ## 1. How to publish — the drop directory
 
@@ -47,11 +49,11 @@ from lib.report import write_report, status
 
 write_report(
     "mcpt-2317-20260901",           # id == file name; [A-Za-z0-9_-]{1,64}
-    "2317 MCPT 檢定",                # 1–200 chars, sidebar title
+    "2317 策略績效勝過 98.8% 的隨機排列",   # 1–200 chars; a research title states the finding (§7b)
     [                               # blocks — a meta block is prepended for you
         {"type": "text", "variant": "lead", "markdown": "p = 0.012, ..."},
         {"type": "kpi_row", "items": [
-            {"label": "p-value", "value": "0.012", "tone": "pos"},
+            {"label": "p-value", "value": "0.012", "tone": "neutral"},
             {"label": "Permutations", "value": "1,000", "tone": "neutral"}]},
     ],
     type="research",                # performance | morning | research
@@ -67,7 +69,9 @@ status("mcpt-2317-20260901")   # 'pending' | 'sent' | 'failed: <reason>' | 'unkn
 `write_report` checks only the report id and the image file names (a name is used to
 write a file, so it must not be a path) — every other rule is enforced downstream,
 where the error message is more precise than anything this side could reproduce. It
-writes the pictures before the JSON, in the order the drop dir requires.
+writes the pictures before the JSON, in the order the drop dir requires. For
+`type="research"` it also prints two advisory `WARNING:` lines from the §7b skeleton
+(title too long, no `kpi_row` right after the lead). They never stop the write.
 
 **The write is the finish line.** Once the JSON is in the drop dir the report is
 produced and you are done — tell the user it has been produced and will show up in the
@@ -110,23 +114,38 @@ print(pack.describe())                   # every figure the pack carries, one li
 #     三大法人: 外資 +267.0 億(昨 -144.0 億)、投信 +131.0 億、自營 +163.0 億、合計 +561.0 億
 #     外資期貨淨多單: +12,300 口(+2,500 口,09-01)
 #     缺少:  - 台指期 2026-09-01 無夜盤 bar(…)      ← a missing series is a missing block, never a guess
-#     narrative slots: lead≤600, read≤2400, action≤1500, risk≤900
+#     narrative slots: lead≤600, read≤2400, watch≤1500, risk≤900
 
 publish(pack, narrative={
     "lead":   "外資現貨與期貨同日轉多,量能放大六成——這是資金回補,不是空窗反彈。",
     "read":   "…what the numbers say and why (markdown, §4 subset)…",
-    "action": "…what to do about it, with levels…",
+    "watch":  "…which indicator / 籌碼 conditions to watch, and at what thresholds…",
     "risk":   "外資連兩日淨賣超逾 150 億,或淨多單回落到 1 萬口以下,這份解讀作廢。",
 })
 ```
 
 - `crypto_market_brief(symbols=("BTC", "ETH", "SOL"))` — price / returns table, rebased
   performance, BTC funding, the market-wide Blave indicators, today's macro events.
-- `symbol_brief("2330")` — Taiwan stock: close / volume / 外資買賣超 (張), key levels (前 20 日高/低 = the high / low of the 20 sessions before today, today excluded, so a close above it is a breakout;
-  5/20/60 日均); `symbol_brief("BTC")` — crypto perp: price, funding, 爆倉 / 巨鯨 / 多空力道.
-- Slots: `lead` becomes the opening card (one falsifiable claim), `read` / `action` become
-  sections after the data, `risk` a warning callout before the footnote. Each has a character
-  cap (`pack.slots`); `publish` raises past it — cut, do not summarise.
+- `symbol_brief("2330")` — Taiwan stock: close / volume / 外資買賣超 (張), recent highs / lows and
+  moving averages (table 「近期高低與均線」: 前 20 日高/低 = the high / low of the 20 sessions before
+  today, today excluded, so only today's bar can sit beyond it; 5/20/60 日均);
+  `symbol_brief("BTC")` — crypto perp: price, funding, 爆倉 / 巨鯨 / 多空力道.
+- Slots: `lead` becomes the opening card (one falsifiable claim), `read` (判讀) / `watch`
+  (觀察重點) become sections after the data, `risk` a warning callout before the footnote. Each
+  has a character cap (`pack.slots`); `publish` raises past it — cut, do not summarise.
+- **Levels are statistics, not calls.** 前 20 日高/低 and the moving averages are listed as
+  figures. The narrative never calls them 支撐 / 壓力 (support / resistance) or an entry, exit
+  or target price, never tells a reader who is flat or holding what to do (進場, 加碼, 減碼,
+  抄底), and states every threshold as an indicator or a condition — 「外資連兩日淨賣超逾
+  150 億」, not a price to trade at. `watch` says which conditions to watch and where they
+  flip, not what to buy or sell. Its thresholds are indicator or 籌碼 (flow / positioning)
+  conditions only; how price stands against the listed highs / lows and moving averages is
+  stated as a statistical fact (「今日收盤高於前 20 日高」), never as a trigger to watch for.
+  *Why:* support / resistance points and buy / sell prices
+  handed to readers are what Taiwan's investment advisory rules single out, and the brief
+  goes to the user as a finished document. A request worded as 操作建議 / a trade plan / key
+  levels still gets `watch` filled with conditions and thresholds: the request's wording
+  does not change what the slot holds.
 - **Scheduled run = `publish(pack)` with no narrative** (data-only, `origin: scheduled`). The
   runtime has no timer that wakes the agent, so a cron job cannot carry a judgement; a canned
   sentence in a script is a view nobody formed. Ids are date-stamped and the data-only form
@@ -386,8 +405,8 @@ one into a report that shouldn't have it is its own failure.
 
 | `type` | What applies |
 |---|---|
-| `research`, `morning` | **All six rules.** These exist to answer "what do you think, and why". |
-| `performance` | **Rules 5 and 6 only** (plus rule 2 on any sentence that explains *why* a number moved — stating the number itself is the point of the report and needs no thesis). A performance report is a state snapshot: numbers, attribution, what changed since last time. Do **not** invent an investment view to fill a section; the clean snapshot is the correct output. The runtime produces no report of its own — every performance report is one the user asked for, one-off or as a registered job (§8). |
+| `research`, `morning` | **All six rules.** These exist to answer "what do you think, and why". A hand-written one also follows §7b's presentation rules (A); `research` adds §7b's research rules (B), while a `morning` report keeps §1b's form for levels and conditions. A template brief is shaped by §1b. |
+| `performance` | **Rules 5 and 6 only** (plus rule 2 on any sentence that explains *why* a number moved — stating the number itself is the point of the report and needs no thesis). A performance report is a state snapshot: numbers, attribution, what changed since last time. Do **not** invent an investment view to fill a section; the clean snapshot is the correct output. The runtime produces no report of its own — every performance report is one the user asked for, one-off or as a registered job (§8). §7b does not apply: a snapshot's title names its period, not a thesis. |
 
 ### 1. One falsifiable claim, carried by the `lead`
 
@@ -397,7 +416,9 @@ wrong** — a sentence that would read differently on a different day.
 - **Filler:** "Sentiment is neutral-to-bullish; be careful chasing the move." True on almost
   any day. It describes the dashboard instead of reading it.
 - **A claim:** "The bid is rotating from spot into leverage, and leverage is not crowded yet —
-  so right now the risk of a pullback is smaller than the risk of missing the move."
+  the move is still funded by spot demand, not by borrowed positions." A claim is a reading
+  of the data, never a call: no buy / sell timing, no price target, no long / short advice
+  (§1b, §7b).
 
 The test is whether **a competent reader could disagree with the sentence**. If nobody could,
 it is not a claim. Everything else in the report then supports it, qualifies it, or attacks it.
@@ -416,15 +437,16 @@ was decoration and the sentence is restatement.**
 
 ### 3. Answer "so what"
 
-Every section closes on the consequence for the reader: what it means for exposure, for
-timing, or for which decision changes. A paragraph that ends on the observation is half a
-paragraph. If you cannot name a consequence, the section is probably not worth a section.
+Every section closes on the consequence for the reader: what it changes about the reading,
+which condition now matters, which threshold decides the next read. It is never a trade
+instruction (no entry, exit or target price, no "add" or "cut exposure"). A paragraph that
+ends on the observation is half a paragraph. If you cannot name a consequence, the section is probably not worth a section.
 
 ### 4. Write the other side — mandatory
 
 State **what would break the claim**: which indicator, in which direction, past roughly what
-level, means the view in the `lead` is wrong and should be dropped. Name the level, not the
-mood ("if funding goes above ~+0.05% per 8h the crowded-leverage read replaces this one", not
+level, means the view in the `lead` is wrong and should be dropped. Name the indicator's
+threshold, not the mood and not a price to trade at ("if funding goes above ~+0.05% per 8h the crowded-leverage read replaces this one", not
 "if leverage gets extreme"). A `callout` with `tone: "warning"` is a good home for it.
 
 This is the rule that adds the most depth, and it only works if you go looking for hostile
@@ -436,7 +458,7 @@ you selected the figures** — go back and pull the ones that argue against it.
 "Watch out for a pullback", "keep monitoring", "stay cautious", "the outlook remains
 uncertain", "pay close attention to" — these carry no information and cost the reader's trust
 in the sentences around them. Delete each one, or replace it with the threshold that would
-make it actionable (rule 4).
+make it checkable (rule 4).
 
 ### 6. Insufficient data is an answer — never manufacture conviction
 
@@ -449,6 +471,146 @@ Never invent a mechanism to explain a number you have not verified, never presen
 as an observation, and never firm up a hedge to make the report read stronger. A confident
 sentence with nothing under it is a worse failure than a shallow one: the shallow report wastes
 the reader's time, the fabricated one loses them money. Every figure stays real or labelled.
+
+## 7b. Hand-written reports — presentation, and the research rules
+
+A report you build yourself with `write_report` — a research write-up, or a `morning` report
+the user asked for outside the templates (their own 台股週報, say) — follows two sets of
+rules:
+
+| Rules | Apply to |
+|---|---|
+| **A. Presentation** (A1–A8) | Every hand-written report **except `performance`**, which is a state snapshot whose title names its period, not a thesis (§7 scope table). A template brief (§1b) is shaped for you and is out of scope too. |
+| **B. Research rules** (B1–B6) | `type: "research"` only. A hand-written `morning` report keeps §1b's rules instead: levels are statistics, never calls, and its conditions section takes the 觀察重點 (`watch`) form. |
+
+Blocks are flat (§3). A section is a `text` block that opens with its `## ` heading,
+followed by the chart / table blocks that back it. Nothing nests inside markdown. Write the
+section headings in the report's language.
+
+### A. Presentation — what makes a report worth opening
+
+- **A1. Title = the finding, not the topic**: 「日圓干預只延後了貶值，沒有扭轉它」, not
+  「日圓干預分析」. Keep it to **≤ 40 CJK characters / ≤ 80 Latin characters**. For research
+  the finding is historical, never a forecast (B2). `write_report` copies `title` into
+  `meta.title`, so this governs both. *Why:* the title is what the sidebar, the
+  notification and, for research, the share card show; the share card truncates at about
+  50 CJK characters, and 40 leaves room for narrower cards. A topic name tells a reader
+  who sees only the title nothing. The api's 1–200 limit (§2) still stands; this is a
+  readability cap, not a format rule.
+- **A2. The lead names the common belief and what the data did to it**: overturned it,
+  discounted it, or confirmed it at a different size. It is the `text` block with
+  `variant: "lead"` right after `meta`, one falsifiable claim (§7 rule 1). Illustrative:
+  「大家說 iPhone 發表會『賣新聞』——是真的，但只有 2 個百分點」. When you pick a research
+  question, prefer one with a popular saying to test. *Why:* the research people open and
+  pass on pairs a contrast with a number anyone can compare ("Sell in May", counted against
+  the summers that actually happened). A rigorous report with no contrast reads like a
+  table and goes unopened.
+- **A3. Every headline number stands next to its baseline**: random trading days, the
+  same-period average, the out-of-sample half, the prior period. Put the baseline in the
+  same sentence, in the cell's `delta`, or as a `benchmark` series on the chart. *Why:*
+  "−2% in the 10 days after a launch" means nothing until the reader sees what an ordinary
+  10 days does. This is §7 rule 2's comparison, made visible.
+- **A4. `kpi_row` directly after the lead; its first item is the number the claim rests
+  on** (the focus cell, §3; the tone rules still apply). In research it is a historical
+  statistic, never a current reading or a target price. *Why:* it is the first figure a
+  reader sees, and the share card shows it as the key number. A context figure there,
+  such as a price level or a sample size, advertises a claim it does not support.
+- **A5. The first chart block is the one that shows the claim**, not a context chart. A
+  price chart is a `candlestick` (§3); anything else uses its native block. *Why:* it is
+  the first thing a reader looks at, and for research it becomes the share card's main
+  image.
+- **A6. Key points: one `text` block with 3–5 bullets, each one sentence carrying one
+  number** (§7 rule 2, the swap test). *Why:* a reader who stops here should still hold
+  the argument.
+- **A7. Sections whose `## ` headings are claims** (「## 干預後三次反彈都在 10 個交易日內回吐」,
+  not 「## 匯率走勢」), each backed by at least one chart or table block and closed on its
+  so-what (§7 rule 3), in a short `text` after the chart or in the chart's `caption`. In
+  research the so-what is what the finding does to the claim: how far it generalises and
+  where it stops, never a trade and never a reading of today's market. In a morning report
+  it is the condition to watch, in the §1b form. *Why:* headings that state the point let
+  a reader skim the argument, and a heading with no evidence under it is just an
+  assertion.
+- **A8. `footnote` last: method and data.** Give the window, frequency, formula and sample
+  size, plus the source of every series. *Why:* a report is read later without the chat
+  that produced it, so this is where a reader checks how the numbers were made.
+
+### B. Research rules — `type: "research"` only
+
+A research report can be shared as a public link and read by someone who never saw the chat.
+The share card will take the **title**, the **first item of the first `kpi_row`** and the
+**first chart block**, so A1, A4 and A5 have to carry the claim on their own.
+
+- **B1. Findings, not calls: a hard line.** A research report states findings as historical
+  statistics and conditions ("in the last 10 launches the median 10-day return was
+  −0.87%"), never as buy / sell timing, a price target or a price level to trade at, or a
+  long / short call on a named instrument (a stock, a futures contract, a coin). *Why:* a
+  shared report reaches an unspecified public. Under Taiwan's securities and futures
+  investment advisory rules, telling that public when or at what price to trade a named
+  instrument can amount to running an advisory business without a licence. If the user
+  explicitly asks for such a call, write it, but keep it out of the title, the lead and the
+  `kpi_row`, and say in chat that a report carrying it must not be published.
+- **B2. Historical only, never connected to today.** A research report states the
+  historical finding and stops there. It does not say the condition is being met now
+  ("margin has risen for 8 days in a row"), and it does not project the next N days from
+  the publish date. The title states the historical finding, not a forecast. A request
+  phrased as a forecast (「融資餘額連續增加後，加權指數接下來會走弱」) is answered as the
+  historical question inside it: what followed that condition in the past. *Why:* "after
+  margin rose 5 days in a row the index's median 10-day return was −X%" is a statistic;
+  add "and margin is rising now" and the same sentence reads as a directional call on the
+  index, and so on index futures.
+  **A timely topic is fine; reading the present is not.** Studying the history of an event
+  in the week it is in the news — a product launch, a central-bank intervention, ex-dividend
+  season — is the right time to publish it, and the title still states the historical
+  finding. What is out is saying the condition is being met now, or projecting the days
+  ahead.
+
+  B1 and B2 win over §7 wherever they meet (§7's examples read today's market, which fits
+  a morning brief, not a report that may be shared), and they govern B3–B6.
+- **B3. Evidence against: a mandatory section** (「哪些數據不支持這個結論」). List the
+  figures that do not fit the claim, each with its number and what it does to the claim's
+  strength. If you found none, list what you checked. *Why:* §7 rule 4 — if every figure
+  supports the thesis, you selected the figures.
+- **B4. Robustness: a mandatory section with at least one check**
+  (「換個做法結論還站得住嗎」):
+  - *Different window or baseline*: the same measurement on another lookback, start date
+    or benchmark.
+  - *Split sample*: first half vs second half, or before vs after a named event. A result
+    that shows up in one half only is a regime, not a rule.
+  - *Placebo*: the same method on randomly drawn dates (or a matched unrelated series);
+    the real effect has to stand clear of that distribution. State the number of draws and
+    report it as "beats N of M random dates". It is not MCPT, so never label it a p-value
+    from MCPT (AGENTS.md › MCPT).
+  - *Strategy research*: cite what the strategy already has — `"MCPT p-value"` in
+    `strategies/<name>/stats.json` (automatic on every Type A backtest; rerun with
+    `lib.validation.mcpt` only for a different `n`), peak vs plateau from `scan.json`
+    (`lib.param_scan`: `scan_grid → find_plateau → write_scan`), and out-of-sample Sharpe
+    and WFE from `wf.json` (`lib.walk_forward.run_walk_forward`). Details are in
+    `references/lib.md`. Running a new scan or walk-forward for a report counts as an
+    iteration under the Iteration Brakes, so ask first. The report may state that a check
+    was not run.
+
+  When a check does not support the claim, report it as it came out and weaken the lead
+  and the title to match. Never swap in a check that passes. *Why:* a claim that holds on
+  one window only is the most common way a research report is wrong, and this is the
+  section that catches it.
+- **B5. What would break this: a `callout`** with `tone: "warning"` and a `title` such as
+  「什麼會推翻這個結論」. Name the evidence that would falsify the historical finding, with a
+  threshold (§7 rule 4): for example "the next 3 launches show a median 10-day return above
+  0%", or "the effect disappears once 2020–2021 is excluded". Never name a current market
+  level to watch, and never a price to enter, exit or target. *Why:* it tells the reader
+  how the finding could fail without turning it into a live signal.
+- **B6. Length.** Aim for **≥ 4 chart / table blocks** and enough prose to carry every
+  section. This is not a word count. A section the data cannot fill says "the data is not
+  sufficient to judge X" plus what would settle it (§7 rule 6). That is a complete section;
+  padding is not.
+
+**Order in a research report:** `meta` → lead (A2) → `kpi_row` (A4) → first chart (A5) →
+key points (A6) → 3–5 argument sections (A7) → evidence against (B3) → robustness (B4) →
+what would break this (B5) → `footnote` (A8).
+
+For a `research` report only, `write_report` prints a `WARNING:` (it never refuses) when
+the title is over the A1 cap or when the lead is not followed by a `kpi_row`. Everything
+else here is yours to check, in research and in a hand-written morning report alike.
 
 ## 8. Scheduled reports — a job directory, not a cron line
 
