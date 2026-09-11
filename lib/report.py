@@ -67,12 +67,13 @@ _ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 # the uploader's call, and it reports through reports/upload_errors.log.
 _FILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}")
 FILES_SUFFIX = ".files"
-# ≈ 40 CJK / 80 Latin: the share card cuts a title at ~50 CJK, so this leaves a margin.
+# ≈ 40 CJK / 80 Latin: a shared page would cut a title at ~50 CJK, so this leaves a margin.
 RESEARCH_TITLE_WIDTH = 80
 
 
 def _research_warnings(title, blocks):
-    """The two share-card points of the research skeleton (references/reports.md §7b).
+    """Two points of the research skeleton (references/reports.md §7b) that decide how a
+    report reads when only its head is seen.
     Advisory only: a refused report is lost, a weak one can be rewritten. `blocks[0]`
     is the meta block by the time this runs, and its `title` is the one the web renders —
     a caller-supplied meta may differ from the envelope title."""
@@ -81,13 +82,14 @@ def _research_warnings(title, blocks):
     width = sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in str(shown))
     if width > RESEARCH_TITLE_WIDTH:
         out.append(f"research title is {width} wide (CJK counts 2), over {RESEARCH_TITLE_WIDTH}; "
-                   "the share card truncates it, state the claim shorter (references/reports.md 7b)")
+                   "the sidebar truncates it, state the claim shorter "
+                   "(references/reports.md 7b)")
     i = 1
     if i < len(blocks) and isinstance(blocks[i], dict) and blocks[i].get("variant") == "lead":
         i += 1
     if not (i < len(blocks) and isinstance(blocks[i], dict) and blocks[i].get("type") == "kpi_row"):
-        out.append("research report has no kpi_row right after the lead; the share card takes "
-                   "its first item as the key number (references/reports.md 7b)")
+        out.append("research report has no kpi_row right after the lead; its first item is the "
+                   "key number readers see first (references/reports.md 7b)")
     return out
 
 

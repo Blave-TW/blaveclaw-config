@@ -10,6 +10,10 @@ The platform pushes a short summary notification once the report is stored, so t
 report reaches the user even when this machine is asleep — never send your own
 Telegram message about a report as well, that duplicates every alert.
 
+**There is no public share link for any report.** If a user asks to share one publicly, say
+reports cannot be shared publicly — do not promise or speculate whether or when that will
+exist, and never point them to a share button.
+
 §1–§6 are the **format** contract; **§7 is the content bar** — what a report has to
 actually say to be worth reading. A report can satisfy every rule in §1–§6 and still
 be worthless, so read §7 before you write the prose. A report you write by hand also
@@ -495,9 +499,9 @@ section headings in the report's language.
   reading of the data (§7 rule 1), never a call: no direction for the days ahead, no
   target, no timing (§1b's levels-are-statistics rule applies to the title too).
   `write_report` copies `title` into
-  `meta.title`, so this governs both. *Why:* the title is what the sidebar, the
-  notification and, for research, the share card show; the share card truncates at about
-  50 CJK characters, and 40 leaves room for narrower cards. A topic name tells a reader
+  `meta.title`, so this governs both. *Why:* the title is what the sidebar and the
+  notification show, and for research it would head a shared page (B), where a title past
+  about 50 CJK characters gets cut; 40 leaves room. A topic name tells a reader
   who sees only the title nothing. The api's 1–200 limit (§2) still stands; this is a
   readability cap, not a format rule.
 - **A2. The lead: one falsifiable claim** (§7 rule 1), the `text` block with
@@ -519,12 +523,12 @@ section headings in the report's language.
 - **A4. `kpi_row` directly after the lead; its first item is the number the claim rests
   on** (the focus cell, §3; the tone rules still apply). In research it is a historical
   statistic, never a current reading or a target price. *Why:* it is the first figure a
-  reader sees, and the share card shows it as the key number. A context figure there,
+  reader sees, and a shared page would show it as the key number. A context figure there,
   such as a price level or a sample size, advertises a claim it does not support.
 - **A5. The first chart block is the one that shows the claim**, not a context chart. A
   price chart is a `candlestick` (§3); anything else uses its native block. *Why:* it is
-  the first thing a reader looks at, and for research it becomes the share card's main
-  image.
+  the first thing a reader looks at, and for research it would be the main image of a
+  shared page.
 - **A6. Key points: one `text` block with 3–5 bullets, each one sentence carrying one
   number** (§7 rule 2, the swap test). *Why:* a reader who stops here should still hold
   the argument.
@@ -542,15 +546,17 @@ section headings in the report's language.
 
 ### B. Research rules — `type: "research"` only
 
-A research report can be shared as a public link and read by someone who never saw the chat.
-The share card will take the **title**, the **first item of the first `kpi_row`** and the
-**first chart block**, so A1, A4 and A5 have to carry the claim on their own.
+Write a research report as if it will be shared publicly. This is an internal design
+assumption, not something to tell the user (see the top of this page). A shared page would
+be read by someone who never saw the chat, and it would lead with the **title**, the
+**lead**, the **first item of the first `kpi_row`** and the **first chart**, so A1, A2, A4
+and A5 have to carry the claim on their own.
 
 - **B1. Findings, not calls: a hard line.** A research report states findings as historical
   statistics and conditions ("in the last 10 launches the median 10-day return was
   −0.87%"), never as buy / sell timing, a price target or a price level to trade at, or a
   long / short call on a named instrument (a stock, a futures contract, a coin). *Why:* a
-  shared report reaches an unspecified public. Under Taiwan's securities and futures
+  report shared publicly reaches an unspecified public. Under Taiwan's securities and futures
   investment advisory rules, telling that public when or at what price to trade a named
   instrument can amount to running an advisory business without a licence. If the user
   explicitly asks for such a call, write it, but keep it out of the title, the lead and the
@@ -571,7 +577,7 @@ The share card will take the **title**, the **first item of the first `kpi_row`*
   ahead.
 
   B1 and B2 win over §7 wherever they meet (§7's examples read today's market, which fits
-  a morning brief, not a report that may be shared), and they govern B3–B6.
+  a morning brief, not a report that may later be shared publicly), and they govern B3–B6.
 - **B3. Evidence against: a mandatory section** (「哪些數據不支持這個結論」). List the
   figures that do not fit the claim, each with its number and what it does to the claim's
   strength. If you found none, list what you checked. *Why:* §7 rule 4 — if every figure
