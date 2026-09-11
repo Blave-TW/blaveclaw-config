@@ -154,6 +154,39 @@ def line_chart(title, series, y_unit=None, caption=None, reflines=None):
     return b
 
 
+# 範本的價格 K 線一律畫最後 60 根:手機寬度約放得下 68 根完整 K 棒(日 K 建議 40–65)。
+_PRICE_BARS = 60
+
+
+def _clean_ohlc(df):
+    """The bars a candlestick can draw: sorted, de-duplicated, no NaN, open/close inside
+    high/low. Other columns (Volume) ride along on the kept rows."""
+    # lib.data 只丟 high<low 的壞 K;開收落在高低之外的那根也會讓 api 整份 400,丟掉留一個缺口。
+    # 範本畫圖與算價位共用這一份,參考線才不會算到圖上沒畫的那根。
+    df = df[~df.index.duplicated(keep="last")].sort_index()
+    o, h, l, c = (df[k].astype(float) for k in ("Open", "High", "Low", "Close"))
+    ok = pd.concat([o, h, l, c], axis=1).notna().all(axis=1) & (l <= o.combine(c, min)) & (o.combine(c, max) <= h)
+    return df[ok]
+
+
+def candlestick(title, df, y_unit=None, caption=None, reflines=None):
+    """df: Open/High/Low/Close on a DatetimeIndex. Keeps the last ≤120 drawable bars;
+    returns None when fewer than 2 survive."""
+    ohlc = _clean_ohlc(df)[["Open", "High", "Low", "Close"]].astype(float)
+    candles = [[_ts(t), *map(float, row)] for t, row in zip(ohlc.index, ohlc.values)][-120:]
+    if len(candles) < 2:
+        return None
+    b = {"type": "candlestick", "title": title[:80], "candles": candles}
+    if y_unit:
+        b["y_unit"] = y_unit[:8]
+    if caption:
+        b["caption"] = caption[:300]
+    if reflines:
+        b["reflines"] = [{"y": float(y), "label": lab[:32], "emphasis": bool(em)}
+                         for y, lab, em in reflines if _finite(y)][:4]
+    return b
+
+
 def bar_chart(title, items, caption=None):
     its = [{"label": lab[:40], "value": float(v)} for lab, v in items if _finite(v)]
     if not its:
@@ -308,15 +341,15 @@ def tw_market_brief(date=None, headers=None, lookback_days=90):
     start = (datetime.strptime(date, "%Y-%m-%d") - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
     notes, ctx, blocks, kpis, foot = [], {}, [], [], []
 
-    idx = _data.fetch_twmarket_index(start, date, headers)   # end=date 已由 fetch 端裁切
+    idx = _clean_ohlc(_data.fetch_twmarket_index(start, date, headers))   # end=date 已由 fetch 端裁切
     if len(idx) < 2:
         raise ValueError("加權指數資料不足兩個交易日,無法產晨報")
     close, prev = float(idx["Close"].iloc[-1]), float(idx["Close"].iloc[-2])
     asof = idx.index[-1].strftime("%Y-%m-%d")
     chg = close / prev - 1
-    high20 = float(idx["Close"].tail(20).max())
+    high20, _ = _prior20(idx, notes)
     ctx["資料日"] = asof
-    ctx["加權指數"] = f"{_num(close, 2)}({_pct(chg * 100)}),20 日高 {_num(high20, 2)}"
+    ctx["加權指數"] = f"{_num(close, 2)}({_pct(chg * 100)})" + (f",前 20 日高 {_num(high20, 2)}" if high20 is not None else "")
     kpis.append(kpi("加權指數", _num(close, 2), _tone(chg), delta=_pct(chg * 100)))
 
     turn = _data.fetch_twmarket_turnover(start, date, headers)
@@ -380,10 +413,10 @@ def tw_market_brief(date=None, headers=None, lookback_days=90):
         foot.append(("night", "台指期夜盤 = 15:00 至次日 05:00 的交易時段,漲跌以同日日盤收盤價為基準。"))
 
     blocks.append(kpi_row(kpis))
-    lc = line_chart("加權指數", [("加權指數", "primary", idx["Close"])], y_unit="點",
-                    reflines=[(high20, "20 日高", False)])
-    if lc:
-        blocks.append(lc)
+    ck = candlestick("加權指數", idx.tail(_PRICE_BARS), y_unit="點",
+                     reflines=[(high20, "前 20 日高", False)] if high20 is not None else None)
+    if ck:
+        blocks.append(ck)
     if blocks_inst:
         blocks.append(blocks_inst)
     if m_last is not None:
@@ -398,7 +431,7 @@ def tw_market_brief(date=None, headers=None, lookback_days=90):
     cal = _calendar_rows(headers, notes, countries=["US", "CN", "TW", "JP", "EU"])
     if cal:
         blocks.append(table("今日總經事件", _CAL_COLUMNS, cal, caption="台北時間;priority 1–2 的事件"))
-    foot += [("src", "指數、成交值、三大法人、融資餘額:TWSE 日資料,經 Blave API。三大法人為淨買賣超金額,融資餘額為張數。")]
+    foot += [("src", "指數、成交值、三大法人、融資餘額:TWSE 日資料,經 Blave API。三大法人為淨買賣超金額,融資餘額為張數。前 20 日高 = 不含當日的前 20 個交易日最高價。")]
     blocks.append(footnote(foot))
 
     # 標題不帶日期——側欄列本身顯示建立時間(Wei 2026-09-02 拍板);id 仍帶日期,同日重跑才會覆蓋。
@@ -528,13 +561,29 @@ def symbol_brief(symbol, date=None, headers=None, lookback_days=90):
     return _crypto_symbol_brief(sym, date, headers, lookback_days)
 
 
-def _levels(close):
-    c = close.dropna()
-    lv = {"20 日高": float(c.tail(20).max()), "20 日低": float(c.tail(20).min())}
+def _prior20(bars, notes):
+    """(前 20 日高, 前 20 日低) = 倒數第 2–21 根的最高價/最低價,或 (None, None) 並記 notes。"""
+    # 不含當日:含當日時收盤永遠不可能在前高之上,判讀會寫出與事實相反的「仍在 20 日高之下」;
+    # 不含當日,只有今天那根可能穿線,穿線本身就是突破訊號。不足 21 根就不算,不拿短窗口頂替。
+    if len(bars) < 21:
+        notes.append(f"日 K 只有 {len(bars)} 根,不足 21 根,前 20 日高/低省略")
+        return None, None
+    w = bars.iloc[-21:-1]
+    return float(w["High"].max()), float(w["Low"].min())
+
+
+def _levels(bars, notes):
+    """bars: `_clean_ohlc` 過的日 K(同一份也拿去畫圖)。均線取收盤,含當日。"""
+    hi, lo = _prior20(bars, notes)
+    lv = {} if hi is None else {"前 20 日高": hi, "前 20 日低": lo}
     for n in (5, 20, 60):
-        if len(c) >= n:
-            lv[f"{n} 日均"] = float(c.tail(n).mean())
+        if len(bars) >= n:
+            lv[f"{n} 日均"] = float(bars["Close"].tail(n).mean())
     return lv
+
+
+def _level_lines(lv):
+    return [(lv[k], k, em) for k, em in (("前 20 日高", False), ("前 20 日低", True)) if k in lv]
 
 
 def _levels_table(lv, last):
@@ -549,6 +598,7 @@ def _tw_symbol_brief(stock_id, date, headers, lookback_days):
     start = (datetime.strptime(date, "%Y-%m-%d") - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
     notes, ctx, blocks, kpis, foot = [], {}, [], [], []
     df = _data.fetch_twstock_ohlcv(stock_id, "1d", headers, start=start, end=date)
+    df = _clean_ohlc(df) if df is not None else df
     if df is None or len(df) < 2:
         raise ValueError(f"{stock_id} 日 K 不足兩個交易日")
     c = df["Close"].dropna()
@@ -559,7 +609,7 @@ def _tw_symbol_brief(stock_id, date, headers, lookback_days):
     ctx["收盤"] = f"{_num(last, 2)}({_pct(chg * 100)}),量 {_num(vol)} 張(5 日均 {_num(vol5)})"
     kpis.append(kpi("收盤", _num(last, 2), _tone(chg), delta=_pct(chg * 100)))
     kpis.append(kpi("成交量", _num(vol), "neutral", unit="張", delta=_pct((vol / vol5 - 1) * 100) + " vs 5日均"))
-    lv = _levels(c)
+    lv = _levels(df, notes)
     ctx["關鍵價位"] = ", ".join(f"{k} {_num(v, 2)}" for k, v in lv.items())
 
     inst = None
@@ -576,17 +626,18 @@ def _tw_symbol_brief(stock_id, date, headers, lookback_days):
             kpis.append(kpi("外資買賣超", _signed(f_last), _tone(f_last), unit="張", delta=f"5日累計 {_signed(f5)}"))
             foot.append(("inst", "外資買賣超 = 外資買進 − 賣出,資料源以股為單位,此處換算為張(÷1000)。"))
     blocks.append(kpi_row(kpis[:6]))
-    lc = line_chart(f"{stock_id} 收盤", [(stock_id, "primary", c)], y_unit="元",
-                    reflines=[(lv["20 日高"], "20 日高", False), (lv["20 日低"], "20 日低", True)])
-    if lc:
-        blocks.append(lc)
+    ck = candlestick(f"{stock_id} 日 K", df.tail(_PRICE_BARS), y_unit="元", reflines=_level_lines(lv))
+    if ck:
+        blocks.append(ck)
     if inst is not None and len(inst) and "foreign_net" in inst:
         tail = (inst["foreign_net"].dropna() / 1000.0).tail(10)
         bc = bar_chart("外資近 10 日買賣超(張)", [(t.strftime("%m/%d"), v) for t, v in tail.items()])
         if bc:
             blocks.append(bc)
-    blocks.append(_levels_table(lv, last))
-    foot.append(("src", "日 K 為 TWSE 未還原價,成交量為張。"))
+    lt = _levels_table(lv, last)
+    if lt:
+        blocks.append(lt)
+    foot.append(("src", "日 K 為 TWSE 未還原價,成交量為張。前 20 日高/低 = 不含當日的前 20 個交易日最高價/最低價,均線取收盤價(含當日)。"))
     blocks.append(footnote(foot))
     return Pack(f"symbol-{stock_id}-{date.replace('-', '')}", f"{stock_id} 晨報", "morning", "單標的晨報",
                 blocks, ctx, notes)
@@ -599,6 +650,7 @@ def _crypto_symbol_brief(sym, date, headers, lookback_days):
     label = s.replace("USDT", "")
     notes, ctx, blocks, kpis, foot = [], {}, [], [], []
     df = _data.fetch_kline(s, "1d", start, None, headers)
+    df = _clean_ohlc(df) if df is not None else df
     if df is None or len(df) < 2:
         raise ValueError(f"{s} 日 K 不足")
     c = df["Close"].dropna()
@@ -606,7 +658,7 @@ def _crypto_symbol_brief(sym, date, headers, lookback_days):
     ctx["資料日"] = str(c.index[-1].date())
     ctx["價格"] = f"{_num(last, 2)} USDT({_pct(chg * 100)})"
     kpis.append(kpi(label, _num(last, 2), _tone(chg), unit="USDT", delta=_pct(chg * 100)))
-    lv = _levels(c)
+    lv = _levels(df, notes)
     ctx["關鍵價位"] = ", ".join(f"{k} {_num(v, 2)}" for k, v in lv.items())
 
     args = (s, "1d", start, None, headers)
@@ -615,10 +667,10 @@ def _crypto_symbol_brief(sym, date, headers, lookback_days):
     whale = _indicator(_data.fetch_whale_hunter, args, "巨鯨警報", ctx, kpis, notes)
     taker = _indicator(_data.fetch_taker_intensity, args, "多空力道", ctx, kpis, notes)
     blocks.append(kpi_row(kpis[:6]))
-    lc = line_chart(f"{label} 收盤", [(label, "primary", c)], y_unit="USDT",
-                    reflines=[(lv["20 日高"], "20 日高", False), (lv["20 日低"], "20 日低", True)])
-    if lc:
-        blocks.append(lc)
+    # 60 日均仍用整段收盤算,K 線只畫最後 _PRICE_BARS 根。
+    ck = candlestick(f"{label} 日 K", df.tail(_PRICE_BARS), y_unit="USDT", reflines=_level_lines(lv))
+    if ck:
+        blocks.append(ck)
     if fund is not None:
         lc = line_chart("資金費率", [(label, "primary", fund)], y_unit="%", reflines=[(0.0, "0", False)])
         if lc:
@@ -629,8 +681,10 @@ def _crypto_symbol_brief(sym, date, headers, lookback_days):
         lc = line_chart("Blave 指標(z-score)", ind, caption="標準化分數,0 = 樣本均值;日頻資料只到前一個完整日")
         if lc:
             blocks.append(lc)
-    blocks.append(_levels_table(lv, last))
-    foot.append(("src", "價格:Binance USDT 永續日 K,最後一根為今日未收盤 bar。資金費率單位 %。爆倉 / 巨鯨 / 多空力道為 Blave 指標 z-score。"))
+    lt = _levels_table(lv, last)
+    if lt:
+        blocks.append(lt)
+    foot.append(("src", "價格:Binance USDT 永續日 K,最後一根為今日未收盤 bar。資金費率單位 %。爆倉 / 巨鯨 / 多空力道為 Blave 指標 z-score。前 20 日高/低 = 不含當日(今日未收盤 bar)的前 20 根日 K 最高價/最低價,均線取收盤價(含當日)。"))
     blocks.append(footnote(foot))
     return Pack(f"symbol-{label.lower()}-{date.replace('-', '')}", f"{label} 晨報", "morning", "單標的晨報",
                 blocks, ctx, notes)

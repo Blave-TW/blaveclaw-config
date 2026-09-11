@@ -106,7 +106,7 @@ from lib.report_templates import tw_market_brief, crypto_market_brief, symbol_br
 pack = tw_market_brief()                 # today (Taipei); headers come from the workspace .env
 print(pack.describe())                   # every figure the pack carries, one line each — cite these
 #   [tw-market-20260902] 台股大盤晨報          ← title has no date: the sidebar row shows when it was made
-#     加權指數: 46,948.72(+1.78%),20 日高 46,948.72
+#     加權指數: 46,948.72(+1.78%),前 20 日高 46,512.35
 #     三大法人: 外資 +267.0 億(昨 -144.0 億)、投信 +131.0 億、自營 +163.0 億、合計 +561.0 億
 #     外資期貨淨多單: +12,300 口(+2,500 口,09-01)
 #     缺少:  - 台指期 2026-09-01 無夜盤 bar(…)      ← a missing series is a missing block, never a guess
@@ -122,7 +122,7 @@ publish(pack, narrative={
 
 - `crypto_market_brief(symbols=("BTC", "ETH", "SOL"))` — price / returns table, rebased
   performance, BTC funding, the market-wide Blave indicators, today's macro events.
-- `symbol_brief("2330")` — Taiwan stock: close / volume / 外資買賣超 (張), key levels (20 日高低,
+- `symbol_brief("2330")` — Taiwan stock: close / volume / 外資買賣超 (張), key levels (前 20 日高/低 = the high / low of the 20 sessions before today, today excluded, so a close above it is a breakout;
   5/20/60 日均); `symbol_brief("BTC")` — crypto perp: price, funding, 爆倉 / 巨鯨 / 多空力道.
 - Slots: `lead` becomes the opening card (one falsifiable claim), `read` / `action` become
   sections after the data, `risk` a warning callout before the footnote. Each has a character
@@ -159,7 +159,7 @@ reads `blave_api_key` / `blave_secret_key` from the workspace `.env` (see `refer
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | string | `"1.1"` — the only accepted value today. |
+| `schema_version` | string | `"1.2"` when the report contains a `candlestick` block, `"1.1"` otherwise. `write_report` sets it for you; hand-written JSON must follow the same rule — a `candlestick` under `"1.1"` is refused. |
 | `id` | string | `[A-Za-z0-9_-]{1,64}`, equal to the file name stem. |
 | `type` | string | `performance` / `morning` / `research` — sidebar grouping. |
 | `title` | string | 1–200 chars. |
@@ -184,6 +184,7 @@ the small print below it — put the measurement basis there).
 | `meta` | `title`, `report_type`, `generated_at` | **Exactly one, always first.** Optional: `period` `{from, to}` display strings ≤32 (`"08/25"`), `account` `{aum: number, currency}`, `benchmark`, `origin` (`scheduled`/`chat`), `machine`, `extra` (≤3 `{label, value}`). `period` + `account` + `benchmark` + `extra` ≤4 header cells in total. |
 | `kpi_row` | `items[{label, value, tone}]` | 1–6 items; **the first is the focus** and renders largest. `label` ≤40, `value` a formatted string, `tone` = `pos`/`neg`/`neutral` (unsigned numbers such as Sharpe or win-rate are `neutral` — a wall of green means nothing). Optional `unit` ≤16, `delta`. |
 | `line_chart` | `series[{name, role, points}]` | 1–4 series; `role` = `primary` (solid, **at most one**) or `benchmark` (dashed); `points` = 1–5000 `[t, v]`, `t` unix seconds int, `v` finite number. Optional `y_unit` (≤8, see *Axis units* below), `bands` (≤2 `{from, to, label}`, unix seconds, label ≤32) and `reflines` (≤4 `{y, label, emphasis}`, `emphasis: true` = red loss level). |
+| `candlestick` | `candles` | 2–120 bars `[t, open, high, low, close]`; `t` unix seconds int, **strictly increasing**; the four prices finite numbers with `low ≤ min(open, close)` and `max(open, close) ≤ high` on every bar. Optional `y_unit` and `reflines` (≤4 horizontal price levels such as the prior 20-day high/low), both exactly as on `line_chart`. No `bands`, no volume pane, no moving-average overlay. The x-axis is one slot per bar, not real time (no weekend or overnight gaps), so it does **not** line up date-for-date with a neighbouring `line_chart` / `drawdown` — expected, not a bug. Needs `schema_version` `"1.2"`. `lib/report_templates.candlestick(title, df, y_unit=…, reflines=…)` builds one from an OHLC DataFrame. |
 | `drawdown` | `points` | 1–5000 `[t, v]`, `v` a **negative percent** (−9.84 = −9.84%). Optional `maxdd` `{value, from, to}` (unix seconds). No unit field — the contract pins this chart to negative percent. |
 | `heatmap` | `variant`, `values` (+ `rows`,`cols` or `labels`) | `variant` = `calendar` (needs `rows` ≤40 years, `cols` ≤20 months — an annual / total column goes in `cols` too) or `matrix` (needs `labels` ≤40, values −1…1). `values` is 2-D, shaped rows×cols / labels×labels; `null` renders as an em-dash (future months, the diagonal). Optional **`emphasis_cols`** (**calendar only**): unique integer indices into `cols` marking the columns to render with added weight — that annual / total column. The web cannot tell which column is the total (`cols` is plain strings and not every calendar has one), so say it here. On a `matrix` heatmap `emphasis_cols` is an unknown prop → refused. |
 | `bar_chart` | `variant` + `items` or `segments` | `variant` = `bars` (`items` ≤60 `{label, value}`, signed, zero axis) or `stacked` (`segments` **2–4** `{label, value}`, value ≥0, normalised into widths). Only four category colours exist, so a 5th segment would repeat one. **Merging the tail into an "Other" segment is your decision, not the web's** — it cannot know which segments to fold or how to say so; fold them here and explain the fold in `caption`. No unit field on either variant. |
@@ -200,15 +201,22 @@ the small print below it — put the measurement basis there).
 | `callout` | `tone`, `text` | `tone` = `warning`/`info`; `text` ≤2000; optional `title` ≤120. |
 | `image` | `file` **or** `sha256`, plus `alt` | **Exactly one of the two references, never both** (both = refused here on the machine). `file` = a plain file name in `reports/<id>.files/` — `[A-Za-z0-9][A-Za-z0-9._-]{0,79}`, never a path; the extension picks the MIME type (`png`/`jpg`/`jpeg`/`webp`/`gif`) and each picture is 1 byte–2 MB. `sha256` = `[0-9a-f]{64}` of an image already on the platform (§5). One name referenced by several blocks uploads once. `alt` ≤200 is **required** (accessibility, no default). Optional `caption` ≤300. The platform adds `url` and the pixel `w`/`h` when the report is read back — **never send `w`/`h` yourself**, they are unknown props and the report is refused. |
 
+**Price is drawn as a `candlestick`.** Any price chart in a report — an index, a stock, a
+coin — is a `candlestick`: never a `line_chart` of closes, never an `image` of a matplotlib
+plot. Daily candles: give 40–65 bars (a phone-width reading view fits ~68 full candles; past ~120 the bodies
+smear into a line, and 120 is the hard limit). Half a year or more is a trend, not candles —
+use a `line_chart` of closes for that. Series that are not a price (margin balance, net
+positions, funding, indicators, equity) stay `line_chart`.
+
 **Numbers vs display strings — the mistake to check for first.** Chart data
-(`line_chart` / `drawdown` / `heatmap` / `bar_chart` / `histogram` / `box` / `scatter`
+(`line_chart` / `candlestick` / `drawdown` / `heatmap` / `bar_chart` / `histogram` / `box` / `scatter`
 coordinates and values) must be **real numbers** — the web computes scales from them.
 Display fields (`kpi_row.items[].value`, `metric_table.items[].value`, `table` cells)
 must be **already-formatted strings** (`"+1.82%"`, `"24,318.77 USDT"`): thousands
 separators, sign and decimals are decided here and printed verbatim. Every number must
 be finite — `NaN`/`Infinity` is refused (`lib/report.py` raises on them locally).
 
-**Axis units.** `line_chart` and `box` take `y_unit`; `histogram` and `scatter` take `x_unit`
+**Axis units.** `line_chart`, `candlestick` and `box` take `y_unit`; `histogram` and `scatter` take `x_unit`
 and `y_unit`. Each is a display suffix of ≤8 chars (`"%"`, `"USDT"`, `"bp"`) printed on the axis
 labels — it never converts or scales the numbers in `points` / `bins`. Nothing else carries
 the unit: the web cannot tell a percent series from an equity-in-USDT one, and guessing `%`
@@ -355,13 +363,16 @@ transient failure. Same status code, different channel, opposite handling.
 6. `created_at` / `generated_at` / all chart `t` values: unix **seconds**, int, UTC.
 7. An unknown block type or an unknown prop refuses the whole report — including a unit
    field on `bar_chart`/`drawdown`, `x_unit` on a `box`, `emphasis_cols` on a `matrix`
-   heatmap, and `w`/`h` on an `image`.
+   heatmap, `bands` on a `candlestick`, and `w`/`h` on an `image`.
 8. In a `number`/`percent` `table` column or `metric_table` item, a loss-shaped figure
    (VaR, Max DD, worst loss) is written with a minus sign — the sign is the only thing the
    colour follows. Conversely, a signed value that is not P&L (`Net Exposure` `+0.62×`)
    is left as `text` so it stays neutral.
 9. Every `image` block carries `file` **or** `sha256`, never both; a `file` exists in
    `reports/<id>.files/` and was written before the report JSON.
+10. A `candlestick` holds 2–120 bars, its `t` strictly increasing, and every bar has
+    `low ≤ min(open, close)` and `max(open, close) ≤ high`; it only appears in a report whose
+    `schema_version` is `"1.2"`.
 
 ## 7. Content standards — the report has to say something
 

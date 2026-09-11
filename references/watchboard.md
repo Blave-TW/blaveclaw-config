@@ -145,7 +145,9 @@ the slowest cadence that still answers the question.
 `line_chart` drawn by a script.** The live candles come from the platform's Binance stream; a
 script cannot refresh faster than once a minute and would draw a line, not candles. The same
 goes for a **crypto indicator on that chart**: it is `panes` on the `kline` widget (§5), not a
-scheduled script publishing a `line_chart` block.
+scheduled script publishing a `line_chart` block. Price action on the board is always the
+`kline` widget — never a machine `block` widget producing a `candlestick`: that block is for
+reports, and on the board it would sit frozen between script runs.
 
 ## 3. Machine widget scripts
 

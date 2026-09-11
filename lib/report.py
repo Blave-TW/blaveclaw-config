@@ -59,7 +59,6 @@ SENT_DIR = os.path.join(REPORTS_DIR, "sent")
 FAILED_DIR = os.path.join(REPORTS_DIR, "failed")
 ERROR_LOG = os.path.join(REPORTS_DIR, "upload_errors.log")
 
-SCHEMA_VERSION = "1.1"
 _ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 # An `image` block's `file`: a plain name inside the sidecar, never a path. This one
 # IS checked here — the name is used to open a file for writing, so `../` would put
@@ -132,7 +131,11 @@ def write_report(report_id, title, blocks, type="research", report_type=None,
                 "report_type": report_type or type, "generated_at": created_at}
         head.update(meta or {})
         blocks.insert(0, head)
-    doc = {"schema_version": SCHEMA_VERSION, "id": report_id, "type": type,
+    # 1.2 only when a candlestick is present: a report without one stays 1.1, so it is
+    # still accepted by an api that has not been upgraded to 1.2 yet.
+    version = "1.2" if any(isinstance(b, dict) and b.get("type") == "candlestick"
+                           for b in blocks) else "1.1"
+    doc = {"schema_version": version, "id": report_id, "type": type,
            "title": title, "created_at": created_at, "blocks": blocks}
 
     os.makedirs(REPORTS_DIR, exist_ok=True)
