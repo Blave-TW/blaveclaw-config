@@ -491,20 +491,26 @@ section headings in the report's language.
 
 - **A1. Title = the finding, not the topic**: 「日圓干預只延後了貶值，沒有扭轉它」, not
   「日圓干預分析」. Keep it to **≤ 40 CJK characters / ≤ 80 Latin characters**. For research
-  the finding is historical, never a forecast (B2). `write_report` copies `title` into
+  the finding is historical, never a forecast (B2). In a morning report the finding is a
+  reading of the data (§7 rule 1), never a call: no direction for the days ahead, no
+  target, no timing (§1b's levels-are-statistics rule applies to the title too).
+  `write_report` copies `title` into
   `meta.title`, so this governs both. *Why:* the title is what the sidebar, the
   notification and, for research, the share card show; the share card truncates at about
   50 CJK characters, and 40 leaves room for narrower cards. A topic name tells a reader
   who sees only the title nothing. The api's 1–200 limit (§2) still stands; this is a
   readability cap, not a format rule.
-- **A2. The lead names the common belief and what the data did to it**: overturned it,
-  discounted it, or confirmed it at a different size. It is the `text` block with
-  `variant: "lead"` right after `meta`, one falsifiable claim (§7 rule 1). Illustrative:
-  「大家說 iPhone 發表會『賣新聞』——是真的，但只有 2 個百分點」. When you pick a research
-  question, prefer one with a popular saying to test. *Why:* the research people open and
-  pass on pairs a contrast with a number anyone can compare ("Sell in May", counted against
-  the summers that actually happened). A rigorous report with no contrast reads like a
-  table and goes unopened.
+- **A2. The lead: one falsifiable claim** (§7 rule 1), the `text` block with
+  `variant: "lead"` right after `meta`. **In research it names the common belief and what
+  the data did to it**: overturned it, discounted it, or confirmed it at a different size.
+  Illustrative: 「大家說 iPhone 發表會『賣新聞』——是真的，但只有 2 個百分點」. When you pick
+  a research question, prefer one with a popular saying to test. In any other hand-written
+  report, write it that way only when the data really answers a popular saying; otherwise
+  the lead is the single falsifiable reading of rule 1. Never manufacture a contrast.
+  *Why:* the research people open and pass on pairs a contrast with a number anyone can
+  compare ("Sell in May", counted against the summers that actually happened). A weekly or
+  morning report usually has no myth to break, and a contrast forced onto it drifts toward
+  a call.
 - **A3. Every headline number stands next to its baseline**: random trading days, the
   same-period average, the out-of-sample half, the prior period. Put the baseline in the
   same sentence, in the cell's `delta`, or as a `benchmark` series on the chart. *Why:*
