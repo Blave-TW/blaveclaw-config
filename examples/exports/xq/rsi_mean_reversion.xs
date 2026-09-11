@@ -17,7 +17,7 @@ rsiVal = RSI(Close, RsiLen);
 
 // --- signal ---
 // UNVERIFIED: `cross over/under` on declared vars - xshelp shows it only on Value1 / function calls.
-//             If XQ rejects it, use CrossOver(Average(Close, FastLen), Average(Close, SlowLen)) inline.
+//             If XQ rejects it, use CrossOver(RSI(Close, RsiLen), OverSold) inline.
 longEntry = rsiVal cross over OverSold;   // was below, now at/above the oversold line
 longExit  = rsiVal >= ExitLevel;
 

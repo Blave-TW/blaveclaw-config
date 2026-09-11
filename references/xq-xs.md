@@ -88,7 +88,7 @@ Verified against https://xshelp.xq.com.tw/XSHelp/ (2026-08-25) unless marked UNV
 - **Execution model:** the script runs once per bar close, or on every price tick when
   逐筆洗價 is on (same bar re-executed; `Position`/`Filled` refreshed before each run).
   Nothing in the file chooses this — tell the user which mode the logic assumes
-  (Blave Type A = bar close).
+  (Blave Type A = decide at bar close, fill at the next bar's open).
 
 ## Order API — Python signal → XS
 
@@ -146,7 +146,7 @@ Rules that shape every script:
 | stateful four-threshold loop (`pos` variable) | `Position` replaces `pos`; each `if pos == … and …` branch becomes one `if Position … then SetPosition(…)` block, exits first |
 | `apply_vol_scaling` / fractional sizing | not expressible — drop it (fixed `Lots`) and say so |
 | `txf_settlement_mask` (flat on settlement day) | UNVERIFIED: XQ has `q_ExpiredDate` / `DaysToExpiration` fields; do not attempt unless the user insists, and mark the line UNVERIFIED |
-| bar-close execution (Type A) | XQ default = run on bar close; 逐筆洗價 unchecked. Say so. |
+| decide at bar close, fill at next bar open (Type A) | XQ default = run on bar close; 逐筆洗價 unchecked. Say so. |
 | Blave `FEE` | XQ 單邊交易成本(%) — the user enters it; suggest the Blave value |
 
 ## Known traps
@@ -189,8 +189,10 @@ Rules that shape every script:
 - **Costs.** Blave `FEE` is a per-trade rate applied on every position change (e.g. 0.003
   for TWSE). XQ takes 單邊交易成本(%) from the strategy settings (commonly 0.2 % for stocks,
   commission + tax combined); day-trade tax reductions are not applied in backtest.
-- **Fills.** Blave fills at the bar close of the signal bar. XQ's backtest fills market
-  orders at the next simulated tick unless 觸發即判斷成交 is checked; no capital check.
+- **Fills.** Blave's default is signal at bar close → fill at the next bar's open; only
+  strategies that return an `exec_at_close` series fill at the signal bar's close. With
+  逐筆洗價 off, XQ's backtest fills a `MARKET` order sent at bar close at the next bar's
+  開盤價 — the same timing, so leave 逐筆洗價 and 觸發即判斷成交 off. No capital check.
 - **Data.** Different vendors, different session handling (night session for futures),
   different history depth. Crypto and US data: XQ coverage depends on the user's modules —
   do not assume a crypto symbol exists in XQ.

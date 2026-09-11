@@ -17,6 +17,8 @@ var: ma(0), dev(0);
 
 // --- indicators ---
 ma  = Average(Close, Len);
+
+// --- signal ---
 dev = 0;
 if ma <> 0 then dev = (Close - ma) / ma * 100;
 

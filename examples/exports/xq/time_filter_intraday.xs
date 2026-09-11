@@ -29,12 +29,13 @@ slowMA = Average(Close, SlowLen);
 // UNVERIFIED: `cross over/under` on declared vars - xshelp shows it only on Value1 / function calls.
 //             If XQ rejects it, use CrossOver(Average(Close, FastLen), Average(Close, SlowLen)) inline.
 inWindow  = Time >= StartTime and Time <= EndTime;
+// UNVERIFIED: IsSessionLastBar is not confirmed against xshelp. If XQ rejects it, drop it and rely on FlatTime.
 mustFlat  = Time >= FlatTime or IsSessionLastBar;
 longEntry = inWindow and fastMA cross over slowMA;
 longExit  = fastMA cross under slowMA;
 
 // --- orders ---   (time-out exit first, then signal exit, then entry)
-if Position <> 0 and mustFlat then
+if Position <> 0 and Filled = Position and mustFlat then
     SetPosition(0, MARKET, label:="flat before close");
 
 if Position > 0 and Filled > 0 and longExit then

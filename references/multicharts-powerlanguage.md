@@ -165,6 +165,10 @@ Say these in the delivery text; do not try to express them in the script.
 
 - **Resolution / symbol / session** — the chart the signal is applied to. State Blave's
   `SYMBOL` + `INTERVAL` (1h → 60 min, 1d → Daily); the user picks the matching chart.
+  Crypto strategies export normally — MC has a native Binance data source. The header
+  comment must name it: Binance data source in QuoteManager, the USDT-M perpetual matching
+  Blave's `SYMBOL` (Add Symbol › From Data Source › Binance). Without that feed the script
+  compiles but has no chart to run on.
 - **Maximum Bars Back** — Format Signals › Properties. Must be ≥ the longest lookback
   (Blave `WARMUP`); orders start after it. Give the number.
 - **Commission / Slippage / Initial Capital** — Strategy Properties › Properties. No

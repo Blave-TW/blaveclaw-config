@@ -1,6 +1,6 @@
 # examples/exports/pine/
 
-Pine Script v6 `strategy()` templates for the TradingView export flow (`references/tradingview-pine.md`). Copy the closest one, change inputs and the `// --- signal ---` block, keep the rest. Every file: `//@version=6` on line 1, `strategy()` on the next statement, sections `inputs / signal / orders / plots`, next-bar-open fills and 0.05 % commission to mirror Blave defaults. None of these were compiled here; `// UNVERIFIED:` marks the one behaviour not confirmed against the reference.
+Pine Script v6 `strategy()` templates for the TradingView export flow (`references/tradingview-pine.md`). Copy the closest one, change inputs and the `// --- signal ---` block, keep the rest. Every file: `//@version=6` on line 1, `strategy()` on the next statement, sections `inputs / signal / orders / plots`, next-bar-open fills and 0.05 % commission to mirror Blave defaults. The templates themselves compile and run to completion on TradingView, and `sma_cross_long`'s trade list matched Blave's backtest bar-for-bar except the warm-up first entry; an export adapted from them is still not compiled by the agent. `// UNVERIFIED:` marks the one behaviour not confirmed against the reference.
 
 - `sma_cross_long.pine` — long-only SMA state (fast > slow long, fast < slow flat); mirrors `examples/btc_sma_cross`
 - `sma_cross_long_short.pine` — SMA long/short flip via `strategy.entry` reversal; four-threshold flat-band variant in comments
