@@ -259,8 +259,15 @@ def _build_panes(plot_series, df, max_points=PANES_MAX_POINTS):
             series = spec.reindex(df.index)
         else:
             continue
+        values = series.to_numpy()
+        # Capped: walk back from the end and stop at the cap instead of formatting years
+        # of 1m bars only to keep the tail. Per-element float() because values may be object.
+        if max_points:
+            rows = zip(values[::-1], df.index[::-1])
+        else:
+            rows = zip(values, df.index)
         points = []
-        for t, v in zip(df.index, series.to_numpy()):
+        for v, t in rows:
             try:
                 fv = float(v)
             except (TypeError, ValueError):
@@ -268,10 +275,12 @@ def _build_panes(plot_series, df, max_points=PANES_MAX_POINTS):
             if not math.isfinite(fv):
                 continue
             points.append([int(t.timestamp()), round(fv, 6)])
+            if max_points and len(points) == max_points:
+                break
         if not points:
             continue
-        if max_points and len(points) > max_points:
-            points = points[-max_points:]  # tail — same convention as trades
+        if max_points:
+            points.reverse()  # tail — same convention as trades
         entry = {
             'name':    str(name)[:PANES_NAME_MAX],
             'overlay': bool(opts.get('overlay', False)),
@@ -306,6 +315,17 @@ def _build_candles(df, max_count=CANDLES_MAX_COUNT):
         vol = df['Volume'].to_numpy(dtype=float) if 'Volume' in df.columns else None
     except (TypeError, ValueError):
         return []  # non-numeric column — no candles rather than a crashed run
+    if max_count:  # tail — same convention as trades/panes; select it before formatting
+        good = np.isfinite(o) & (o > 0) & np.isfinite(h) & (h > 0) \
+            & np.isfinite(l) & (l > 0) & np.isfinite(c) & (c > 0)
+        if vol is not None:
+            good &= np.isfinite(vol)
+        keep = np.flatnonzero(good)[-max_count:]
+        return [[int(t.timestamp()),
+                 round(float(o[i]), 6), round(float(h[i]), 6),
+                 round(float(l[i]), 6), round(float(c[i]), 6),
+                 None if vol is None else float(vol[i])]
+                for i, t in zip(keep, df.index[keep])]
     candles = []
     for i, t in enumerate(df.index):
         bar = (float(o[i]), float(h[i]), float(l[i]), float(c[i]))
@@ -866,14 +886,13 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
             return
 
         # ── Live mode ──────────────────────────────────────────────────────────
-        candles = [{'time': int(t.timestamp()), 'close': float(r['Close']),
-                    'open': float(r['Open']), 'high': float(r['High']), 'low': float(r['Low'])}
-                   for t, r in df.iterrows()]
+        t, r = df.index[-1], df.iloc[-1]
+        candle = {'time': int(t.timestamp()), 'close': float(r['Close']),
+                  'open': float(r['Open']), 'high': float(r['High']), 'low': float(r['Low'])}
 
         state  = load_state(strategy_name) or {
             'position': float(signals.ffill().fillna(0).iloc[-1]),
         }
-        candle = candles[-1]
         signal = float(signals.iloc[-1])
         logging.info(f"signal={signal:.4f} close={candle['close']}")
 
