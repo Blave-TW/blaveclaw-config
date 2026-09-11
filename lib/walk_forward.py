@@ -81,8 +81,9 @@ WF_DEFAULT_STEP_DAYS = 30
 WF_TRAIN_MULT = 4
 WF_STEP_DIVISOR = 12
 WF_STEP_MIN_DAYS = 30
-# Fewer runs than this and the two pass/fail ratios are too coarse to read
-# (3 runs → the share of profitable test windows can only be 0, 33, 67 or 100%).
+# Fewer runs than this and there is nothing to read: the run table and the drift
+# grid show one or two picks, and the stitched out-of-sample series is one or two
+# test windows long.
 WF_MIN_RUNS = 3
 # Sanity bound on runs[], mirrored by the api (which refuses a longer list — the tab
 # would then stay blank). Not a workload limit: a run costs ~225 bytes in wf.json and
@@ -400,8 +401,11 @@ def run_walk_forward(data, compute_signals_fn, row_vals, col_vals, output_dir,
             best_idx, _nbr, _br, _bc, _nbr_sharpe = find_plateau(
                 g_sharpe[k], row_vals, col_vals, window)
         except ValueError as e:
-            raise ValueError(f"walk_forward: run {k + 1} has no usable training window "
-                             f"({e})") from e
+            # The usual cause is a training window too short to trade in, not a
+            # broken grid: lookback minus warmup leaves a handful of bars.
+            raise ValueError(f"walk_forward: run {k + 1} has no usable training window — "
+                             f"training window {lookback_days}d minus warmup {warmup} bars may be "
+                             f"too short to produce a trade; lengthen lookback_days ({e})") from e
         picks.append((int(best_idx[0]), int(best_idx[1])))
 
     # ── pass 2: recompute the winners only, stitch their test windows ────────────
