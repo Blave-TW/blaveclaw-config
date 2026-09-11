@@ -1,8 +1,8 @@
 # XQ (嘉實 XQ 全球贏家) — Exporting a Strategy as an XS Trading Script
 
 Use this file when the user asks to export / convert / 匯出 / 轉成 a Blave strategy for
-XQ, XS, 嘉實, or 全球贏家. It covers Type A strategies only. Type C (portfolio) and
-Type B never export — see *Cannot export* below.
+XQ, XS, 嘉實, or 全球贏家. It covers Type A strategies only, never crypto (XQ has no crypto
+market). Type C (portfolio) and Type B never export — see *Cannot export* below.
 
 This machine has NO XQ installed. Nothing here can be compiled or backtested. Every
 export is a template adaptation plus a static lint; the user compiles it in XQ.
@@ -37,7 +37,7 @@ template and could not be compiled here; compile it in the XS editor and backtes
 XQ's 自動交易中心 before trading; XQ's backtest numbers WILL differ from Blave's (data
 source, dividend adjustment, fill and cost assumptions differ — see *Data and cost
 differences*). Also tell the user which XQ settings the script assumes (frequency,
-還原 or not, 逐筆洗價).
+原始值 / 還原值, which 洗價 option).
 
 ## XS essentials
 
@@ -82,13 +82,32 @@ Verified against https://xshelp.xq.com.tw/XSHelp/ (2026-08-25) unless marked UNV
   order UNVERIFIED, check xshelp before using.
 - **Frequency / period live in XQ's UI, not in code.** The strategy's 執行頻率 (K棒週期),
   還原 vs raw price series, 逐筆洗價, initial position, account, and 交易成本 are all set
-  in 自動交易中心 when the user attaches the script. `BarFreq` returns `"Min"`, `"D"`,
+  in 自動交易中心 › 新增策略 when the user attaches the script: 執行商品 via the 選擇商品
+  dialog (代碼 / 名稱 search); 執行頻率 with a 原始值 / 還原值 choice (還原值 = adjusted, like
+  Blave's twstock prices); 資料讀取筆數 (default 100). **Daily (日) strategies:** XQ refuses to
+  save unless at least one 洗價 option is checked — check 自動洗價 (逐筆洗價 stays off). This is
+  only a save requirement, NOT a way to get bar-close semantics (see *Execution model*).
+  `BarFreq` returns `"Min"`, `"D"`,
   `"AD"` (還原日線), `"W"`, ... — use it only as an optional guard
   (`if BarFreq <> "D" and BarFreq <> "AD" then return;`).
-- **Execution model:** the script runs once per bar close, or on every price tick when
-  逐筆洗價 is on (same bar re-executed; `Position`/`Filled` refreshed before each run).
-  Nothing in the file chooses this — tell the user which mode the logic assumes
-  (Blave Type A = decide at bar close, fill at the next bar's open).
+- **Execution model:** under 逐筆洗價 / 模擬逐筆洗價 the script re-runs on every price tick
+  of the current bar (`Position`/`Filled` refreshed before each run). **XQ's daily backtest
+  always simulates intraday ticks** (模擬逐筆洗價 is forced on and greyed out in the backtest
+  dialog), so the script runs on the still-forming current bar and sees that day's open /
+  intraday prices. Blave Type A decides at bar close and fills at the next bar's open.
+  **Rule: compute every signal on the COMPLETED bar** — `fastMA[1] cross over slowMA[1]`,
+  `rsiVal[1] >= Level`, `Close[1] > Value1[2]` — so the order goes out on the next bar's
+  first tick. Verified in XQ on 2330 daily (還原值,
+  自動洗價): the `[1]` version matched Blave's 18/18 round trips with 0 trading-day offset on
+  every entry and exit; the current-bar version entered one day early on most trades and
+  added intraday whipsaw exits. Price stops follow the same rule: decide on `Close[1]` and
+  require `Filled[1]` on the same side, because on the entry bar `Close[1]` predates the fill
+  and an overnight gap would fire a false stop. `Filled[1]` is the previous BAR's final value,
+  not the previous tick's — verified: trailing stop 24/24 and fixed stop/TP 55/59 round trips
+  vs a Blave replica, no stop fired on an entry bar. The script keeps running after a fill,
+  so an exit on the first tick can be followed by an opposite entry on a later tick of the
+  same bar when that `[1]` signal is true (exit 09:01, entry 09:02) — a same-bar flip, which
+  matches Blave's next-open flip.
 
 ## Order API — Python signal → XS
 
@@ -107,8 +126,8 @@ account. `SetPosition(target)` moves the target; the system works out the order.
 | position size | `Position` / `Filled` (signed integer) | `CurrentContracts` |
 | entry price | `FilledAvgPrice` (FIFO cost, unsigned, 0 when flat) | `EntryPrice` / `AvgEntryPrice` |
 | bars since entry | `BarsLast(Position[1] = 0 and Position <> 0)` — UNVERIFIED expression, or track a counter with `intrabarpersist` | `BarsSinceEntry` |
-| fixed % stop-loss (long) | `if Filled > 0 and Close <= FilledAvgPrice * (1 - StopPct/100) then SetPosition(0, MARKET);` | `SetStopLoss` / `SetPercentTrailing` |
-| take-profit (long) | `if Filled > 0 and Close >= FilledAvgPrice * (1 + TpPct/100) then SetPosition(0, MARKET);` | `SetProfitTarget` |
+| fixed % stop-loss (long) | `if Filled > 0 and Filled[1] > 0 and Close[1] <= FilledAvgPrice * (1 - StopPct/100) then SetPosition(0, MARKET);` | `SetStopLoss` / `SetPercentTrailing` |
+| take-profit (long) | `if Filled > 0 and Filled[1] > 0 and Close[1] >= FilledAvgPrice * (1 + TpPct/100) then SetPosition(0, MARKET);` | `SetProfitTarget` |
 | limit price | `SetPosition(1, Close)`, `SetPosition(1, AddSpread(Close, 2))` (+2 ticks) | `... limit` |
 | market order | `MARKET` as the price argument (`SetPosition(1, MARKET)`) | `at market` |
 | order tag | `SetPosition(1, MARKET, label:="MA cross");` — labels must be unique in the file | `Buy("name")` |
@@ -135,18 +154,19 @@ Rules that shape every script:
 |---|---|
 | `SYMBOL`, `INTERVAL`, `START`, `FEE` | not in code — chosen in 自動交易中心 (商品, 執行頻率, 回測區間, 單邊交易成本) |
 | `SMA_FAST = 5` module constants | `input: FastLen(5);` |
-| `WARMUP` | nothing — XQ reads 資料讀取筆數 from settings; tell the user to set it ≥ the longest lookback |
+| `WARMUP` | nothing — XQ reads 資料讀取筆數 from settings (default 100); tell the user to set it ≥ the longest lookback |
 | `_add_indicators`: `df['Close'].rolling(n).mean()` | `Average(Close, n)` |
 | `df['Close'].ewm(span=n).mean()` | `XAverage(Close, n)` |
-| `RSI` column (Wilder) | `RSI(Close, n)` — smoothing method UNVERIFIED; expect small differences |
-| `df['High'].rolling(n).max().shift(1)` | `Value1 = Highest(High, n); ... Value1[1]` |
-| `x.shift(1)` | `x[1]` |
-| `compute_signals`: golden cross mask | `fastMA cross over slowMA` |
+| `RSI` column (Wilder) | `RSI(Close, n)` — consistent with Wilder smoothing (7-trade check on 2330 daily); early bars may differ with the seed |
+| any value `x` at the signal bar | `x[1]` — the completed bar (see *Execution model*) |
+| `df['High'].rolling(n).max().shift(1)` | `Value1 = Highest(High, n); ... Close[1] > Value1[2]` |
+| `x.shift(1)` | `x[2]` |
+| `compute_signals`: golden cross mask | `fastMA[1] cross over slowMA[1]` |
 | `signal = 1.0 / 0.0 / -1.0` then ffill | `SetPosition(Lots / 0 / -Lots)` — `Position` IS the ffilled state |
 | stateful four-threshold loop (`pos` variable) | `Position` replaces `pos`; each `if pos == … and …` branch becomes one `if Position … then SetPosition(…)` block, exits first |
 | `apply_vol_scaling` / fractional sizing | not expressible — drop it (fixed `Lots`) and say so |
 | `txf_settlement_mask` (flat on settlement day) | UNVERIFIED: XQ has `q_ExpiredDate` / `DaysToExpiration` fields; do not attempt unless the user insists, and mark the line UNVERIFIED |
-| decide at bar close, fill at next bar open (Type A) | XQ default = run on bar close; 逐筆洗價 unchecked. Say so. |
+| decide at bar close, fill at next bar open (Type A) | compute signals on the completed bar (`x[1]`) — XQ's daily backtest runs intrabar (模擬逐筆洗價 forced on); a daily strategy also needs 自動洗價 checked to save. Say so. |
 | Blave `FEE` | XQ 單邊交易成本(%) — the user enters it; suggest the Blave value |
 
 ## Known traps
@@ -167,8 +187,8 @@ Rules that shape every script:
    always guard with `Filled > 0` / `Filled < 0`.
 8. Plain `var` values are rolled back on every tick re-execution under 逐筆洗價; running
    maxima / counters need `intrabarpersist`.
-9. `Highest`/`Lowest` include the current bar; a breakout on `Close > Highest(High, n)`
-   never fires. Use the `[1]`-shifted value.
+9. `Highest`/`Lowest` include the bar they are computed on; a breakout on
+   `Close[1] > Value1[1]` never fires. Compare the completed close with `Value1[2]`.
 10. Reserved words include harmless-looking English: `A An At Based By Does From Is Of On
     Place Than The Was` are skip-words the parser drops; `Value`, `Condition`, `Label`,
     `Ret`, `Over`, `Under`, `Above`, `Below` are keywords. Never name a var `is`, `on`,
@@ -179,23 +199,38 @@ Rules that shape every script:
 13. `SetPosition(target)` with no price uses the strategy's default buy/sell price from the
     UI. Always pass `MARKET` or an explicit price so behaviour does not depend on a hidden
     setting.
+14. **Identifiers may not START with `Buy` or `Sell`** — XQ reserves them as prefixes:
+    `BuyTh` / `SellTh` fail to compile; `ShortTh` / `CoverTh` compile.
+    Rename to `LongEntryTh`, `LongExitTh`, etc.
 
 ## Data and cost differences vs Blave (for the honesty clause)
 
 - **Taiwan stocks — adjustment.** Blave `fetch_twstock_price_adj` is dividend/rights
   adjusted. XQ uses raw prices on 日線 and adjusted prices on 還原日線 (`BarFreq = "AD"`);
   its 自動交易 backtest reinvests dividends for stocks and removes roll gaps for futures.
-  Tell the user to pick 還原 series to get closest to Blave; results still differ.
+  Tell the user to pick 還原值 under 執行頻率 to get closest to Blave; results still differ.
 - **Costs.** Blave `FEE` is a per-trade rate applied on every position change (e.g. 0.003
   for TWSE). XQ takes 單邊交易成本(%) from the strategy settings (commonly 0.2 % for stocks,
   commission + tax combined); day-trade tax reductions are not applied in backtest.
 - **Fills.** Blave's default is signal at bar close → fill at the next bar's open; only
-  strategies that return an `exec_at_close` series fill at the signal bar's close. With
-  逐筆洗價 off, XQ's backtest fills a `MARKET` order sent at bar close at the next bar's
-  開盤價 — the same timing, so leave 逐筆洗價 and 觸發即判斷成交 off. No capital check.
+  strategies that return an `exec_at_close` series fill at the signal bar's close. The `[1]`
+  pattern fills at the next bar's first tick, so bars Blave marks `exec_at_close` (futures
+  settlement, this-bar-close exits) fill one bar later in XQ and cannot be matched — say so
+  in the honesty clause. XQ's
+  daily backtest forces 模擬逐筆洗價 on; with signals on the completed bar (`[1]`) the order
+  fills at the next bar's first tick (09:01 on TWSE), which matched Blave's next-open fills
+  trade for trade. Leave 觸發即判斷成交 off. No capital check.
 - **Data.** Different vendors, different session handling (night session for futures),
-  different history depth. Crypto and US data: XQ coverage depends on the user's modules —
-  do not assume a crypto symbol exists in XQ.
+  different history depth. US data: XQ coverage depends on the user's modules. Crypto: XQ
+  has none (see *Cannot export*).
+- **Stop thresholds near the edge.** XQ's 還原 series and fill price (about one tick) differ
+  from Blave's by a few tenths of a percent, so a % stop / take-profit that Blave barely
+  missed or barely hit can trigger one bar apart in XQ (observed: 4 of 59 round trips
+  differed, all price-basis edge cases — 3 stop/TP threshold edges, e.g. Blave +5.81% vs a
+  6% take-profit, and 1 MA-cross date shifted a day).
+- **History depth.** XQ's backtest history can be much shorter than Blave's (observed: no
+  2330 daily bars before 2020 on a personal account). Compare trades over the overlapping
+  window only; missing early trades are a data limit, not a script bug.
 - Therefore: Blave stats are the design evidence; XQ's backtest is the acceptance test.
   Never quote Blave's Sharpe / return as what XQ will show.
 
@@ -209,6 +244,10 @@ Do not emit the marker when the strategy needs any of:
 - Cross-symbol / cross-market logic (Type C portfolios, pairs, TXF vs spot basis).
 - Fractional or volatility-scaled sizing that the user refuses to replace with fixed lots.
 - Type B strategies (no backtest to verify against).
+- Crypto symbols (Binance USDT-M from `fetch_kline`): XQ has no crypto market — 選擇商品
+  search for BTC returns only US-listed Bitcoin ETFs. Decline with that reason; the two
+  paths are a TradingView (Pine) or MultiCharts export instead, not a reduced XQ version.
+  Do not suggest an ETF as a proxy.
 
 Say plainly which parts would translate and which cannot, then offer exactly two paths:
 (a) export a reduced version without the unsupported part (state what changes), or

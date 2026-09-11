@@ -175,6 +175,16 @@ def lint_xq(src):
     phrases = [b for b in d["blocked"] if " " in b]
     declared = _el_declared(code)
     implicit = re.compile(r"(?i)^(value\d{1,3}|condition\d{1,3}|plot\d{1,2})$")
+    # XQ rejects any identifier that STARTS with Buy/Sell (Short*/Cover* compile fine).
+    for h in DECL_HEAD.finditer(code):
+        end = code.find(";", h.end())
+        clause_end = end if end != -1 else len(code)
+        for d in re.finditer(r"([A-Za-z_][A-Za-z0-9_.]*)\s*[\(\[]", code[h.end():clause_end]):
+            name = d.group(1)
+            if name.lower().startswith(("buy", "sell")):
+                rep.err(_line_of(code, h.end() + d.start()),
+                        f"'{name}' starts with Buy/Sell — XQ: \"{name[:3] if name.lower().startswith('buy') else name[:4]}\" "
+                        "不允許當成變數開頭; identifiers may not start with Buy or Sell (e.g. rename BuyTh → LongEntryTh)")
     for m in re.finditer(r"(?i)\bend\s*;\s*else\b", code):
         rep.err(_line_of(code, m.start()), "'end; else' — no semicolon before else in XS (write 'end else')")
     for p in phrases:
@@ -360,6 +370,7 @@ BAD = {
         ("var: x(0);\nx = Averag(Close, 20);", "unknown identifier 'Averag'"),
         ("var: x(0);\nx = Average(Close，20);", "full-width"),
         ("if MarketPosition = 1 then SetPosition(0);", "EasyLanguage-only"),
+        ("input: BuyTh(3.0);\ninput: SellTh(1.0);\nif Close > BuyTh then SetPosition(1, MARKET);", "may not start with Buy or Sell"),
     ],
     "mc": [
         ("Inputs: Contracts(1);\nBuy Contracts contracts next bar at market;", "reserved word"),
@@ -381,7 +392,11 @@ BAD = {
 
 
 GOOD = {
-    "xq": ["input: Stop(2), Limit(1);\nvar: shares(0);\nshares = Filled;\nif Close > Stop then SetPosition(1, MARKET, label:=\"L\");"],
+    "xq": ["input: Stop(2), Limit(1);\nvar: shares(0);\nshares = Filled;\nif Close > Stop then SetPosition(1, MARKET, label:=\"L\");",
+           "input: ShortTh(-3);\ninput: CoverTh(-1);\nif Close < ShortTh then SetPosition(-1, MARKET);",
+           "var: f(0), s(0), up(false);\nf = Average(Close, 5);\ns = Average(Close, 20);\nValue1 = Highest(High, 20);\n"
+           "up = f[1] cross over s[1] and Close[1] > Value1[2];\n"
+           "if Position = 0 and Filled = 0 and Filled[1] = 0 and up then SetPosition(1, MARKET);"],
     "mc": ["Inputs: Qty(1);\nVariables: x(0);\nx = Average(Close, 20);\nif Close crosses over x then Buy Qty contracts next bar at market;"],
     "pine": ["//@version=6\nstrategy(\"x\")\nlen = input.int(20)\nma = ta.sma(close, len)\nif close > ma\n    strategy.entry(\"L\", strategy.long, qty=1)\n"],
 }

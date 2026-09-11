@@ -6,6 +6,8 @@
 // Time is a hhmmss integer on intraday bars and 0 on daily bars (this script needs an intraday 頻率).
 // Whether Time marks the bar's start or end is not documented: keep FlatTime a few bars early.
 // TXF day session: 08:45-13:45. Adjust the window for the user's instrument.
+// UNVERIFIED: Min-frequency backtest behaviour is untested in XQ. If XQ also forces 模擬逐筆洗價 on
+//             minute bars, shift the crossover to fastMA[1] / slowMA[1] as the daily templates do.
 
 input: FastLen(60);
 input: SlowLen(300);
@@ -26,10 +28,7 @@ fastMA = Average(Close, FastLen);
 slowMA = Average(Close, SlowLen);
 
 // --- signal ---
-// UNVERIFIED: `cross over/under` on declared vars - xshelp shows it only on Value1 / function calls.
-//             If XQ rejects it, use CrossOver(Average(Close, FastLen), Average(Close, SlowLen)) inline.
 inWindow  = Time >= StartTime and Time <= EndTime;
-// UNVERIFIED: IsSessionLastBar is not confirmed against xshelp. If XQ rejects it, drop it and rely on FlatTime.
 mustFlat  = Time >= FlatTime or IsSessionLastBar;
 longEntry = inWindow and fastMA cross over slowMA;
 longExit  = fastMA cross under slowMA;

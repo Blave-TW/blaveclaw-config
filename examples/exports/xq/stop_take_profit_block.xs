@@ -4,7 +4,9 @@
 // Blave    : Type A with stop_pct / tp_pct constants applied in compute_signals
 // Generated from a template. NOT compiled here - compile and backtest in XQ before use.
 // FilledAvgPrice = FIFO cost of the open position, unsigned, 0 when flat (guard with Filled).
-// For stops to react intrabar the user must enable 逐筆洗價 in XQ; on bar close they act at the close.
+// Bar-close stops, like Blave: signals and stops read the COMPLETED bar ([1]) and exit on the next
+// bar's first tick. Filled[1] skips the entry bar, whose Close[1] predates the fill (a gap would
+// fire a false stop/TP). For an intrabar stop use Close instead - faster, but it diverges from Blave.
 
 input: FastLen(10);
 input: SlowLen(30);
@@ -21,21 +23,19 @@ fastMA = Average(Close, FastLen);
 slowMA = Average(Close, SlowLen);
 
 // --- signal ---
-// UNVERIFIED: `cross over/under` on declared vars - xshelp shows it only on Value1 / function calls.
-//             If XQ rejects it, use CrossOver(Average(Close, FastLen), Average(Close, SlowLen)) inline.
-goLong  = fastMA cross over  slowMA;
-goShort = fastMA cross under slowMA;
+goLong  = fastMA[1] cross over  slowMA[1];
+goShort = fastMA[1] cross under slowMA[1];
 
 // --- risk exits ---   (must be the first trading instructions in the file)
 stopHit = false;
 tpHit   = false;
-if Filled > 0 then begin
-    stopHit = Close <= FilledAvgPrice * (1 - StopPct / 100);
-    tpHit   = Close >= FilledAvgPrice * (1 + TpPct / 100);
+if Filled > 0 and Filled[1] > 0 then begin
+    stopHit = Close[1] <= FilledAvgPrice * (1 - StopPct / 100);
+    tpHit   = Close[1] >= FilledAvgPrice * (1 + TpPct / 100);
 end;
-if Filled < 0 then begin
-    stopHit = Close >= FilledAvgPrice * (1 + StopPct / 100);
-    tpHit   = Close <= FilledAvgPrice * (1 - TpPct / 100);
+if Filled < 0 and Filled[1] < 0 then begin
+    stopHit = Close[1] >= FilledAvgPrice * (1 + StopPct / 100);
+    tpHit   = Close[1] <= FilledAvgPrice * (1 - TpPct / 100);
 end;
 
 if Position <> 0 and Filled = Position and stopHit then

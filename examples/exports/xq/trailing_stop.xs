@@ -2,12 +2,13 @@
 // Skeleton : % trailing stop from the best price since entry, on top of an SMA-cross long entry
 // Blave    : Type A with a running-max trailing exit in compute_signals
 // Generated from a template. NOT compiled here - compile and backtest in XQ before use.
-// The running high must survive tick re-execution of the same bar -> intrabarpersist.
-// With 逐筆洗價 off it updates once per bar close, matching Blave's bar-close logic.
+// Bar-close trailing stop, like Blave's running-max exit: peak and exit read the COMPLETED bar's
+// close ([1]); Filled[1] skips the entry bar, whose Close[1] predates the fill. intrabarpersist
+// keeps peakPrice across tick re-executions - required if you switch to the live Close.
 
 input: FastLen(10);
 input: SlowLen(30);
-input: TrailPct(5.0);     // exit when Close falls this % below the peak since entry
+input: TrailPct(5.0);     // exit when the completed close falls this % below the peak since entry
 input: Lots(1);
 
 var: fastMA(0), slowMA(0);
@@ -19,14 +20,12 @@ fastMA = Average(Close, FastLen);
 slowMA = Average(Close, SlowLen);
 
 // --- signal ---
-// UNVERIFIED: `cross over/under` on declared vars - xshelp shows it only on Value1 / function calls.
-//             If XQ rejects it, use CrossOver(Average(Close, FastLen), Average(Close, SlowLen)) inline.
-longEntry = fastMA cross over slowMA;
+longEntry = fastMA[1] cross over slowMA[1];
 
 // --- trailing stop state ---
-if Filled > 0 then begin
-    if peakPrice = 0 or Close > peakPrice then peakPrice = Close;
-    trailHit = Close <= peakPrice * (1 - TrailPct / 100);
+if Filled > 0 and Filled[1] > 0 then begin
+    if peakPrice = 0 or Close[1] > peakPrice then peakPrice = Close[1];
+    trailHit = Close[1] <= peakPrice * (1 - TrailPct / 100);
 end else begin
     peakPrice = 0;
     trailHit  = false;

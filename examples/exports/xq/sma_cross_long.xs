@@ -3,7 +3,9 @@
 // Blave    : examples/tsmc_ma/ , examples/btc_sma_cross/ (Type A)
 // Generated from a template. NOT compiled here - compile and backtest in XQ before use.
 // Timeframe / 還原 / 逐筆洗價 / 交易成本 are XQ strategy settings, not code.
-// Assumes: run on bar close (逐筆洗價 off), 1 position unit = 1 張 (stock) or 1 口 (futures).
+// Signals read the COMPLETED bar ([1]): XQ's daily backtest runs intrabar (模擬逐筆洗價 forced on),
+// so the order goes out on the next bar's first tick = Blave's decide-at-close, fill-next-open.
+// Daily 執行頻率 needs 自動洗價 checked to save. 1 position unit = 1 張 (stock) or 1 口 (futures).
 
 input: FastLen(5);        // Blave SMA_FAST
 input: SlowLen(60);       // Blave SMA_SLOW
@@ -20,10 +22,8 @@ fastMA = Average(Close, FastLen);
 slowMA = Average(Close, SlowLen);
 
 // --- signal ---       (Blave compute_signals)
-// UNVERIFIED: `cross over/under` on declared vars - xshelp shows it only on Value1 / function calls.
-//             If XQ rejects it, use CrossOver(Average(Close, FastLen), Average(Close, SlowLen)) inline.
-longEntry = fastMA cross over  slowMA;   // (f > s) & (f.shift(1) <= s.shift(1))
-longExit  = fastMA cross under slowMA;   // (f < s) & (f.shift(1) >= s.shift(1))
+longEntry = fastMA[1] cross over  slowMA[1];   // (f > s) & (f.shift(1) <= s.shift(1)) on the completed bar
+longExit  = fastMA[1] cross under slowMA[1];   // (f < s) & (f.shift(1) >= s.shift(1)) on the completed bar
 
 // --- orders ---
 // XS executes only the FIRST trading instruction per pass: exits come before entries.

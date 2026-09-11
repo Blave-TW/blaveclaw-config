@@ -4,6 +4,7 @@
 // Generated from a template. NOT compiled here - compile and backtest in XQ before use.
 // Timeframe / 還原 / 逐筆洗價 / 交易成本 are XQ strategy settings, not code.
 // Shorting stocks needs a 信用交易 account in XQ; futures short freely.
+// Signals read the COMPLETED bar ([1]): XQ's daily backtest runs intrabar, so current-bar values fire a day early.
 
 input: FastLen(20);
 input: SlowLen(50);
@@ -17,10 +18,8 @@ fastMA = Average(Close, FastLen);
 slowMA = Average(Close, SlowLen);
 
 // --- signal ---
-// UNVERIFIED: `cross over/under` on declared vars - xshelp shows it only on Value1 / function calls.
-//             If XQ rejects it, use CrossOver(Average(Close, FastLen), Average(Close, SlowLen)) inline.
-goLong  = fastMA cross over  slowMA;
-goShort = fastMA cross under slowMA;
+goLong  = fastMA[1] cross over  slowMA[1];
+goShort = fastMA[1] cross under slowMA[1];
 
 // --- orders ---
 // Position/Filled do not change inside a pass, and only the first SetPosition runs,

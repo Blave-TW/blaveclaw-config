@@ -5,12 +5,14 @@
 //            The Python stateful loop's `pos` variable is XS's built-in Position.
 // Indicator here = % deviation of Close from its SMA; swap in the strategy's own indicator.
 // Generated from a template. NOT compiled here - compile and backtest in XQ before use.
+// Signals read the COMPLETED bar ([1]): XQ's daily backtest runs intrabar, so current-bar values fire a day early.
 
 input: Len(20);
-input: BuyTh(3.0);        // enter long  when dev >  BuyTh
-input: SellTh(1.0);       // exit long   when dev <  SellTh
-input: CoverTh(-1.0);     // exit short  when dev >  CoverTh
-input: ShortTh(-3.0);     // enter short when dev <  ShortTh
+// XQ rejects identifiers that start with Buy/Sell, so Blave's BUY_TH/SELL_TH names cannot be kept.
+input: LongEntryTh(3.0);  // Blave BUY_TH:   enter long  when dev >  LongEntryTh
+input: LongExitTh(1.0);   // Blave SELL_TH:  exit long   when dev <  LongExitTh
+input: ShortExitTh(-1.0); // Blave COVER_TH: exit short  when dev >  ShortExitTh
+input: ShortEntryTh(-3.0);// Blave SHORT_TH: enter short when dev <  ShortEntryTh
 input: Lots(1);
 
 var: ma(0), dev(0);
@@ -20,19 +22,19 @@ ma  = Average(Close, Len);
 
 // --- signal ---
 dev = 0;
-if ma <> 0 then dev = (Close - ma) / ma * 100;
+if ma[1] <> 0 then dev = (Close[1] - ma[1]) / ma[1] * 100;
 
 // --- orders ---   (same order as the Python loop: 1) exit first, 2) then entry)
 // A same-bar exit-then-enter is impossible in XS (Position is fixed for the pass);
 // the entry fires on the next pass instead. Report this difference to the user.
-if Position > 0 and Filled > 0 and dev < SellTh then
+if Position > 0 and Filled > 0 and dev < LongExitTh then
     SetPosition(0, MARKET, label:="exit long");
 
-if Position < 0 and Filled < 0 and dev > CoverTh then
+if Position < 0 and Filled < 0 and dev > ShortExitTh then
     SetPosition(0, MARKET, label:="exit short");
 
-if Position = 0 and Filled = 0 and dev > BuyTh then
+if Position = 0 and Filled = 0 and dev > LongEntryTh then
     SetPosition(Lots, MARKET, label:="enter long");
 
-if Position = 0 and Filled = 0 and dev < ShortTh then
+if Position = 0 and Filled = 0 and dev < ShortEntryTh then
     SetPosition(-1 * Lots, MARKET, label:="enter short");
