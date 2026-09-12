@@ -570,7 +570,10 @@ section headings in the report's language.
   10 days does. This is §7 rule 2's comparison, made visible.
 - **A4. `kpi_row` directly after the lead; its first item is the number the claim rests
   on** (the focus cell, §3; the tone rules still apply). In research it is a historical
-  statistic, never a current reading or a target price. *Why:* it is the first figure a
+  statistic, never a current reading or a target price. In a hand-written morning or weekly
+  report it is the figure behind the lead (「法人淨賣超 367 億」), not the index level: a
+  template brief opens on 加權指數 because the template fixes its KPI row, and yours chooses
+  its own. *Why:* it is the first figure a
   reader sees, and a shared page would show it as the key number. A context figure there,
   such as a price level or a sample size, advertises a claim it does not support.
 - **A5. The first chart block is the one that shows the claim**, not a context chart. A
@@ -716,6 +719,17 @@ convenience):
 - Same id again = update. `register_schedule` keeps `created_at`, bumps `updated_at` and
   sets `pending` back to `null` — that is how the web learns an edit has landed, so always
   re-register through it rather than editing the file by hand. At most 20 jobs per machine.
+- **Changing or deleting an existing job on your own initiative waits for the user's yes.**
+  When you decide to re-register a job with a different cron, edit its `run.py`, change the
+  report id it writes, or remove it — a bug fix, a side edit, or re-registering over an
+  existing job while handling a differently worded request — tell the user what changes,
+  before → after (「tw-weekly:本機 `52 21 * * 5`(台北週六 05:52)→ `52 13 * * 5`(台北週五
+  21:52)」), and do it only once they confirm. A fix you are sure of is proposed the same way,
+  never applied on the side. A user instruction that names the change (「把 tw-weekly 刪掉」,
+  「tw-weekly 改成 22:00」) or the web's edit flow (end of this section) is its own
+  confirmation: do it and state the before → after in the reply.
+- **A hand-written report never reuses a job's report id** (`tw-weekly-20260911`): the same id
+  overwrites what the job published. Give it its own (`tw-weekly-narr-20260911`).
 - `prompt` is the user's own request, not your rewrite; the web shows it back as the
   report's description and hands it to you again when they edit it.
 - `schedule.cron` is standard 5-field cron in the machine's local time — no `@daily`,
