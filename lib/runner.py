@@ -645,6 +645,14 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
 
     out_dir = _REPO_ROOT / 'strategies' / strategy_name
     os.makedirs(out_dir, exist_ok=True)
+    # Without Telegram, make_sender() (evaluated before run()) logs a warning first, which
+    # implicitly installs a bare stderr StreamHandler and would make basicConfig a no-op.
+    # Drop only that one (not force=True) so handlers other code attached stay in place.
+    root = logging.getLogger()
+    for h in root.handlers[:]:
+        if type(h) is logging.StreamHandler:
+            root.removeHandler(h)
+            h.close()
     logging.basicConfig(
         filename=str(out_dir / 'strategy.log'),
         level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s'
