@@ -279,8 +279,12 @@ def _window_start(days):
     return (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
 
 
+def _now_tpe():
+    return datetime.now(TPE)
+
+
 def _today_tpe():
-    return datetime.now(TPE).strftime("%Y-%m-%d")
+    return _now_tpe().strftime("%Y-%m-%d")
 
 
 def _calendar_rows(headers, notes, countries=None):
@@ -409,9 +413,12 @@ def tw_market_brief(date=None, headers=None, lookback_days=90):
 
     night = _txf_night_session(headers, asof, notes)
     if night:
-        ctx["台指期夜盤"] = f"{_num(night['close'])}({_pct(night['chg'] * 100)} vs 日盤收 {_num(night['day_close'])})"
-        kpis.append(kpi("台指期夜盤", _num(night["close"]), _tone(night["chg"]), delta=_pct(night["chg"] * 100)))
-        foot.append(("night", "台指期夜盤 = 15:00 至次日 05:00 的交易時段,漲跌以同日日盤收盤價為基準。"))
+        ctx["台指期夜盤"] = (f"{_num(night['close'])}({night['state']};{_pct(night['chg'] * 100)} "
+                          f"vs 日盤收 {_num(night['day_close'])})")
+        label = "台指期夜盤" if night["done"] else f"台指期夜盤({night['state']})"
+        kpis.append(kpi(label, _num(night["close"]), _tone(night["chg"]), delta=_pct(night["chg"] * 100)))
+        foot.append(("night", "台指期夜盤 = 15:00 至次日 05:00 的交易時段,漲跌以同日日盤收盤價為基準。"
+                     + ("" if night["done"] else "數值為截至標示時點的最新價,不是收盤價。")))
 
     blocks.append(kpi_row(kpis))
     ck = candlestick("加權指數", idx.tail(_PRICE_BARS), y_unit="點",
@@ -469,7 +476,19 @@ def _txf_night_session(headers, day, notes):
         return None
     day_close = float(df.loc[day_mask, "Close"].iloc[-1])
     close = float(df.loc[night_mask, "Close"].iloc[-1])
-    return {"close": close, "day_close": day_close, "chg": close / day_close - 1}
+    # bar 以起始時間標記(api 丟掉未收的那根,export 路徑可能留著),價格的時點 = min(起始 + 60 分,
+    # 現在, 05:00)。夜盤還在交易時這是盤中價;不標出來,agent 會寫成「夜盤收」(uid=1 T13)。
+    now = pd.Timestamp(_now_tpe())
+    session_end = pd.Timestamp(d + timedelta(days=1)).tz_localize(TPE) + pd.Timedelta(hours=5)
+    as_of = min(tpe[night_mask][-1] + pd.Timedelta(minutes=60), now, session_end)
+    done = as_of >= session_end
+    if done:
+        state = "收盤"
+    elif now < session_end:
+        state = f"盤中,截至 {as_of:%H:%M}"
+    else:
+        state = f"截至 {as_of:%H:%M},資料未含收盤"
+    return {"close": close, "day_close": day_close, "chg": close / day_close - 1, "state": state, "done": done}
 
 
 # ─── template 2: 加密市場晨報 ─────────────────────────────────────────────────
@@ -587,7 +606,8 @@ _LEVELS_TITLE = "近期高低與均線"
 
 
 def _level_lines(lv):
-    return [(lv[k], k, em) for k, em in (("前 20 日高", False), ("前 20 日低", True)) if k in lv]
+    # 兩條都不強調:紅色低點線讀起來就是在標支撐,與「價位是統計、不是支撐」相反。
+    return [(lv[k], k, False) for k in ("前 20 日高", "前 20 日低") if k in lv]
 
 
 def _levels_table(lv, last):
@@ -749,10 +769,6 @@ def publish(pack, narrative=None, report_id=None, title=None, origin=None):
     # (29026 實測:cron 首跑覆蓋了對話產的 tw-market-20260902)。明給 report_id 就照給。
     if report_id is None:
         report_id = pack.report_id if narrated else pack.report_id + "-auto"
-    path = write_report(report_id, title or pack.title, out,
+    # write_report prints the "moved to reports/sent/, reply now" line for both paths.
+    return write_report(report_id, title or pack.title, out,
                         type=pack.type, report_type=pack.report_type, meta=meta)
-    # 說給看工具輸出的 agent 聽:檔案幾秒內會被 uploader 搬到 reports/sent/,在 reports/ 找不到
-    # 是正常的,不要再 ls / find 去確認(實測每次都多花 3–4 步)。
-    print(f"[report] {os.path.basename(path)} written — the uploader moves it to reports/sent/ within "
-          "seconds and it appears in the workspace sidebar shortly. Nothing to check; reply now.")
-    return path

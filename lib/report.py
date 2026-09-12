@@ -195,6 +195,12 @@ def write_report(report_id, title, blocks, type="research", report_type=None,
     if type == "research":
         for w in _research_warnings(title, blocks):
             print(f"WARNING: {w}")
+    # Agents re-read reports/<id>.json to "verify" and hit FileNotFoundError once the uploader
+    # has moved it (uid=1: five times in three turns) — say where the file goes before they try.
+    print(f"[report] {report_id}.json written. The uploader moves it to reports/sent/, so do not "
+          f"read reports/{report_id}.json back; if you need it again, open "
+          f"reports/sent/{report_id}.json. It appears in the workspace sidebar shortly. "
+          "Nothing to check; reply now.")
     return path
 
 

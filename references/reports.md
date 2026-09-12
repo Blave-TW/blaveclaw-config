@@ -83,7 +83,10 @@ workspace sidebar shortly, then move on. Shipping it is the runtime's job: a 2-m
 timer picks the file up, so in the normal case the report appears within about two
 minutes. **Do not poll `status()`, and do not wait for `pending` to turn into `sent`
 before replying** — every extra tool call there is the user paying to watch a timer that
-has not fired yet.
+has not fired yet. **Never read `reports/<id>.json` back to check it either**: the uploader
+may already have moved it to `reports/sent/`, and the `FileNotFoundError` you get is the
+upload working, not a failure. If you need the document again, open
+`reports/sent/<id>.json`; `write_report` prints the same line.
 
 `status()` is a diagnostic for afterwards — the user says the report never showed up,
 or you have reason to think it was refused. That is the failure worth knowing about: a
@@ -145,6 +148,13 @@ publish(pack, narrative={
   flip, not what to buy or sell. Its thresholds are indicator or 籌碼 (flow / positioning)
   conditions only; how price stands against the listed highs / lows and moving averages is
   stated as a statistical fact (「今日收盤高於前 20 日高」), never as a trigger to watch for.
+  Wording that treats a level as a floor or a ceiling is support / resistance even without
+  those words: 「守在 60 日均線之上」, 「跌破 / 站回 20 日均線」, 「失守前 20 日低」. For an index, a
+  stock, a futures contract or a coin alike it never appears in the narrative (a statement
+  about 加權指數 reads as one about 台指期); state where the close sits as a figure
+  (「收盤高於 60 日均線 2.1%」). The `risk` threshold that voids the reading is an indicator or
+  籌碼 condition too, on an index as on any instrument, never a price or a moving-average
+  value (not 「收盤跌破 60 日均線 2,399.67 元,解讀作廢」).
   *Why:* support / resistance points and buy / sell prices
   handed to readers are what Taiwan's investment advisory rules single out, and the brief
   goes to the user as a finished document. A request worded as 操作建議 / a trade plan / key
@@ -159,10 +169,34 @@ publish(pack, narrative={
 - `pack.notes` lists what the source did not have (e.g. 期貨法人 not published yet, no night
   bars); the corresponding block is simply absent. Say so in the narrative if it matters;
   never fill the gap with a number.
+- **台指期夜盤 before 05:00 is a live price, not a close.** While the night session is still
+  trading, the pack labels it 「盤中,截至 HH:MM」 (Taipei) in the KPI and in `describe()`: write
+  it that way, never as 夜盤收. Only once the session's last bar is in does `describe()` say 收盤.
+- **Ask first, in one sentence, when the request does not pin down what to build**, and wait
+  for the answer:
+  - a symbol that does not exist or that you are unsure of (「0000」 is not a stock id:
+    「你是指加權指數嗎?」);
+  - a date in the future (「9/25 還沒有盤面資料:要今天的,還是 9/25 當天再出?」);
+  - the user names a report kind that sounds like a template but has none — a 收盤 / 盤後
+    report (「目前沒有收盤範本,我手寫一份台股盤後報告,可以嗎?」). Once they agree it is a
+    hand-written `morning` report (§7b) with its own id and title (`tw-close-20260911`,
+    「台股盤後…」); never publish it under `tw_market_brief`'s id — the same id on the same day
+    overwrites that day's morning brief.
 
-Run it from the workspace root so `lib` imports: `python3 -c '…'` from `/opt/blave-agent/workspace`, or
-`PYTHONPATH=/opt/blave-agent/workspace python3 tmp/make_brief.py` — `python3 tmp/x.py` alone puts `tmp/` on
-`sys.path`, not the workspace, and `from lib.report_templates import …` fails (seen on 29026, three retries).
+  A research report or a report the user describes in their own words (their own 週報) has
+  no template by design — build it, do not ask.
+
+**Running a script that imports `lib`.** Python puts the directory of the script it runs on
+`sys.path`, not the current directory, so `python3 tmp/make_brief.py` fails with
+`ModuleNotFoundError: No module named 'lib'` even from the workspace root (seen on Linux and
+Windows machines alike, on the first run of nearly every report). Any of these works on both:
+
+- `python3 -m tmp.make_brief` (module name, no `.py`) from the workspace root;
+- `python3 -c '…'` from the workspace root;
+- a script that pins the workspace before its first `from lib…`: `import os, sys` then
+  `sys.path.insert(0, os.getcwd())` when you start it from the workspace root, or
+  `sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))` in a
+  script one directory down (`tmp/x.py`), which then runs from any directory.
 
 Headers, if you need `lib.data` outside a template: `headers_from_env()` in the same module
 reads `blave_api_key` / `blave_secret_key` from the workspace `.env` (see `references/lib.md`).
@@ -476,6 +510,20 @@ as an observation, and never firm up a hedge to make the report read stronger. A
 sentence with nothing under it is a worse failure than a shallow one: the shallow report wastes
 the reader's time, the fabricated one loses them money. Every figure stays real or labelled.
 
+**Two checks on every figure before the report goes out:**
+
+- **A weekly or monthly change is measured from the previous period's last value.** This week's
+  融資 change = this Friday's balance − last Friday's, not − this Monday's (a Monday baseline
+  turned a +21.1 萬張 week into +5.68 萬張). Name both dates in the footnote. Take that
+  baseline from the earlier day's own `margin_balance`, never from `margin_balance_prev`:
+  TWSE adjusts 前日餘額 for corporate actions (a 1-for-20 split moved 9/7's by +99,692 張 against
+  9/4's actual balance), so mixing the two fields shifts the change. If you do use
+  `margin_balance_prev`, say in the report that the change excludes corporate actions.
+- **Every percent, annualised or ratio figure agrees with the rest of the report and carries
+  the right unit.** A return of 0.0755 is 7.55%, not 0.08%. Cross-check it against a figure you
+  already have: a +0.08% annual return cannot sit next to half-year returns that add up to
+  about +9.8% a year.
+
 ## 7b. Hand-written reports — presentation, and the research rules
 
 A report you build yourself with `write_report` — a research write-up, or a `morning` report
@@ -674,17 +722,37 @@ convenience):
   no seconds field, no month/weekday names. The web never displays the cron; it displays
   `schedule.human` and the next run time the runtime computes from the cron, which is how a
   mis-parse becomes visible — so restate the schedule when you register it (AGENTS.md).
+- **Time zone: the user's, converted to this machine's.** A time the user gives without a zone
+  is in the user's own zone — Asia/Taipei for a Taiwan user. The cron runs on this machine's
+  clock, which is often UTC. Check it once with
+  `python3 -c "import datetime; print(datetime.datetime.now().astimezone().strftime('%z'))"`
+  (`+0000` = UTC, `+0800` = Taipei), convert, and write both sides in the restatement:
+  「台北 08:30 = 本機 UTC 00:30 → `30 0 * * *`」. A conversion that crosses midnight moves the
+  weekday or date too: 台北週一 05:00 = UTC 週日 21:00 → `0 21 * * 0`. `schedule.human` is in
+  the user's time (「每週五 21:52(台北)」). *Why:* a Friday 21:52 Taipei report registered as
+  `52 21 * * 5` on a UTC machine runs at 05:52 on Saturday, Taipei time.
+- **Say in the restatement that the scheduled report is data only.** A scheduled run has no
+  agent behind it (§1b), so it carries the numbers and no 判讀; a reading only comes from
+  asking in chat. Tell the user before they confirm, e.g. 「排程版只有數據、沒有判讀;要判讀請在
+  對話裡叫我出。」
 - **Windows machines** only run this subset: `*/N * * * *` with N in
   1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30; `M */N * * *` with N in 1, 2, 3, 4, 6, 8, 12 (steps
   that divide the hour / day — for any other N the task scheduler counts from creation time
   and the next-run time shown to the user would be wrong); `M H * * *`; `M H * * D` (one
-  weekday digit); `M H D * *`. Anything else (`1-5` weekday ranges, `9,18` lists, `*/7`) is
-  not installed and shows as an error in the user's list — split it into several jobs or
-  pick the nearest expressible schedule and say so.
+  weekday digit); `M H D * *`. `register_schedule` does **not** refuse anything else (it only
+  checks cron grammar): a `1-5` range, a `9,18` list or `*/7` is written, never installed, and
+  shows in the user's list as `schedule not supported on Windows`. Check the form before you
+  register. 每週一至週五 08:30 (`30 0 * * 1-5` on a UTC machine) becomes five jobs,
+  `30 0 * * 1` … `30 0 * * 5`, each with its own id (`tw-morning-mon` … `tw-morning-fri`) and
+  all five counting toward the 20-job cap. For anything else, pick the nearest expressible
+  schedule and say so.
 
 `run.py` constraints — it runs exactly like a scheduled strategy:
 
-- cwd is the workspace; `lib/` imports work as usual.
+- cwd is the workspace, but the runtime starts it as `python3 report_jobs/<id>/run.py`, so
+  Python puts `report_jobs/<id>/` on `sys.path`, not the workspace: pin the workspace before
+  any `from lib…` (`sys.path.insert(0, os.getcwd())`, §1b). Try it once the same way:
+  `python3 report_jobs/<id>/run.py` from the workspace root.
 - Every `BLAVE_*` environment variable is stripped: no machine token, no direct API
   call to the platform. A report reaches the platform only by landing in `reports/` —
   `write_report(...)` or a template `publish(pack)` (§1b), with pictures in the sidecar (§5).

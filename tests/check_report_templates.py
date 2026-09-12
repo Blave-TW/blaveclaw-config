@@ -11,6 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np, pandas as pd
 from lib import data as d
 import lib.report_templates as T
+# 夜盤是否已收看「現在」;釘住時鐘,不讓結果跟著跑測試的時刻變。預設在合成資料的夜盤收完之後。
+T._now_tpe = lambda: pd.Timestamp("2026-09-02 09:00", tz="Asia/Taipei").to_pydatetime()
 
 KNOWN = {"meta", "kpi_row", "line_chart", "candlestick", "drawdown", "heatmap", "bar_chart", "histogram", "box",
          "scatter", "metric_table", "table", "text", "quote", "footnote", "code", "divider", "callout", "image"}
@@ -83,6 +85,7 @@ for name, pack in (("tw", T.tw_market_brief("2026-09-02", H)), ("crypto", T.cryp
             n_k = len(ks[0]["candles"]) if ks else 0
             check(len(ks) == 1 and ks[0]["title"] == price and n_k == 60, f"{tag}: 價格圖「{price}」是 K 線,{n_k} 根(範本統一 60 根,日 K 建議 40–65)")
             check(all(sound(k) and {"y_unit", "reflines"} <= set(k) for k in ks), f"{tag}: K 線高低包住開收、t 嚴格遞增,帶單位與 20 日參考線")
+            check(all(not r["emphasis"] for k in ks for r in k.get("reflines", [])), f"{tag}: 參考線都不強調(強調低點讀起來像標支撐)")
             check(doc["schema_version"] == "1.2", f"{tag}: 含 K 線 → schema_version 1.2")
             ref = {r["label"]: r["y"] for r in (ks[0].get("reflines", []) if ks else [])}
             prior = ks[0]["candles"][-21:-1] if ks else []   # 倒數第 2–21 根,不含當日
@@ -131,6 +134,28 @@ except ValueError:
 check(len([b for b in json.load(open(T.publish(T.tw_market_brief("2026-09-02", H), None, report_id="tw-k")))["blocks"] if b["type"] == "kpi_row"][0]["items"]) == 6
       and any(i["label"] == "台指期夜盤" for i in json.load(open(os.path.join(os.environ["BLAVE_AGENT_WORKSPACE"], "reports", "tw-k.json")))["blocks"][1]["items"]),
       "台股晨報六格 KPI 含台指期夜盤")
+p = T.tw_market_brief("2026-09-02", H)
+check(p.context["台指期夜盤"].split("(")[1].startswith("收盤;") and "最新價" not in json.dumps(p.blocks, ensure_ascii=False),
+      "夜盤已收(05:00 後、最後一根在):describe 寫收盤,footnote 不帶盤中說明")
+full_night = d.fetch_twfutures_ohlcv
+
+def night_case(last_bar, now, label, why):
+    """夜盤資料只到 last_bar(bar 起始時間)、現在是 now:KPI label 恰為 label,describe 同一句,不寫收盤,footnote 講最新價。"""
+    bars = hours[hours <= pd.Timestamp(last_bar, tz="Asia/Taipei")]
+    d.fetch_twfutures_ohlcv = lambda sym, sch, s, e, h: pd.DataFrame({"Open": 46800., "High": 46900., "Low": 46700., "Close": 46800., "Volume": 100}, index=bars.tz_convert("UTC"))
+    T._now_tpe = lambda: pd.Timestamp(now, tz="Asia/Taipei").to_pydatetime()
+    p = T.tw_market_brief("2026-09-02", H)
+    items = [x for x in p.blocks if x["type"] == "kpi_row"][0]["items"]
+    state = label[len("台指期夜盤("):-1]
+    foot = json.dumps([x for x in p.blocks if x["type"] == "footnote"], ensure_ascii=False)
+    check(any(i["label"] == label for i in items) and p.context["台指期夜盤"].split("(")[1].startswith(state + ";")
+          and "尚未收盤" not in foot and "不是收盤價" in foot, why)
+
+night_case("2026-09-01 21:00", "2026-09-01 22:30", "台指期夜盤(盤中,截至 22:00)", "夜盤盤中、api 已丟未收那根:標「盤中,截至 22:00」")
+night_case("2026-09-01 22:00", "2026-09-01 22:30", "台指期夜盤(盤中,截至 22:30)", "夜盤盤中、export 留著未收那根:時點取現在「截至 22:30」")
+night_case("2026-09-02 02:00", "2026-09-02 09:00", "台指期夜盤(截至 03:00,資料未含收盤)", "05:00 後資料缺尾:不標收盤,label 與 footnote 不自相矛盾")
+d.fetch_twfutures_ohlcv = full_night
+T._now_tpe = lambda: pd.Timestamp("2026-09-02 09:00", tz="Asia/Taipei").to_pydatetime()
 for bad, why in (({"lead": "x" * 601}, "超過字數上限"), ({"summary": "x"}, "未知槽位"), ({"action": "x"}, "舊的 action 槽位"),
                  ({"read": "見 [^nope]"}, "不存在的註腳引用")):
     try:
