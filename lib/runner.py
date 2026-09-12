@@ -893,7 +893,9 @@ def run(config, fetch_data_fn, compute_fn, send_telegram_fn=None):
         state  = load_state(strategy_name) or {
             'position': float(signals.ffill().fillna(0).iloc[-1]),
         }
-        signal = float(signals.iloc[-1])
+        # Same ffill as the backtest's pos: a tick that skipped bars (slow tick, fetch backoff)
+        # would otherwise lose any entry/exit on them for good; this way the next tick converges.
+        signal = float(signals.ffill().fillna(0).iloc[-1])
         logging.info(f"signal={signal:.4f} close={candle['close']}")
 
         update_state(candle, signal, state, mode,

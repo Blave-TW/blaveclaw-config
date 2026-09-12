@@ -150,5 +150,5 @@ schtasks /create /tn "blaveclaw-strategy-<name>" /tr "cmd /c cd /d %BLAVECLAW_HO
 ## Live vs Backtest
 Live trading uses the SAME script as backtest — only `MODE` changes. Keep `START` the same long date range as backtest so the website report shows full history. `END` is always `None` (backtest and live alike) — a pinned date caps the data fetch and freezes a deployed strategy's signals at that date, and quality_check flags it as CRITICAL.
 
-## State Initialisation (First Live Run)
-On the first live cron tick there is no `state.json` yet. The runner initialises state from the last signal: `signals.ffill().fillna(0).iloc[-1]`. This correctly reflects the current intended position without replaying history.
+## Live Position (Every Tick)
+Every live tick sets the position to `signals.ffill().fillna(0).iloc[-1]` — the same position the backtest holds on the last bar — including the first tick, when there is no `state.json` yet. A tick that skipped bars (slow tick, fetch backoff) therefore converges on the next tick instead of losing an entry/exit that landed on a skipped bar. Consequence: if a live strategy's parameters are edited in place, its position follows the new parameters on the very next tick — which is why live edits still go through fork-and-switch (`references/strategy-code.md` › *Editing a live strategy*).

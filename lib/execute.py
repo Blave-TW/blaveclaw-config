@@ -30,7 +30,10 @@ def update_state(candle, signal, state, mode, symbol=None, send_telegram_fn=None
     if symbol:
         state['symbol'] = symbol
     if math.isnan(new_pos):
-        return  # nan = hold: keep current position unchanged
+        # nan = hold: keep current position unchanged. lib/runner.py (Type A) ffills
+        # before calling, so it never passes nan; this branch serves direct callers —
+        # references/lib.md exposes update_state to agent-written (Type B) code.
+        return
 
     def _log(action):
         logging.info(f"{action} @ {price}")
