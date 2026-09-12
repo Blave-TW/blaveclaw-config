@@ -22,7 +22,9 @@ recompute a number the pack already carries.
     publish(pack)                          # no narrative = data pack only, id gets "-auto"
                                            # (a scheduled run: no LLM, no invented view)
 
-Templates: `tw_market_brief()`, `crypto_market_brief()`, `symbol_brief(symbol)`.
+Templates: `tw_market_brief()`, `tw_close_brief()`, `crypto_market_brief()`, `symbol_brief(symbol)`.
+A pack with `pack.skip` set (tw_close_brief on a non-trading day, or before today's close
+has landed) is never published: `publish()` prints why and returns None.
 Block shapes follow `references/reports.md` §3; the narrative rules are §7 (one
 claim in the lead, every number a cause or a comparison, write the other side).
 The pack never invents a value: a series the source does not have is a block
@@ -59,7 +61,7 @@ class Pack:
     (label → display string) that `describe()` prints for you to cite."""
 
     def __init__(self, report_id, title, type_, report_type, blocks, context, notes=None,
-                 meta=None):
+                 meta=None, skip=None):
         self.report_id = report_id
         self.title = title
         self.type = type_
@@ -68,10 +70,13 @@ class Pack:
         self.context = context
         self.notes = notes or []          # what is missing and why
         self.meta = meta or {}
+        self.skip = skip                  # reason this pack must not be published, or None
         self.slots = dict(SLOTS)
 
     def describe(self):
         lines = [f"[{self.report_id}] {self.title}"]
+        if self.skip:
+            lines.append(f"  不發佈: {self.skip}")
         lines += [f"  {k}: {v}" for k, v in self.context.items()]
         if self.notes:
             lines += ["  缺少:"] + [f"    - {n}" for n in self.notes]
@@ -491,6 +496,158 @@ def _txf_night_session(headers, day, notes):
     return {"close": close, "day_close": day_close, "chg": close / day_close - 1, "state": state, "done": done}
 
 
+# ─── template 1b: 台股收盤報告 ────────────────────────────────────────────────
+
+def _on_day(frame, day):
+    return frame is not None and len(frame) > 0 and frame.index[-1].strftime("%Y-%m-%d") == day
+
+
+def _pending(label, frame, day, notes):
+    last = frame.index[-1].strftime("%Y-%m-%d") if frame is not None and len(frame) else "無資料"
+    notes.append(f"{label} {day} 尚未公布(資料源最新為 {last}),本報告不列,不拿前一日的數字充當今日")
+
+
+def _closure(day, headers):
+    """(label, attribution or None) for a non-trading `day`. The attribution is the holiday
+    table's licence condition: whatever repeats the label must carry it verbatim."""
+    d = pd.Timestamp(day)
+    if d.weekday() >= 5:
+        return "週末", None
+    table = _data.fetch_twstock_holidays(headers, d.year)
+    if table is None:
+        return "休市", None
+    rows = table[table["date"] == d]
+    label = f"TWSE 休市表:{rows['name'].iloc[0]}" if len(rows) else "TWSE 休市表"
+    return label, table.attrs.get("source_zh") or table.attrs.get("source")
+
+
+def tw_close_brief(date=None, headers=None, lookback_days=90):
+    """台股收盤報告 data pack for trading day `date` (Taipei; default today): the day's
+    TAIEX close, turnover, 三大法人, 融資 and 外資期貨淨多單. The night session is not part
+    of it. A series that has not published `date` yet is left out and named in
+    `pack.notes` — never shown with the previous day's value.
+
+    `pack.skip` is set (and `publish` writes nothing) when `date` is not a trading day per
+    `lib.data.is_tw_trading_day`, or when the index has no close for `date` yet (not landed,
+    or an ad-hoc closure the holiday table does not list); the reason names the last
+    trading day. No sector breakdown: lib has no per-industry daily series, and building
+    one means a close fetch for every listed stock."""
+    headers = headers or headers_from_env()
+    # 下面拿日期字串跟資料日期逐字比對;不先正規化,「2026-9-1」會永遠對不上而被當成「收盤未入庫」跳過。
+    date = _data._taipei_date(date or _today_tpe()).strftime("%Y-%m-%d")
+    start = (datetime.strptime(date, "%Y-%m-%d") - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    rid, title = f"tw-close-{date.replace('-', '')}", "台股收盤報告"
+    notes, ctx, blocks, kpis, foot = [], {}, [], [], []
+
+    trading = _data.is_tw_trading_day(date, headers)
+    idx = _clean_ohlc(_data.fetch_twmarket_index(start, date, headers))
+    if len(idx) < 2:
+        raise ValueError("加權指數資料不足兩個交易日,無法產收盤報告")
+    last_day = idx.index[-1].strftime("%Y-%m-%d")
+    if trading is None:
+        notes.append("TWSE 休市表無法取得(端點未上線或該年度尚未公布),是否交易日改以今日有無加權指數收盤判斷")
+    skip = None
+    if trading is False:
+        label, src = _closure(date, headers)
+        skip = f"{date} 非交易日({label}),不產收盤報告;上一交易日 {last_day}"
+        if src:
+            ctx["休市表出處"] = src
+            skip += f"。休市表出處(轉述時原文照附):{src}"
+    elif last_day != date:
+        skip = (f"{date} 的加權指數收盤尚未入庫,或今日臨時停市(颱風停市不在休市表內);"
+                f"最近一個有收盤資料的交易日是 {last_day}")
+    if skip:
+        notes.append(skip)
+        ctx["上一交易日"] = last_day
+        return Pack(rid, title, "morning", title, [], ctx, notes, skip=skip)
+
+    close, prev = float(idx["Close"].iloc[-1]), float(idx["Close"].iloc[-2])
+    chg = close / prev - 1
+    high20, _ = _prior20(idx, notes)
+    ctx["資料日"] = date
+    ctx["加權指數"] = (f"{_num(close, 2)}({_signed(close - prev, 2)} 點,{_pct(chg * 100)})"
+                    + (f",前 20 日高 {_num(high20, 2)}" if high20 is not None else ""))
+    kpis.append(kpi("加權指數", _num(close, 2), _tone(chg), delta=_pct(chg * 100)))
+
+    turn = _data.fetch_twmarket_turnover(start, date, headers)
+    if _on_day(turn, date) and _finite(turn["value"].iloc[-1]):
+        val, avg5 = float(turn["value"].iloc[-1]), float(turn["value"].tail(5).mean())
+        ctx["成交值"] = f"{val / 1e12:.2f} 兆(5 日均 {avg5 / 1e12:.2f} 兆)"
+        kpis.append(kpi("成交值", f"{val / 1e12:.2f}", "neutral", unit="兆",
+                        delta=_pct((val / avg5 - 1) * 100) + " vs 5日均"))
+    else:
+        _pending("成交值", turn, date, notes)
+
+    inst = _data.fetch_twmarket_institutional(start, date, headers)
+    blocks_inst = None
+    if _on_day(inst, date) and all(_finite(inst[c].iloc[-1]) for c in ("foreign", "investment_trust", "dealer", "total")):
+        last = inst.iloc[-1]
+        f_prev = float(inst["foreign"].iloc[-2]) if len(inst) > 1 and _finite(inst["foreign"].iloc[-2]) else None
+        ctx["三大法人"] = (f"外資 {_tw_yi(last['foreign'])}(前一交易日 {_tw_yi(f_prev) if f_prev is not None else '—'})、"
+                        f"投信 {_tw_yi(last['investment_trust'])}、自營 {_tw_yi(last['dealer'])}、"
+                        f"合計 {_tw_yi(last['total'])}")
+        kpis.append(kpi("外資買賣超", _tw_yi(float(last["foreign"])), _tone(float(last["foreign"]))))
+        blocks_inst = bar_chart("三大法人買賣超(億元)",
+                                [("外資", last["foreign"] / 1e8), ("投信", last["investment_trust"] / 1e8),
+                                 ("自營商", last["dealer"] / 1e8)],
+                                caption=f"{date} 淨買賣超金額,億元;三大法人合計 {_tw_yi(float(last['total']))}")
+    else:
+        _pending("三大法人", inst, date, notes)
+
+    mg = _data.fetch_twmarket_margin(start, date, headers)
+    margin_ok = _on_day(mg, date) and _finite(mg["margin_balance"].iloc[-1])
+    if margin_ok:
+        m_last, m_prev = _last_two(mg["margin_balance"])
+        d_m = (m_last - m_prev) if m_prev is not None else 0.0
+        ctx["融資餘額"] = f"{m_last / 1e4:,.1f} 萬張({_signed(d_m / 1e4, 1)} 萬張)"
+        kpis.append(kpi("融資餘額", f"{m_last / 1e4:,.1f}", "neutral", unit="萬張",
+                        delta=f"{_signed(d_m / 1e4, 1)} 萬張"))
+        foot.append(("margin", "融資增減 = 今日餘額 − 前一交易日餘額(實際餘額變化)。TWSE 的「前日餘額」欄已含"
+                     "拆分、減資等公司行動調整,這類日子兩種算法會不同。"))
+    else:
+        _pending("融資餘額", mg, date, notes)
+
+    fut = None
+    try:
+        fut = _data.fetch_twfutures_institutional("TX", start, date, headers)
+    except Exception as e:
+        notes.append(f"期貨三大法人抓取失敗({type(e).__name__})")
+    fut_ok = fut is not None and _on_day(fut, date) and _finite(fut["foreign_net_oi"].iloc[-1])
+    if fut_ok:
+        f_last, f_prev = _last_two(fut["foreign_net_oi"])
+        d_f = (f_last - f_prev) if f_prev is not None else 0.0
+        ctx["外資期貨淨多單"] = f"{_signed(f_last)} 口({_signed(d_f)} 口)"
+        kpis.append(kpi("外資期貨淨多單", _signed(f_last), "neutral", unit="口", delta=_signed(d_f) + " 口"))
+        foot.append(("futinst", "期貨三大法人為 TAIFEX 日盤收盤後統計的未平倉淨口數(多 − 空)。"))
+    elif fut is not None:
+        _pending("外資期貨淨多單", fut, date, notes)
+
+    blocks.append(kpi_row(kpis))
+    ck = candlestick("加權指數", idx.tail(_PRICE_BARS), y_unit="點",
+                     reflines=[(high20, "前 20 日高", False)] if high20 is not None else None)
+    if ck:
+        blocks.append(ck)
+    if blocks_inst:
+        blocks.append(blocks_inst)
+    if margin_ok:
+        lc = line_chart("融資餘額", [("融資餘額", "primary", mg["margin_balance"] / 1e4)], y_unit="萬張")
+        if lc:
+            blocks.append(lc)
+    if fut_ok:
+        lc = line_chart("外資期貨淨多單", [("外資淨多單", "primary", fut["foreign_net_oi"])], y_unit="口",
+                        reflines=[(0.0, "0", False)])
+        if lc:
+            blocks.append(lc)
+    if date == _today_tpe():   # 經濟日曆只查得到「今天」;補產過去日期的報告不附別天的事件
+        cal = _calendar_rows(headers, notes, countries=["US", "CN", "TW", "JP", "EU"])
+        if cal:
+            blocks.append(table("今日總經事件", _CAL_COLUMNS, cal, caption="台北時間;priority 1–2 的事件"))
+    foot.append(("src", "指數、成交值、三大法人、融資餘額:TWSE 日資料,經 Blave API。三大法人為淨買賣超金額,融資餘額為張數。"
+                 "前 20 日高 = 不含當日的前 20 個交易日最高價。"))
+    blocks.append(footnote(foot))
+    return Pack(rid, title, "morning", title, blocks, ctx, notes)
+
+
 # ─── template 2: 加密市場晨報 ─────────────────────────────────────────────────
 
 def crypto_market_brief(date=None, headers=None, symbols=("BTC", "ETH", "SOL"), lookback_days=30):
@@ -724,7 +881,12 @@ def publish(pack, narrative=None, report_id=None, title=None, origin=None):
     `read`/`watch` become sections after the data blocks, `risk` a warning callout
     just before the footnote. No narrative = a data-only report — the honest form
     for a scheduled run, never a place for a made-up view.
-    origin: "chat" (default) or "scheduled" — shown in the report header."""
+    origin: "chat" (default) or "scheduled" — shown in the report header.
+    Returns None without writing when `pack.skip` is set."""
+    if pack.skip:
+        # 不 raise:排程跑到休市日要記成 skipped(exit 0、沒有新報告),raise 會變 failed 並發警報。
+        print(f"[{pack.report_id}] not published: {pack.skip}")
+        return None
     narrative = dict(narrative or {})
     if "action" in narrative:
         raise ValueError("'action' was renamed to 'watch' (觀察重點): conditions and indicator thresholds "

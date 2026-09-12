@@ -24,7 +24,7 @@ tech = df[df['industry_code'].isin(['24', '25'])].index.tolist()
 `industry_code` 是 TWSE/TPEx 原始數字代碼（passthrough，不是解碼過的名稱）。常用代碼：
 `15` 航運業、`17` 金融保險業、`22` 生技醫療業、`24` 半導體業、`25` 電腦及週邊設備業、
 `26` 光電業、`27` 通信網路業、`28` 電子零組件業、`29` 電子通路業、`30` 資訊服務業、
-`31` 其他電子業（完整清單見 TWSE/TPEx 公司基本資料;上面這份是常見科技/金融產業子集,不是全部)。
+`31` 其他電子業. Full 35-code map (listed and OTC share the codes): `TWSE_INDUSTRY_NAMES` / `twstock_industry_name(code)` in `lib/data.py`.
 
 **⚠️ Universe 抽樣規則 — 必須分散產業**
 

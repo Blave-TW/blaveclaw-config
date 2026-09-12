@@ -105,14 +105,14 @@ the picture yourself and reference it by `sha256` (§5), or leave it out.
 
 ## 1b. Templates — the data half is already written
 
-For the three morning-brief types the deterministic half lives in `lib/report_templates.py`.
+For the four template types (three morning briefs and the 台股收盤報告) the deterministic half lives in `lib/report_templates.py`.
 A template fetches every series through `lib.data`, builds the KPI row, charts, tables and
 the footnote in contract shape, and hands back a `Pack` with the figures it used
 (`pack.context`) and the narrative slots left for you (`pack.slots`). You add the
 judgement; you do not touch the blocks.
 
 ```python
-from lib.report_templates import tw_market_brief, crypto_market_brief, symbol_brief, publish
+from lib.report_templates import tw_market_brief, tw_close_brief, crypto_market_brief, symbol_brief, publish
 
 pack = tw_market_brief()                 # today (Taipei); headers come from the workspace .env
 print(pack.describe())                   # every figure the pack carries, one line each — cite these
@@ -137,6 +137,21 @@ publish(pack, narrative={
   moving averages (table 「近期高低與均線」: 前 20 日高/低 = the high / low of the 20 sessions before
   today, today excluded, so only today's bar can sit beyond it; 5/20/60 日均);
   `symbol_brief("BTC")` — crypto perp: price, funding, 爆倉 / 巨鯨 / 多空力道.
+- `tw_close_brief()` — 台股收盤報告, for any 台股 收盤 / 盤後 request: the day's TAIEX close,
+  turnover, 三大法人, 融資 and 外資期貨淨多單, with the same four slots and every rule on this page
+  that applies to `tw_market_brief`. Its id is `tw-close-YYYYMMDD` (Taipei date), so it never
+  overwrites that day's morning brief. The night session is not part of it; a question about
+  tonight's 夜盤 is answered on its own, labelled as live. 三大法人 / 融資 / 期貨法人 are published
+  after the close, at different times; one that is not out yet is absent and named in
+  `pack.notes`. Say it is not out yet; never quote the previous day's figure as today's. On a
+  non-trading day (weekend, or a row in the TWSE holiday table), or before today's close has
+  landed, `pack.skip` is set, `describe()` gives the reason and the last trading day, and
+  `publish()` writes nothing and returns None. Tell the user that; do not hand-write a
+  substitute. There is no sector breakdown. A report that cites the holiday table (「9/25
+  中秋節休市」) copies its attribution into the footnote verbatim (`references/lib.md` ›
+  *Taiwan market calendar*). A skip on a holiday-table day ends with that attribution
+  (also `pack.context['休市表出處']`); a reply telling the user the market is closed carries
+  it verbatim too.
 - Slots: `lead` becomes the opening card (one falsifiable claim), `read` (判讀) / `watch`
   (觀察重點) become sections after the data, `risk` a warning callout before the footnote. Each
   has a character cap (`pack.slots`); `publish` raises past it — cut, do not summarise.
@@ -177,11 +192,11 @@ publish(pack, narrative={
   - a symbol that does not exist or that you are unsure of (「0000」 is not a stock id:
     「你是指加權指數嗎?」);
   - a date in the future (「9/25 還沒有盤面資料:要今天的,還是 9/25 當天再出?」);
-  - the user names a report kind that sounds like a template but has none — a 收盤 / 盤後
-    report (「目前沒有收盤範本,我手寫一份台股盤後報告,可以嗎?」). Once they agree it is a
-    hand-written `morning` report (§7b) with its own id and title (`tw-close-20260911`,
-    「台股盤後…」); never publish it under `tw_market_brief`'s id — the same id on the same day
-    overwrites that day's morning brief.
+  - the user names a report kind that sounds like a template but has none, such as a 美股晨報
+    or a 加密收盤報告 (「目前沒有這個範本,我手寫一份,可以嗎?」). Once they agree, it is a
+    hand-written `morning` report (§7b) with its own id and title. Never publish it under a
+    template's id: the same id on the same day overwrites that template's report. A 台股 收盤 /
+    盤後 report is not this case: use `tw_close_brief`.
 
   A research report or a report the user describes in their own words (their own 週報) has
   no template by design — build it, do not ask.

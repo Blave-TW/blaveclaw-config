@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np, pandas as pd
 from lib import data as d
 import lib.report_templates as T
+_REAL_NOW_TPE = T._now_tpe
 # 夜盤是否已收看「現在」;釘住時鐘,不讓結果跟著跑測試的時刻變。預設在合成資料的夜盤收完之後。
 T._now_tpe = lambda: pd.Timestamp("2026-09-02 09:00", tz="Asia/Taipei").to_pydatetime()
 
@@ -41,11 +42,16 @@ for fn in ("fetch_funding_rate", "fetch_market_direction", "fetch_capital_shorta
 tw = ohlc(walk(900, .02)).assign(Volume=walk(30000, .3)); tw.index = tw.index.tz_localize("Asia/Taipei")
 d.fetch_twstock_ohlcv = lambda sid, sch, h, start=None, end=None, adjust=False: tw
 d.fetch_twstock_institutional = lambda sid, s, e, h: pd.DataFrame({"foreign_net": rng.normal(0, 5e6, n)}, index=days)
+HOL = pd.DataFrame({"date": pd.to_datetime(["2026-09-02"]), "name": ["測試休市"], "type": ["holiday"], "note": [None]})
+HOL_SRC = "臺灣證券交易所 2026 年有價證券集中交易市場開（休）市日期（測試出處全文）；https://data.gov.tw/license"
+HOL.attrs = {"source_zh": HOL_SRC, "source": "Taiwan Stock Exchange, 2026 (test)"}
+d.fetch_twstock_holidays = lambda h, year=None: HOL
 
 H = {"api-key": "x", "secret-key": "y"}
 NAR = {"lead": "一句可證偽的主張。", "read": "判讀。", "watch": "觀察條件。", "risk": "推翻條件。"}
 # name → (title of the one price chart, or None; line_chart titles that must stay line charts)
-PRICE = {"tw": ("加權指數", {"融資餘額", "外資期貨淨多單"}), "crypto": (None, {"BTC 資金費率", "Blave 市場指標(z-score)"}),
+PRICE = {"tw": ("加權指數", {"融資餘額", "外資期貨淨多單"}), "close": ("加權指數", {"融資餘額", "外資期貨淨多單"}),
+         "crypto": (None, {"BTC 資金費率", "Blave 市場指標(z-score)"}),
          "2330": ("2330 日 K", set()), "btc": ("BTC 日 K", {"資金費率", "Blave 指標(z-score)"})}
 fails = 0
 def check(cond, msg):
@@ -63,7 +69,8 @@ def sound(k):
     return all(c[3] <= min(c[1], c[4]) and max(c[1], c[4]) <= c[2] for c in k["candles"]) and \
         all(a[0] < z[0] and isinstance(a[0], int) for a, z in zip(k["candles"], k["candles"][1:]))
 
-for name, pack in (("tw", T.tw_market_brief("2026-09-02", H)), ("crypto", T.crypto_market_brief("2026-09-02", H)),
+for name, pack in (("tw", T.tw_market_brief("2026-09-02", H)), ("close", T.tw_close_brief("2026-09-01", H)),
+                   ("crypto", T.crypto_market_brief("2026-09-02", H)),
                    ("2330", T.symbol_brief("2330", "2026-09-02", H)), ("btc", T.symbol_brief("BTC", "2026-09-02", H))):
     for nar in (NAR, None):
         path = T.publish(pack, nar)
@@ -90,13 +97,13 @@ for name, pack in (("tw", T.tw_market_brief("2026-09-02", H)), ("crypto", T.cryp
             ref = {r["label"]: r["y"] for r in (ks[0].get("reflines", []) if ks else [])}
             prior = ks[0]["candles"][-21:-1] if ks else []   # 倒數第 2–21 根,不含當日
             want = {"前 20 日高": max(k[2] for k in prior), "前 20 日低": min(k[3] for k in prior)} if prior else {}
-            if name == "tw":
-                want.pop("前 20 日低", None)   # 大盤晨報只畫前 20 日高
+            if name in ("tw", "close"):
+                want.pop("前 20 日低", None)   # 大盤晨報、收盤報告只畫前 20 日高
             check(bool(want) and ref == want,
                   f"{tag}: 參考線恰為 {sorted(want)},值 = 倒數第 2–21 根的最高價/最低價")
             levels = {r["level"]: r["price"] for x in b if x["type"] == "table" and x.get("title") == "近期高低與均線" for r in x["rows"]}
             check(bool(want) and all(f"{k} {v:,.2f}" in pack.describe() for k, v in want.items())
-                  and (name == "tw" or all(levels.get(k) == f"{v:,.2f}" for k, v in want.items())),
+                  and (name in ("tw", "close") or all(levels.get(k) == f"{v:,.2f}" for k, v in want.items())),
                   f"{tag}: 參考線、近期高低與均線表、describe() 的前 20 日高/低同名同值")
         else:
             check(not ks and doc["schema_version"] == "1.1", f"{tag}: 沒有 K 線 → 維持 1.1")
@@ -155,6 +162,73 @@ night_case("2026-09-01 21:00", "2026-09-01 22:30", "台指期夜盤(盤中,截�
 night_case("2026-09-01 22:00", "2026-09-01 22:30", "台指期夜盤(盤中,截至 22:30)", "夜盤盤中、export 留著未收那根:時點取現在「截至 22:30」")
 night_case("2026-09-02 02:00", "2026-09-02 09:00", "台指期夜盤(截至 03:00,資料未含收盤)", "05:00 後資料缺尾:不標收盤,label 與 footnote 不自相矛盾")
 d.fetch_twfutures_ohlcv = full_night
+T._now_tpe = lambda: pd.Timestamp("2026-09-02 09:00", tz="Asia/Taipei").to_pydatetime()
+
+# ── 台股收盤報告:id / 夜盤 / 不發佈 / 法人未出 ──
+REPORTS = os.path.join(os.environ["BLAVE_AGENT_WORKSPACE"], "reports")
+def unwritten(rid):
+    return not any(os.path.exists(os.path.join(REPORTS, rid + s + ".json")) for s in ("", "-auto"))
+def skipped(p, why, *must):
+    ok = bool(p.skip) and not p.blocks and all(m in p.skip for m in must) and p.skip in p.notes and "不發佈" in p.describe()
+    check(ok and T.publish(p, NAR) is None and T.publish(p) is None and unwritten(p.report_id), why)
+
+p = T.tw_close_brief("2026-09-01", H)
+check(p.report_id == "tw-close-20260901" and p.title == "台股收盤報告" and p.type == "morning" and p.skip is None,
+      "收盤報告:id tw-close-YYYYMMDD、標題台股收盤報告、type morning")
+check("夜盤" not in json.dumps(p.blocks, ensure_ascii=False) + p.describe(), "收盤報告不含夜盤")
+p = T.tw_close_brief("2026-09-02", H)
+skipped(p, "休市表列為休市:不發佈,notes 講休市名稱、上一交易日,並附休市表出處全文", "測試休市", "上一交易日 2026-09-01", HOL_SRC)
+check(p.context.get("休市表出處") == HOL_SRC and HOL_SRC in p.describe(), "休市表出處全文進 context 與 describe()(授權條件)")
+d.fetch_twstock_holidays = lambda h, year=None: (_ for _ in ()).throw(AssertionError("週末不該查休市表"))
+skipped(T.tw_close_brief("2026-09-05", H), "週六:不查休市表就不發佈,指名上一交易日", "週末", "2026-09-01")
+d.fetch_twstock_holidays = lambda h, year=None: HOL
+skipped(T.tw_close_brief("2026-09-03", H), "交易日但指數還沒有當日收盤(未入庫或臨時停市):不拿舊收盤充當今日", "尚未入庫", "2026-09-01")
+d.fetch_twstock_holidays = lambda h, year=None: None
+skipped(T.tw_close_brief("2026-09-02", H), "休市表拿不到、當日無收盤:不發佈", "尚未入庫")
+p = T.tw_close_brief("2026-09-01", H)
+check(p.skip is None and any("休市表無法取得" in x for x in p.notes) and os.path.exists(T.publish(p, NAR)),
+      "休市表拿不到但當日有收盤:照發,notes 說明改用收盤資料判斷")
+d.fetch_twstock_holidays = lambda h, year=None: HOL
+
+full = {k: getattr(d, k) for k in ("fetch_twmarket_institutional", "fetch_twmarket_margin", "fetch_twfutures_institutional", "fetch_twmarket_turnover")}
+d.fetch_twmarket_institutional = lambda s, e, h: full["fetch_twmarket_institutional"](s, e, h).iloc[:-1]
+d.fetch_twmarket_margin = lambda s, e, h: full["fetch_twmarket_margin"](s, e, h).iloc[:-1]
+d.fetch_twfutures_institutional = lambda fid, s, e, h: full["fetch_twfutures_institutional"](fid, s, e, h).iloc[:-1]
+p = T.tw_close_brief("2026-09-01", H)
+labels = [i["label"] for x in p.blocks if x["type"] == "kpi_row" for i in x["items"]]
+body = json.dumps([x for x in p.blocks if x["type"] != "footnote"], ensure_ascii=False)   # 註腳的來源說明本來就列這些名稱
+check(p.skip is None and labels == ["加權指數", "成交值"] and "三大法人" not in body and "融資餘額" not in body
+      and "外資期貨淨多單" not in body and "08/31" not in body and "08-31" not in body
+      and all(any(x.startswith(f"{k} 2026-09-01 尚未公布(資料源最新為 2026-08-31)") for x in p.notes) for k in ("三大法人", "融資餘額", "外資期貨淨多單")),
+      "法人、融資、期貨法人當日未出:notes 寫尚未公布,區塊與 KPI 都不放前一日的數字")
+for k, fn in full.items():
+    setattr(d, k, fn)
+
+p = T.tw_close_brief("2026-9-1", H)
+check(p.report_id == "tw-close-20260901" and p.skip is None, "「2026-9-1」正規化成 2026-09-01:照發,不被逐字比對誤判成未入庫")
+p = T.tw_close_brief(pd.Timestamp("2026-08-31 17:00", tz="UTC"), H)
+check(p.report_id == "tw-close-20260901" and p.skip is None, "帶時區的 UTC 時間先換成台北日期(UTC 8/31 17:00 = 台北 9/1)")
+for bad in ("9/1", "2026/09/01", "20260901"):
+    try:
+        T.tw_close_brief(bad, H); check(False, f"日期「{bad}」要明確拒絕,不能靜默 skip")
+    except ValueError:
+        check(True, f"日期「{bad}」明確拒絕(ValueError),不靜默 skip")
+
+# 台北日期:機器時鐘是 UTC、時間落在 UTC 午夜前,台北已是隔天。改成 UTC 或拿掉 +8 都會拿到 9/11。
+from datetime import datetime as _RealDT, timezone as _tz
+_UTC_NOW = _RealDT(2026, 9, 11, 17, 30, tzinfo=_tz.utc)   # = 台北 2026-09-12 01:30
+class _ClockDT(_RealDT):
+    @classmethod
+    def now(cls, tz=None):
+        return _UTC_NOW.astimezone(tz) if tz else _UTC_NOW.replace(tzinfo=None)
+    @classmethod
+    def utcnow(cls):
+        return _UTC_NOW.replace(tzinfo=None)
+T.datetime, T._now_tpe = _ClockDT, _REAL_NOW_TPE
+p = T.tw_close_brief(headers=H)
+check(T._today_tpe() == "2026-09-12" and p.report_id == "tw-close-20260912",
+      "預設日期取台北(UTC 9/11 17:30 → tw-close-20260912),不是機器的 UTC 日期")
+T.datetime = _RealDT
 T._now_tpe = lambda: pd.Timestamp("2026-09-02 09:00", tz="Asia/Taipei").to_pydatetime()
 for bad, why in (({"lead": "x" * 601}, "超過字數上限"), ({"summary": "x"}, "未知槽位"), ({"action": "x"}, "舊的 action 槽位"),
                  ({"read": "見 [^nope]"}, "不存在的註腳引用")):

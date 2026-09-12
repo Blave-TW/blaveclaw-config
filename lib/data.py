@@ -8,7 +8,7 @@ import requests
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone, date as _date
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 try:
@@ -1833,7 +1833,7 @@ def fetch_twstock_list(headers):
     ETFs and other non-company securities have industry_code/listing_date = None/NaN
     (use .notna() to filter, not `is not None` — parquet round-trips None as NaN).
     industry_code is TWSE/TPEx's raw numeric 產業別 code (e.g. '24'=半導體業), not a
-    decoded name — group/filter by it, don't assume a fixed label mapping."""
+    decoded name — group/filter by it; twstock_industry_name(code) gives the name."""
     path = _twstock_list_cache_path()
     df = _load_fundamental_cache(path, max_age_days=1)
     if df is not None:
@@ -1855,6 +1855,34 @@ def fetch_twstock_info(stock_id, headers):
     if df.empty or stock_id not in df.index:
         return None
     return {'stock_id': stock_id, **df.loc[stock_id].to_dict()}
+
+
+# 上市、上櫃共用同一套代碼、同碼同名(TWSE/TPEx 公司基本資料 × ISIN 公告逐檔 join,零衝突)。
+# 07/13/19/34 目前沒有任何公司;32、33 只有上櫃,01/08/09/11/12/18/91 只有上市。
+TWSE_INDUSTRY_NAMES = {
+    '01': '水泥工業', '02': '食品工業', '03': '塑膠工業', '04': '紡織纖維', '05': '電機機械',
+    '06': '電器電纜', '08': '玻璃陶瓷', '09': '造紙工業', '10': '鋼鐵工業', '11': '橡膠工業',
+    '12': '汽車工業', '14': '建材營造業', '15': '航運業', '16': '觀光餐旅', '17': '金融保險業',
+    '18': '貿易百貨業', '20': '其他業', '21': '化學工業', '22': '生技醫療業', '23': '油電燃氣業',
+    '24': '半導體業', '25': '電腦及週邊設備業', '26': '光電業', '27': '通信網路業',
+    '28': '電子零組件業', '29': '電子通路業', '30': '資訊服務業', '31': '其他電子業',
+    '32': '文化創意業', '33': '農業科技業', '35': '綠能環保', '36': '數位雲端', '37': '運動休閒',
+    '38': '居家生活',
+    # ISIN 公告的產業別欄對 91 是空白;成員全是 -DR,名稱是我們依成員定的,不是官方標籤。
+    '91': '存託憑證',
+}
+
+
+def twstock_industry_name(code):
+    """TWSE/TPEx 產業別代碼 → 名稱 ('24' → '半導體業'). Accepts '24', 24 or '5'; None/NaN
+    (ETFs) → None; a code not in TWSE_INDUSTRY_NAMES comes back unchanged, never guessed."""
+    if code is None or (isinstance(code, float) and code != code):
+        return None
+    s = str(code).strip()
+    if not s:
+        return None
+    key = s.zfill(2) if s.isdigit() else s
+    return TWSE_INDUSTRY_NAMES.get(key, s)
 
 
 def fetch_twstock_market_value_all(headers, top=None):
@@ -2401,6 +2429,93 @@ def fetch_twmarket_dividend_points(start, end, headers):
         out = out[out.index <= pd.Timestamp(end)]
     out.attrs = dict(df.attrs)   # slicing must not drop the meta
     return out
+
+
+# ── Taiwan market calendar ────────────────────────────────────────────────────
+
+_HOLIDAY_MEMO = {}
+_HOLIDAY_MEMO_TTL = 3600
+_TPE = timezone(timedelta(hours=8))
+
+
+def _taipei_date(value):
+    """'YYYY-MM-DD' (zero padding optional: '2026-9-1' is fine), date, datetime or
+    Timestamp → the Taipei calendar date. A tz-aware value is converted to Taipei first;
+    a naive one is taken as Taipei already. Anything else raises instead of being guessed."""
+    if isinstance(value, str):
+        try:
+            return datetime.strptime(value.strip(), '%Y-%m-%d').date()
+        except ValueError:
+            raise ValueError(f"date must be 'YYYY-MM-DD' (Taipei), got {value!r}") from None
+    if isinstance(value, datetime):   # pd.Timestamp included
+        return (value.astimezone(_TPE) if value.tzinfo else value).date()
+    if isinstance(value, _date):
+        return value
+    raise TypeError(f"date must be 'YYYY-MM-DD', a date or a datetime, got {type(value).__name__}")
+
+
+def fetch_twstock_holidays(headers, year=None):
+    """TWSE 年度休市表 (annual market holiday schedule) for `year` (default: this Taipei year).
+
+    DataFrame, one row per listed day: date (Timestamp), name, type, note. type is
+    'holiday' or 'settlement_only' (市場無交易,僅辦理結算交割 — nothing trades that day either);
+    the table's 「…開始/最後交易日」 marker rows are already removed server-side. Weekend
+    dates may appear. **Ad-hoc closures (typhoon days) are never in it.**
+
+    df.attrs: year, source / source_zh (the licence attribution — copy one verbatim into
+    any report or reply that cites the table), note, stale (True = TWSE was unreachable
+    and this is the last stored copy).
+
+    Returns None — and prints why — when the endpoint is unreachable or TWSE has not
+    published that year (published:false). None means "unknown", never "no holidays"."""
+    if year is None:
+        year = datetime.now(_TPE).year
+    year = int(year)
+    hit = _HOLIDAY_MEMO.get(year)
+    if hit and time.time() - hit[0] < _HOLIDAY_MEMO_TTL:
+        return hit[1]
+    try:
+        # 5xx 預設退避約兩分鐘;休市表只是判斷用,拿不到就回 None,不值得讓報告卡那麼久。
+        r = _retry_get(f'{BASE}/studio/market/twmarket/holidays', headers=headers,
+                       params={'year': year}, timeout=20, max_retries=2)
+        payload = r.json()
+    except (requests.exceptions.RequestException, ValueError) as e:
+        print(f"  [holidays] {year}: holiday table unavailable ({type(e).__name__}) — trading-day status unknown")
+        return None
+    if not isinstance(payload, dict) or not payload.get('published') or not payload.get('data'):
+        reason = payload.get('reason') if isinstance(payload, dict) else None
+        what = ("the source no longer serves this year's table" if reason == 'not_available_from_source'
+                else "TWSE has not published this year's table")
+        print(f"  [holidays] {year}: {what} ({reason or 'published:false'}) "
+              f"— trading-day status unknown, not 'no holidays'")
+        return None
+    df = pd.DataFrame(payload['data'])
+    for col in ('name', 'type', 'note'):
+        if col not in df.columns:
+            df[col] = None
+    df['date'] = pd.to_datetime(df['date'])
+    df = df[['date', 'name', 'type', 'note']].sort_values('date').reset_index(drop=True)
+    df.attrs = {k: payload.get(k) for k in ('year', 'source', 'source_zh', 'note', 'stale')}
+    if payload.get('stale'):
+        print(f"  [holidays] {year}: WARNING TWSE unreachable, this is the last stored copy of the table")
+    _HOLIDAY_MEMO[year] = (time.time(), df)
+    return df
+
+
+def is_tw_trading_day(date, headers):
+    """Is `date` a TWSE trading day? 'YYYY-MM-DD', date, datetime or Timestamp; a tz-aware
+    value is converted to Taipei first, a naive one is taken as a Taipei date. True / False,
+    or None when unknown (holiday table unavailable or that year not published).
+    Saturday/Sunday → False without any fetch; a 'holiday' or 'settlement_only' row → False.
+    True only means "not in the official table": a typhoon closure is not in it."""
+    d = _taipei_date(date)
+    if d.weekday() >= 5:
+        return False
+    table = fetch_twstock_holidays(headers, d.year)
+    if table is None:
+        return None
+    closed = table[table['type'].isin(['holiday', 'settlement_only'])]['date'].dt.date
+    return d not in set(closed)
 
 
 # ── Taiwan futures data ───────────────────────────────────────────────────────
