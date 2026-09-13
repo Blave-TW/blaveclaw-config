@@ -6,7 +6,7 @@ one out-of-sample series.
 Usage:
     from lib.walk_forward import run_walk_forward, default_windows
 
-    lookback_days, step_days = default_windows(total_days)   # 365/30 (ratio fallback when short)
+    lookback_days, step_days = default_windows(total_days)   # 1095/30, 365/30 or 4:1 by length
     run_walk_forward(df, s.compute_signals, ENTRY_VALS, EXIT_VALS,
                      output_dir='strategies/<name>', row_param='ENTRY_TH',
                      col_param='EXIT_TH', fee=s.FEE, warmup=s.WARMUP,
@@ -72,10 +72,17 @@ import numpy as np
 
 from lib.param_scan import SCAN_MAX_AXIS, find_plateau, _finite_numbers
 
-# Rolling window defaults (see default_windows): a fixed one-year training window
-# re-optimised monthly — the same numbers the web prefills. The 4:1 ratio formula
-# (step = total/12 → 8 runs) is only the fallback for histories too short to cut
-# WF_MIN_RUNS runs out of 365/30.
+# Rolling window defaults (see default_windows), three tiers re-optimised monthly:
+# 1095/30 when the history cuts WF_MIN_RUNS runs out of it — a three-year training
+# window is closer to how users pick one fixed parameter set from the whole backtest;
+# 365/30 below that, because going straight to the ratio formula would hand 455–1184-day
+# histories a training window SHORTER than a year; the 4:1 ratio formula (step =
+# total/12 → 8 runs) only when even 365/30 cannot cut WF_MIN_RUNS runs. The step stays
+# 30 on every tier: the run count only sets how often the pick is redone — the
+# out-of-sample span is total days minus the training window either way.
+# The web's wfPreset (agent/workspace.html) is meant to prefill the same numbers —
+# change both together.
+WF_LONG_LOOKBACK_DAYS = 1095
 WF_DEFAULT_LOOKBACK_DAYS = 365
 WF_DEFAULT_STEP_DAYS = 30
 WF_TRAIN_MULT = 4
@@ -87,7 +94,7 @@ WF_STEP_MIN_DAYS = 30
 WF_MIN_RUNS = 3
 # Sanity bound on runs[], mirrored by the api (which refuses a longer list — the tab
 # would then stay blank). Not a workload limit: a run costs ~225 bytes in wf.json and
-# pass 2 is cheap; 365/30 on daily TW stock history from 1994 is ~370 runs.
+# pass 2 is cheap; 1095/30 on daily TW stock history from 1994 is ~360 runs as of 2026.
 WF_MAX_RUNS = 1000
 # In-sample Sharpe below this → no WFE at all (`wfe: null`). Dividing by a tiny or
 # negative denominator inverts the diagnosis: a strategy that was never strong
@@ -101,17 +108,19 @@ WF_MAX_POINTS = 4000
 
 
 def default_windows(total_days):
-    """(lookback_days, step_days) for `total_days` of history — the prefill the web
-    shows and the default here.
+    """(lookback_days, step_days) for `total_days` of history — the default when the
+    caller passes no window.
 
-    365 / 30 whenever the history can cut at least WF_MIN_RUNS runs out of it
-    (≥ 455 days). Shorter histories fall back to the ratio formula: step =
-    max(30, floor(total/12)), lookback = 4 × step (≈ 8 runs). floor, never round:
-    at 730 days round(60.83) = 61 yields 7 runs, floor yields the intended 8.
+    1095 / 30 whenever the history can cut at least WF_MIN_RUNS runs out of it
+    (≥ 1185 days), else 365 / 30 when that can (≥ 455 days). Shorter histories fall
+    back to the ratio formula: step = max(30, floor(total/12)), lookback = 4 × step
+    (≈ 8 runs). floor, never round: at 730 days round(60.83) = 61 yields 7 runs,
+    floor yields the intended 8.
     """
     total_days = int(total_days)
-    if total_days >= WF_DEFAULT_LOOKBACK_DAYS + WF_MIN_RUNS * WF_DEFAULT_STEP_DAYS:
-        return WF_DEFAULT_LOOKBACK_DAYS, WF_DEFAULT_STEP_DAYS
+    for lookback in (WF_LONG_LOOKBACK_DAYS, WF_DEFAULT_LOOKBACK_DAYS):
+        if total_days >= lookback + WF_MIN_RUNS * WF_DEFAULT_STEP_DAYS:
+            return lookback, WF_DEFAULT_STEP_DAYS
     step = max(WF_STEP_MIN_DAYS, total_days // WF_STEP_DIVISOR)
     return WF_TRAIN_MULT * step, step
 
@@ -317,7 +326,7 @@ def run_walk_forward(data, compute_signals_fn, row_vals, col_vals, output_dir,
     row_kw, col_kw    : the compute_signals kwarg names (default 'entry_th'/'exit_th').
     lookback_days,
     step_days         : training window / re-optimisation step in days. None → the
-                        default_windows() prefill (365 / 30; 4:1 ratio when the history is short).
+                        default_windows() tiers (1095 / 30, 365 / 30, 4:1 ratio by length).
     valid_fn          : (row_val, col_val) → bool, as in scan_grid (Type A default:
                         row > col).
     warmup            : leading bars every training slice skips — see the module

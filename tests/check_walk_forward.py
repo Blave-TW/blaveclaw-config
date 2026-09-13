@@ -56,8 +56,10 @@ def compute_signals(df, entry_th=0.0, exit_th=0.0):
 
 
 # ── default windows: floor, never round ───────────────────────────────────────
-check(default_windows(730) == (365, 30) and default_windows(455) == (365, 30)
-      and default_windows(1700) == (365, 30), f"≥ 455 天一律 365/30 → {default_windows(730)}")
+check(all(default_windows(d) == (1095, 30) for d in (1185, 1700)),
+      f"≥ 1185 天用 1095/30 → {default_windows(1185)}")
+check(all(default_windows(d) == (365, 30) for d in (455, 730, 1184)),
+      f"455–1184 天維持 365/30(不掉進比例公式)→ {default_windows(1184)}")
 check(default_windows(454) == (148, 37) and default_windows(365) == (120, 30),
       "不夠切 3 輪的短資料退回比例公式(4:1、floor)")
 check(default_windows(120) == (120, 30), "短資料仍守 30 天步長下限")
